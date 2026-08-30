@@ -68,9 +68,6 @@ unsafe extern "system" fn tray_wnd_proc(
                         if overlay.mode == AppMode::StaticZoom {
                             overlay.exit_overlay();
                         } else {
-                            if overlay.live_zoom.is_active() {
-                                overlay.live_zoom.stop();
-                            }
                             overlay.enter_static_zoom();
                         }
                     }
@@ -78,9 +75,6 @@ unsafe extern "system" fn tray_wnd_proc(
                         if overlay.mode == AppMode::Draw {
                             overlay.exit_overlay();
                         } else {
-                            if overlay.live_zoom.is_active() {
-                                overlay.live_zoom.stop();
-                            }
                             overlay.enter_draw_mode();
                         }
                     }
@@ -90,9 +84,6 @@ unsafe extern "system" fn tray_wnd_proc(
                         } else if overlay.mode == AppMode::StaticZoom || overlay.mode == AppMode::Draw {
                             overlay.toggle_spotlight();
                         } else {
-                            if overlay.live_zoom.is_active() {
-                                overlay.live_zoom.stop();
-                            }
                             overlay.enter_spotlight_mode();
                         }
                     }
