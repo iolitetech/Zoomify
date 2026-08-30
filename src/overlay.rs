@@ -13,7 +13,7 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_F1, VK_MENU,
+    GetKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_ESCAPE, VK_F1, VK_MENU,
     VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -351,6 +351,7 @@ impl OverlayWindow {
 
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             let _ = SetForegroundWindow(self.hwnd);
+            let _ = SetFocus(Some(self.hwnd));
             self.request_repaint();
         }
     }
@@ -375,7 +376,6 @@ impl OverlayWindow {
     pub fn request_repaint(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
-            let _ = windows::Win32::Graphics::Gdi::UpdateWindow(self.hwnd);
         }
     }
 

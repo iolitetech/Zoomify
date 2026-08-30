@@ -65,19 +65,35 @@ unsafe extern "system" fn tray_wnd_proc(
 
                 match hotkey_id {
                     HOTKEY_STATIC_ZOOM => {
-                        overlay.enter_static_zoom();
+                        if overlay.mode == AppMode::StaticZoom {
+                            overlay.exit_overlay();
+                        } else {
+                            if overlay.live_zoom.is_active() {
+                                overlay.live_zoom.stop();
+                            }
+                            overlay.enter_static_zoom();
+                        }
                     }
                     HOTKEY_DRAW => {
-                        overlay.enter_draw_mode();
+                        if overlay.mode == AppMode::Draw {
+                            overlay.exit_overlay();
+                        } else {
+                            if overlay.live_zoom.is_active() {
+                                overlay.live_zoom.stop();
+                            }
+                            overlay.enter_draw_mode();
+                        }
                     }
                     HOTKEY_SPOTLIGHT => {
-                        match overlay.mode {
-                            AppMode::StaticZoom | AppMode::Draw | AppMode::Spotlight => {
-                                overlay.toggle_spotlight();
+                        if overlay.mode == AppMode::Spotlight {
+                            overlay.exit_overlay();
+                        } else if overlay.mode == AppMode::StaticZoom || overlay.mode == AppMode::Draw {
+                            overlay.toggle_spotlight();
+                        } else {
+                            if overlay.live_zoom.is_active() {
+                                overlay.live_zoom.stop();
                             }
-                            _ => {
-                                overlay.enter_spotlight_mode();
-                            }
+                            overlay.enter_spotlight_mode();
                         }
                     }
                     HOTKEY_LIVE_ZOOM => {
@@ -87,8 +103,7 @@ unsafe extern "system" fn tray_wnd_proc(
                             overlay.hide_window();
                         } else {
                             if overlay.mode != AppMode::Idle {
-                                overlay.spotlight.active = false;
-                                overlay.hide_window();
+                                overlay.exit_overlay();
                             }
                             overlay.enter_live_zoom();
                         }
