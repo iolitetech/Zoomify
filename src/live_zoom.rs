@@ -3,10 +3,7 @@
 use windows::core::{s, BOOL};
 use windows::Win32::Foundation::{HMODULE, POINT};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics};
 
 type MagInitFn = unsafe extern "system" fn() -> BOOL;
 type MagUninitFn = unsafe extern "system" fn() -> BOOL;
@@ -161,22 +158,20 @@ impl LiveZoomEngine {
         unsafe {
             let mut pt = POINT::default();
             if GetCursorPos(&mut pt).is_ok() {
-                let screen_x = GetSystemMetrics(SM_XVIRTUALSCREEN) as f32;
-                let screen_y = GetSystemMetrics(SM_YVIRTUALSCREEN) as f32;
-                let screen_w = GetSystemMetrics(SM_CXVIRTUALSCREEN) as f32;
-                let screen_h = GetSystemMetrics(SM_CYVIRTUALSCREEN) as f32;
+                let screen_w = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
+                let screen_h = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
 
                 let view_w = screen_w / self.zoom_level;
                 let view_h = screen_h / self.zoom_level;
 
-                let target_x = (pt.x as f32 - screen_x) - (view_w / 2.0);
-                let target_y = (pt.y as f32 - screen_y) - (view_h / 2.0);
+                let target_x = (pt.x as f32) - (view_w / 2.0);
+                let target_y = (pt.y as f32) - (view_h / 2.0);
 
                 let max_x = (screen_w - view_w).max(0.0);
                 let max_y = (screen_h - view_h).max(0.0);
 
-                self.target_x_offset = screen_x + target_x.clamp(0.0, max_x);
-                self.target_y_offset = screen_y + target_y.clamp(0.0, max_y);
+                self.target_x_offset = target_x.clamp(0.0, max_x);
+                self.target_y_offset = target_y.clamp(0.0, max_y);
             }
         }
     }
@@ -199,10 +194,17 @@ impl LiveZoomEngine {
         if self.is_active {
             if let Some(set_fn) = self.mag_set_transform {
                 unsafe {
+                    let screen_w = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
+                    let screen_h = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
+                    let max_x = (screen_w - (screen_w / self.zoom_level)).max(0.0);
+                    let max_y = (screen_h - (screen_h / self.zoom_level)).max(0.0);
+                    let clamped_x = self.current_x_offset.clamp(0.0, max_x).round() as i32;
+                    let clamped_y = self.current_y_offset.clamp(0.0, max_y).round() as i32;
+
                     let _ = set_fn(
                         self.zoom_level,
-                        self.current_x_offset.round() as i32,
-                        self.current_y_offset.round() as i32,
+                        clamped_x,
+                        clamped_y,
                     );
                 }
             }
