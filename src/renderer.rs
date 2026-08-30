@@ -27,7 +27,7 @@ use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC, SelectObject,
     BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, RGBQUAD,
 };
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::capture::ScreenCapture;
 use crate::shapes::{calculate_arrow_head, normalize_rect};
@@ -222,50 +222,47 @@ impl D2DRenderer {
             };
             rt.Clear(Some(&clear_color));
 
+            let identity = Matrix3x2 {
+                M11: 1.0,
+                M12: 0.0,
+                M21: 0.0,
+                M22: 1.0,
+                M31: 0.0,
+                M32: 0.0,
+            };
+
+            let z = zoom_state.level.max(1.0);
+            let canvas_matrix = if z > 1.001 {
+                Matrix3x2 {
+                    M11: z,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: z,
+                    M31: -zoom_state.view_x * z,
+                    M32: -zoom_state.view_y * z,
+                }
+            } else {
+                identity
+            };
+
+            // ── Canvas Layer (Background + Spotlight + Shapes + Active Shape + Text Input) ──
+            rt.SetTransform(&canvas_matrix);
+
             if bg_type == CanvasBackground::Transparent {
                 if let Some(bitmap) = bg_bitmap {
-                    if (mode == AppMode::StaticZoom || mode == AppMode::Draw) && zoom_state.level > 1.01 {
-                        let z = zoom_state.level;
-                        let src_w = width / z;
-                        let src_h = height / z;
-                        let src_x = (zoom_state.center_x - src_w / 2.0 - zoom_state.offset_x / z).clamp(0.0, width - src_w);
-                        let src_y = (zoom_state.center_y - src_h / 2.0 - zoom_state.offset_y / z).clamp(0.0, height - src_h);
-
-                        let src_rect = D2D_RECT_F {
-                            left: src_x,
-                            top: src_y,
-                            right: src_x + src_w,
-                            bottom: src_y + src_h,
-                        };
-                        let dst_rect = D2D_RECT_F {
-                            left: 0.0,
-                            top: 0.0,
-                            right: width,
-                            bottom: height,
-                        };
-
-                        rt.DrawBitmap(
-                            bitmap,
-                            Some(&dst_rect),
-                            1.0,
-                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                            Some(&src_rect),
-                        );
-                    } else {
-                        let dst_rect = D2D_RECT_F {
-                            left: 0.0,
-                            top: 0.0,
-                            right: width,
-                            bottom: height,
-                        };
-                        rt.DrawBitmap(
-                            bitmap,
-                            Some(&dst_rect),
-                            1.0,
-                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                            None,
-                        );
-                    }
+                    let dst_rect = D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: width,
+                        bottom: height,
+                    };
+                    rt.DrawBitmap(
+                        bitmap,
+                        Some(&dst_rect),
+                        1.0,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                        None,
+                    );
                 }
             }
 
@@ -291,6 +288,9 @@ impl D2DRenderer {
                     == 0;
                 self.render_text_editor(rt, pos, text, color, font_size, show_caret);
             }
+
+            // ── Screen Space Layer (Snip Overlay + Timer + HUD + Toast + Modal) ──
+            rt.SetTransform(&identity);
 
             if let Some(snip_sel) = snip {
                 if snip_sel.active {

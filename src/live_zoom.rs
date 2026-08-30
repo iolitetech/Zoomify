@@ -3,7 +3,10 @@
 use windows::core::{s, BOOL};
 use windows::Win32::Foundation::{HMODULE, POINT};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN,
+};
 
 type MagInitFn = unsafe extern "system" fn() -> BOOL;
 type MagUninitFn = unsafe extern "system" fn() -> BOOL;
@@ -154,20 +157,22 @@ impl LiveZoomEngine {
         unsafe {
             let mut pt = POINT::default();
             if GetCursorPos(&mut pt).is_ok() {
-                let screen_w = GetSystemMetrics(SM_CXSCREEN) as f32;
-                let screen_h = GetSystemMetrics(SM_CYSCREEN) as f32;
+                let screen_x = GetSystemMetrics(SM_XVIRTUALSCREEN) as f32;
+                let screen_y = GetSystemMetrics(SM_YVIRTUALSCREEN) as f32;
+                let screen_w = GetSystemMetrics(SM_CXVIRTUALSCREEN) as f32;
+                let screen_h = GetSystemMetrics(SM_CYVIRTUALSCREEN) as f32;
 
                 let view_w = screen_w / self.zoom_level;
                 let view_h = screen_h / self.zoom_level;
 
-                let target_x = (pt.x as f32) - (view_w / 2.0);
-                let target_y = (pt.y as f32) - (view_h / 2.0);
+                let target_x = (pt.x as f32 - screen_x) - (view_w / 2.0);
+                let target_y = (pt.y as f32 - screen_y) - (view_h / 2.0);
 
                 let max_x = (screen_w - view_w).max(0.0);
                 let max_y = (screen_h - view_h).max(0.0);
 
-                self.target_x_offset = target_x.clamp(0.0, max_x);
-                self.target_y_offset = target_y.clamp(0.0, max_y);
+                self.target_x_offset = screen_x + target_x.clamp(0.0, max_x);
+                self.target_y_offset = screen_y + target_y.clamp(0.0, max_y);
             }
         }
     }

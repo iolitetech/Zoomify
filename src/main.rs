@@ -63,7 +63,13 @@ unsafe extern "system" fn tray_wnd_proc(
                 let hotkey_id = wparam.0 as i32;
                 let mut overlay = ctx.overlay.borrow_mut();
 
-                if hotkey_id != HOTKEY_LIVE_ZOOM && overlay.live_zoom.is_active() {
+                if hotkey_id != HOTKEY_LIVE_ZOOM 
+                    && hotkey_id != HOTKEY_LIVE_ZOOM_IN 
+                    && hotkey_id != HOTKEY_LIVE_ZOOM_OUT 
+                    && hotkey_id != HOTKEY_LIVE_ZOOM_IN_PLUS 
+                    && hotkey_id != HOTKEY_LIVE_ZOOM_OUT_MINUS 
+                    && overlay.live_zoom.is_active() 
+                {
                     overlay.live_zoom.stop();
                 }
 
@@ -97,6 +103,18 @@ unsafe extern "system" fn tray_wnd_proc(
                             overlay.enter_live_zoom();
                         }
                     }
+                    HOTKEY_LIVE_ZOOM_IN | HOTKEY_LIVE_ZOOM_IN_PLUS => {
+                        if overlay.live_zoom.is_active() {
+                            overlay.live_zoom.adjust_zoom(0.25);
+                        } else {
+                            overlay.enter_live_zoom();
+                        }
+                    }
+                    HOTKEY_LIVE_ZOOM_OUT | HOTKEY_LIVE_ZOOM_OUT_MINUS => {
+                        if overlay.live_zoom.is_active() {
+                            overlay.live_zoom.adjust_zoom(-0.25);
+                        }
+                    }
                     HOTKEY_TIMER => {
                         overlay.enter_timer_mode(10);
                     }
@@ -104,6 +122,14 @@ unsafe extern "system" fn tray_wnd_proc(
                         overlay.enter_snip_mode();
                     }
                     _ => {}
+                }
+                LRESULT(0)
+            }
+
+            windows::Win32::UI::WindowsAndMessaging::WM_TIMER => {
+                let mut overlay = ctx.overlay.borrow_mut();
+                if overlay.live_zoom.is_active() {
+                    overlay.live_zoom.tick_smooth_pan(0.25);
                 }
                 LRESULT(0)
             }
@@ -268,6 +294,8 @@ fn main() -> Result<()> {
         let mut tray = TrayIcon::new(tray_hwnd);
         let mut hotkeys = HotkeyManager::new(tray_hwnd);
         hotkeys.register_all();
+
+        windows::Win32::UI::WindowsAndMessaging::SetTimer(Some(tray_hwnd), 1, 16, None);
 
         // Show non-intrusive Windows tray notification balloon
         tray.show_balloon(

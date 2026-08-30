@@ -172,27 +172,31 @@ impl OverlayWindow {
     pub fn enter_static_zoom(&mut self) {
         self.mode = AppMode::StaticZoom;
         self.capture_current_screen();
-        self.zoom.level = 2.0;
 
+        let mut cursor_screen = Point2D::new(self.screen_width as f32 / 2.0, self.screen_height as f32 / 2.0);
         unsafe {
             let mut pt = POINT::default();
             if GetCursorPos(&mut pt).is_ok() {
-                self.zoom.center_x = (pt.x - self.screen_x) as f32;
-                self.zoom.center_y = (pt.y - self.screen_y) as f32;
-            } else {
-                self.zoom.center_x = self.screen_width as f32 / 2.0;
-                self.zoom.center_y = self.screen_height as f32 / 2.0;
+                cursor_screen = Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
             }
         }
-        self.zoom.offset_x = 0.0;
-        self.zoom.offset_y = 0.0;
+        self.zoom.set_zoom_centered(2.0, cursor_screen, self.screen_width as f32, self.screen_height as f32);
         self.show_window();
-        self.set_toast("🔎", "Static Zoom (Wheel: Zoom | Drag: Pan | Click: Draw)");
+        self.set_toast("🔎", "Static Zoom (Wheel: Zoom | Move: Pan | Click: Draw)");
     }
 
     pub fn enter_draw_mode(&mut self) {
+        let was_idle = self.mode == AppMode::Idle;
         self.mode = AppMode::Draw;
-        self.capture_current_screen();
+        if was_idle {
+            self.capture_current_screen();
+            self.zoom.level = 1.0;
+            self.zoom.target_level = 1.0;
+            self.zoom.view_x = 0.0;
+            self.zoom.view_y = 0.0;
+            self.zoom.target_view_x = 0.0;
+            self.zoom.target_view_y = 0.0;
+        }
         self.show_window();
         self.set_toast("✏️", "Draw Mode (P/H/L/A/R/U/E/T/N • r/g/b/y/o/p/c • Shift: Snip)");
     }
@@ -261,6 +265,7 @@ impl OverlayWindow {
         self.show_cheat_sheet = false;
         self.background_bitmap = None;
         self.background_capture = None;
+        self.zoom = ZoomState::default();
         self.hide_window();
     }
 
@@ -499,9 +504,17 @@ impl OverlayWindow {
                 WM_TIMER => {
                     if wparam.0 == TIMER_ID_ANIMATION {
                         let mut needs_paint = false;
+                        let sw = this.screen_width as f32;
+                        let sh = this.screen_height as f32;
+
+                        if this.mode == AppMode::StaticZoom {
+                            if this.zoom.tick_smooth_pan(0.25, sw, sh) {
+                                needs_paint = true;
+                            }
+                        }
 
                         if this.mode == AppMode::LiveZoom {
-                            this.live_zoom.tick_smooth_pan(0.2);
+                            this.live_zoom.tick_smooth_pan(0.25);
                         }
 
                         if this.mode == AppMode::Timer && !this.timer_paused {
@@ -538,32 +551,38 @@ impl OverlayWindow {
                 WM_MOUSEMOVE => {
                     let x = (lparam.0 & 0xFFFF) as i16 as f32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
-                    let current_pt = Point2D::new(x, y);
+                    let screen_pt = Point2D::new(x, y);
+                    let canvas_pt = this.zoom.screen_to_canvas(screen_pt);
+                    let sw = this.screen_width as f32;
+                    let sh = this.screen_height as f32;
 
                     if this.spotlight.active && !this.spotlight.pinned {
-                        this.spotlight.x = x;
-                        this.spotlight.y = y;
+                        this.spotlight.x = canvas_pt.x;
+                        this.spotlight.y = canvas_pt.y;
                         this.request_repaint();
                     }
 
                     if this.snip.active {
-                        this.snip.current = current_pt;
+                        this.snip.current = screen_pt;
                         this.request_repaint();
                         return LRESULT(0);
                     }
 
-                    if this.mode == AppMode::StaticZoom && !this.is_drawing {
-                        this.zoom.center_x = x;
-                        this.zoom.center_y = y;
+                    if this.mode == AppMode::StaticZoom && !this.is_drawing && !this.zoom.is_dragging {
+                        this.zoom.update_target_from_cursor(x, y, sw, sh);
                         this.request_repaint();
                         return LRESULT(0);
                     }
 
                     if this.zoom.is_dragging {
-                        let dx = current_pt.x - this.zoom.drag_start_mouse.x;
-                        let dy = current_pt.y - this.zoom.drag_start_mouse.y;
-                        this.zoom.offset_x = this.zoom.drag_start_offset.x + dx;
-                        this.zoom.offset_y = this.zoom.drag_start_offset.y + dy;
+                        let z = this.zoom.level.max(1.0);
+                        let dx = (screen_pt.x - this.zoom.drag_start_mouse.x) / z;
+                        let dy = (screen_pt.y - this.zoom.drag_start_mouse.y) / z;
+                        this.zoom.target_view_x = this.zoom.drag_start_view.x - dx;
+                        this.zoom.target_view_y = this.zoom.drag_start_view.y - dy;
+                        this.zoom.clamp_viewport(sw, sh);
+                        this.zoom.view_x = this.zoom.target_view_x;
+                        this.zoom.view_y = this.zoom.target_view_y;
                         this.request_repaint();
                         return LRESULT(0);
                     }
@@ -574,38 +593,38 @@ impl OverlayWindow {
 
                         match &mut this.active_shape {
                             Some(Shape::Stroke { points, .. }) => {
-                                points.push(current_pt);
+                                points.push(canvas_pt);
                                 this.request_repaint();
                             }
                             Some(Shape::Line { end, .. }) => {
                                 *end = if is_shift {
-                                    snap_to_angle(start_pt, current_pt)
+                                    snap_to_angle(start_pt, canvas_pt)
                                 } else {
-                                    current_pt
+                                    canvas_pt
                                 };
                                 this.request_repaint();
                             }
                             Some(Shape::Arrow { end, .. }) => {
                                 *end = if is_shift {
-                                    snap_to_angle(start_pt, current_pt)
+                                    snap_to_angle(start_pt, canvas_pt)
                                 } else {
-                                    current_pt
+                                    canvas_pt
                                 };
                                 this.request_repaint();
                             }
                             Some(Shape::Rectangle { end, .. }) => {
                                 *end = if is_shift {
-                                    snap_to_square(start_pt, current_pt)
+                                    snap_to_square(start_pt, canvas_pt)
                                 } else {
-                                    current_pt
+                                    canvas_pt
                                 };
                                 this.request_repaint();
                             }
                             Some(Shape::Ellipse { end, .. }) => {
                                 *end = if is_shift {
-                                    snap_to_square(start_pt, current_pt)
+                                    snap_to_square(start_pt, canvas_pt)
                                 } else {
-                                    current_pt
+                                    canvas_pt
                                 };
                                 this.request_repaint();
                             }
@@ -619,20 +638,21 @@ impl OverlayWindow {
                 WM_LBUTTONDOWN => {
                     let x = (lparam.0 & 0xFFFF) as i16 as f32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
-                    let pt = Point2D::new(x, y);
+                    let screen_pt = Point2D::new(x, y);
+                    let canvas_pt = this.zoom.screen_to_canvas(screen_pt);
 
                     let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
                     let is_ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
                     let is_tab = (GetKeyState(VK_TAB.0 as i32) as u16 & 0x8000) != 0;
 
-                    // If in Static Zoom mode, first left click transitions into Draw mode AND starts drawing immediately
+                    // If in Static Zoom mode, clicking locks the viewport and transitions into Draw mode while starting the stroke immediately
                     if this.mode == AppMode::StaticZoom {
                         this.mode = AppMode::Draw;
-                        this.set_toast("✏️", "Switched to Draw Mode");
+                        this.set_toast("✏️", "Draw Mode");
                         this.is_drawing = true;
-                        this.draw_start_pt = pt;
+                        this.draw_start_pt = canvas_pt;
                         this.active_shape = Some(Shape::Stroke {
-                            points: vec![pt],
+                            points: vec![canvas_pt],
                             color: this.current_color,
                             width: this.stroke_width,
                             is_highlighter: false,
@@ -643,8 +663,8 @@ impl OverlayWindow {
 
                     if this.current_tool == DrawTool::Snip || (is_shift && is_ctrl && !is_tab) {
                         this.snip.active = true;
-                        this.snip.start = pt;
-                        this.snip.current = pt;
+                        this.snip.start = screen_pt;
+                        this.snip.current = screen_pt;
                         this.request_repaint();
                         return LRESULT(0);
                     }
@@ -653,7 +673,7 @@ impl OverlayWindow {
                         this.commit_text_editor();
                         let cur_col = this.current_color;
                         let cur_sz = this.stroke_width * 3.5 + 16.0;
-                        this.text_editor = Some((pt, String::new(), cur_col, cur_sz));
+                        this.text_editor = Some((canvas_pt, String::new(), cur_col, cur_sz));
                         this.request_repaint();
                         return LRESULT(0);
                     }
@@ -663,7 +683,7 @@ impl OverlayWindow {
                         let rad = this.stroke_width * 1.5 + 14.0;
                         let col = this.current_color;
                         this.push_shape(Shape::StepBadge {
-                            center: pt,
+                            center: canvas_pt,
                             number: num,
                             radius: rad,
                             color: col,
@@ -674,7 +694,7 @@ impl OverlayWindow {
                     }
 
                     this.is_drawing = true;
-                    this.draw_start_pt = pt;
+                    this.draw_start_pt = canvas_pt;
 
                     // ZoomIt Standard Modifiers:
                     // Shift+Ctrl = Arrow
@@ -683,81 +703,81 @@ impl OverlayWindow {
                     // Tab = Ellipse
                     let shape_to_create = if is_shift && is_ctrl {
                         Shape::Arrow {
-                            start: pt,
-                            end: pt,
+                            start: canvas_pt,
+                            end: canvas_pt,
                             color: this.current_color,
                             width: this.stroke_width,
                         }
                     } else if is_shift && !is_ctrl {
                         Shape::Line {
-                            start: pt,
-                            end: pt,
+                            start: canvas_pt,
+                            end: canvas_pt,
                             color: this.current_color,
                             width: this.stroke_width,
                         }
                     } else if is_ctrl && !is_shift {
                         Shape::Rectangle {
-                            start: pt,
-                            end: pt,
+                            start: canvas_pt,
+                            end: canvas_pt,
                             color: this.current_color,
                             width: this.stroke_width,
                             rounded: false,
                         }
                     } else if is_tab {
                         Shape::Ellipse {
-                            start: pt,
-                            end: pt,
+                            start: canvas_pt,
+                            end: canvas_pt,
                             color: this.current_color,
                             width: this.stroke_width,
                         }
                     } else {
                         match this.current_tool {
                             DrawTool::Pen => Shape::Stroke {
-                                points: vec![pt],
+                                points: vec![canvas_pt],
                                 color: this.current_color,
                                 width: this.stroke_width,
                                 is_highlighter: false,
                             },
                             DrawTool::Highlighter => Shape::Stroke {
-                                points: vec![pt],
+                                points: vec![canvas_pt],
                                 color: this.current_color,
                                 width: this.stroke_width,
                                 is_highlighter: true,
                             },
                             DrawTool::Line => Shape::Line {
-                                start: pt,
-                                end: pt,
+                                start: canvas_pt,
+                                end: canvas_pt,
                                 color: this.current_color,
                                 width: this.stroke_width,
                             },
                             DrawTool::Arrow => Shape::Arrow {
-                                start: pt,
-                                end: pt,
+                                start: canvas_pt,
+                                end: canvas_pt,
                                 color: this.current_color,
                                 width: this.stroke_width,
                             },
                             DrawTool::Rectangle => Shape::Rectangle {
-                                start: pt,
-                                end: pt,
+                                start: canvas_pt,
+                                end: canvas_pt,
                                 color: this.current_color,
                                 width: this.stroke_width,
                                 rounded: false,
                             },
                             DrawTool::RoundedRectangle => Shape::Rectangle {
-                                start: pt,
-                                end: pt,
+                                start: canvas_pt,
+                                end: canvas_pt,
                                 color: this.current_color,
                                 width: this.stroke_width,
                                 rounded: true,
                             },
                             DrawTool::Ellipse => Shape::Ellipse {
-                                start: pt,
-                                end: pt,
+                                start: canvas_pt,
+                                end: canvas_pt,
                                 color: this.current_color,
                                 width: this.stroke_width,
                             },
                             _ => Shape::Stroke {
-                                points: vec![pt],
+                                points: vec![canvas_pt],
                                 color: this.current_color,
                                 width: this.stroke_width,
                                 is_highlighter: false,
@@ -811,11 +831,14 @@ impl OverlayWindow {
                 WM_MBUTTONDOWN => {
                     let x = (lparam.0 & 0xFFFF) as i16 as f32;
                     let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
-                    if this.mode == AppMode::StaticZoom {
-                        this.zoom.is_dragging = true;
-                        this.zoom.drag_start_mouse = Point2D::new(x, y);
-                        this.zoom.drag_start_offset = Point2D::new(this.zoom.offset_x, this.zoom.offset_y);
-                    }
+                    this.zoom.is_dragging = true;
+                    this.zoom.drag_start_mouse = Point2D::new(x, y);
+                    this.zoom.drag_start_view = Point2D::new(this.zoom.view_x, this.zoom.view_y);
+                    LRESULT(0)
+                }
+
+                windows::Win32::UI::WindowsAndMessaging::WM_MBUTTONUP => {
+                    this.zoom.is_dragging = false;
                     LRESULT(0)
                 }
 
@@ -841,15 +864,25 @@ impl OverlayWindow {
                         return LRESULT(0);
                     }
 
-                    if this.mode == AppMode::StaticZoom && !is_ctrl {
-                        let new_lvl = (this.zoom.level + delta * 0.25).clamp(1.25, 10.0);
-                        this.zoom.level = new_lvl;
-                        this.set_toast("🔎", format!("Static Zoom {:.2}x", new_lvl));
+                    if this.mode == AppMode::StaticZoom || (this.mode == AppMode::Draw && is_ctrl) {
+                        let mut pt = POINT::default();
+                        let sx = this.screen_x;
+                        let sy = this.screen_y;
+                        let sw = this.screen_width as f32;
+                        let sh = this.screen_height as f32;
+                        let (cursor_x, cursor_y) = if GetCursorPos(&mut pt).is_ok() {
+                            ((pt.x - sx) as f32, (pt.y - sy) as f32)
+                        } else {
+                            (sw / 2.0, sh / 2.0)
+                        };
+                        let new_lvl = (this.zoom.level + delta * 0.25).clamp(1.0, 10.0);
+                        this.zoom.set_zoom_centered(new_lvl, Point2D::new(cursor_x, cursor_y), sw, sh);
+                        this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                         this.request_repaint();
                         return LRESULT(0);
                     }
 
-                    if this.mode == AppMode::Draw || this.mode == AppMode::Snip || is_ctrl {
+                    if this.mode == AppMode::Draw || this.mode == AppMode::Snip {
                         let new_width = (this.stroke_width + delta * 1.5).clamp(1.0, 40.0);
                         this.stroke_width = new_width;
                         let w_val = new_width.round() as u32;
@@ -1110,13 +1143,27 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
 
-                        // ─── Arrow Keys & Timer Controls ───
+                        // ─── Arrow Keys & Zoom/Timer Controls ───
                         k if k == VK_UP.0 as i32 || k == 187 => { // Up or '+'
                             if this.mode == AppMode::Timer {
                                 this.timer_remaining += 60.0;
                                 this.timer_seconds = this.timer_remaining.round() as u32;
                                 let m = (this.timer_remaining / 60.0).floor() as u32;
                                 this.set_toast("⏱️", format!("Timer: +1m ({}m total)", m));
+                            } else if this.mode == AppMode::StaticZoom {
+                                let mut pt = POINT::default();
+                                let sx = this.screen_x;
+                                let sy = this.screen_y;
+                                let sw = this.screen_width as f32;
+                                let sh = this.screen_height as f32;
+                                let (cursor_x, cursor_y) = if GetCursorPos(&mut pt).is_ok() {
+                                    ((pt.x - sx) as f32, (pt.y - sy) as f32)
+                                } else {
+                                    (sw / 2.0, sh / 2.0)
+                                };
+                                let new_lvl = (this.zoom.level + 0.25).clamp(1.0, 10.0);
+                                this.zoom.set_zoom_centered(new_lvl, Point2D::new(cursor_x, cursor_y), sw, sh);
+                                this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                             } else {
                                 let new_w = (this.stroke_width + 2.0).min(40.0);
                                 this.stroke_width = new_w;
@@ -1130,6 +1177,20 @@ impl OverlayWindow {
                                 this.timer_seconds = this.timer_remaining.round() as u32;
                                 let m = (this.timer_remaining / 60.0).floor() as u32;
                                 this.set_toast("⏱️", format!("Timer: -1m ({}m total)", m));
+                            } else if this.mode == AppMode::StaticZoom {
+                                let mut pt = POINT::default();
+                                let sx = this.screen_x;
+                                let sy = this.screen_y;
+                                let sw = this.screen_width as f32;
+                                let sh = this.screen_height as f32;
+                                let (cursor_x, cursor_y) = if GetCursorPos(&mut pt).is_ok() {
+                                    ((pt.x - sx) as f32, (pt.y - sy) as f32)
+                                } else {
+                                    (sw / 2.0, sh / 2.0)
+                                };
+                                let new_lvl = (this.zoom.level - 0.25).clamp(1.0, 10.0);
+                                this.zoom.set_zoom_centered(new_lvl, Point2D::new(cursor_x, cursor_y), sw, sh);
+                                this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                             } else {
                                 let new_w = (this.stroke_width - 2.0).max(1.0);
                                 this.stroke_width = new_w;
