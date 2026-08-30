@@ -374,6 +374,7 @@ impl OverlayWindow {
     pub fn request_repaint(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
+            let _ = windows::Win32::Graphics::Gdi::UpdateWindow(self.hwnd);
         }
     }
 
@@ -647,8 +648,14 @@ impl OverlayWindow {
 
                         match &mut this.active_shape {
                             Some(Shape::Stroke { points, .. }) => {
-                                points.push(canvas_pt);
-                                this.request_repaint();
+                                let should_push = match points.last() {
+                                    Some(last) => last.distance(&canvas_pt) >= 1.5,
+                                    None => true,
+                                };
+                                if should_push {
+                                    points.push(canvas_pt);
+                                    this.request_repaint();
+                                }
                             }
                             Some(Shape::Line { end, .. }) => {
                                 *end = if is_shift {

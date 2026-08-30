@@ -3,18 +3,18 @@
 use windows::core::{w, Result};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
-    D2D1_FILL_MODE_ALTERNATE, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F,
+    D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED,
+    D2D1_FIGURE_END_OPEN, D2D1_FILL_MODE_ALTERNATE, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget,
-    ID2D1PathGeometry, ID2D1RenderTarget, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
-    D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES,
-    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
-    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1PathGeometry,
+    ID2D1RenderTarget, ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_SOLID,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
+    D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_IMMEDIATELY,
+    D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE,
+    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -45,6 +45,7 @@ pub struct D2DRenderer {
     pub factory: ID2D1Factory,
     pub dwrite_factory: IDWriteFactory,
     pub render_target: Option<ID2D1HwndRenderTarget>,
+    pub round_stroke_style: ID2D1StrokeStyle,
     pub text_format_normal: IDWriteTextFormat,
     pub text_format_bold: IDWriteTextFormat,
     pub text_format_badge: IDWriteTextFormat,
@@ -59,6 +60,17 @@ impl D2DRenderer {
         unsafe {
             let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+
+            let stroke_props = D2D1_STROKE_STYLE_PROPERTIES {
+                startCap: D2D1_CAP_STYLE_ROUND,
+                endCap: D2D1_CAP_STYLE_ROUND,
+                dashCap: D2D1_CAP_STYLE_ROUND,
+                lineJoin: D2D1_LINE_JOIN_ROUND,
+                miterLimit: 10.0,
+                dashStyle: D2D1_DASH_STYLE_SOLID,
+                dashOffset: 0.0,
+            };
+            let round_stroke_style = factory.CreateStrokeStyle(&stroke_props, None)?;
 
             let text_format_normal = dwrite_factory.CreateTextFormat(
                 w!("Segoe UI"),
@@ -138,6 +150,7 @@ impl D2DRenderer {
                 factory,
                 dwrite_factory,
                 render_target: None,
+                round_stroke_style,
                 text_format_normal,
                 text_format_bold,
                 text_format_badge,
@@ -511,26 +524,40 @@ impl D2DRenderer {
                 if let Ok(sink) = path.Open() {
                     sink.SetFillMode(D2D1_FILL_MODE_ALTERNATE);
 
+                    // Outer screen rectangle
                     sink.BeginFigure(v2(0.0, 0.0), D2D1_FIGURE_BEGIN_FILLED);
                     sink.AddLine(v2(screen_w, 0.0));
                     sink.AddLine(v2(screen_w, screen_h));
                     sink.AddLine(v2(0.0, screen_h));
                     sink.EndFigure(D2D1_FIGURE_END_CLOSED);
 
+                    // Inner circle hole with 4 cubic bezier quadrant arcs (exact circle)
                     let r = spotlight.radius.max(20.0);
                     let cx = spotlight.x;
                     let cy = spotlight.y;
-                    let segments = 64;
-                    for i in 0..segments {
-                        let angle = (i as f32 / segments as f32) * std::f32::consts::PI * 2.0;
-                        let px = cx + r * angle.cos();
-                        let py = cy + r * angle.sin();
-                        if i == 0 {
-                            sink.BeginFigure(v2(px, py), D2D1_FIGURE_BEGIN_FILLED);
-                        } else {
-                            sink.AddLine(v2(px, py));
-                        }
-                    }
+                    let k = 0.55228475 * r;
+
+                    sink.BeginFigure(v2(cx, cy - r), D2D1_FIGURE_BEGIN_FILLED);
+                    sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                        point1: v2(cx + k, cy - r),
+                        point2: v2(cx + r, cy - k),
+                        point3: v2(cx + r, cy),
+                    });
+                    sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                        point1: v2(cx + r, cy + k),
+                        point2: v2(cx + k, cy + r),
+                        point3: v2(cx, cy + r),
+                    });
+                    sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                        point1: v2(cx - k, cy + r),
+                        point2: v2(cx - r, cy + k),
+                        point3: v2(cx - r, cy),
+                    });
+                    sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                        point1: v2(cx - r, cy - k),
+                        point2: v2(cx - k, cy - r),
+                        point3: v2(cx, cy - r),
+                    });
                     sink.EndFigure(D2D1_FIGURE_END_CLOSED);
                     let _ = sink.Close();
 
@@ -557,16 +584,6 @@ impl D2DRenderer {
                             radiusY: r,
                         };
                         rt.DrawEllipse(&ellipse, &ring_brush, 2.5, None);
-
-                        let inner_col = D2D1_COLOR_F { r: ring_col.r, g: ring_col.g, b: ring_col.b, a: 0.25 };
-                        if let Ok(inner_brush) = rt.CreateSolidColorBrush(&inner_col, None) {
-                            let inner_ellipse = D2D1_ELLIPSE {
-                                point: v2(cx, cy),
-                                radiusX: r - 3.0,
-                                radiusY: r - 3.0,
-                            };
-                            rt.DrawEllipse(&inner_ellipse, &inner_brush, 1.5, None);
-                        }
                     }
                 }
             }
@@ -582,7 +599,7 @@ impl D2DRenderer {
                     width,
                     is_highlighter,
                 } => {
-                    if points.len() < 2 {
+                    if points.is_empty() {
                         return;
                     }
 
@@ -591,17 +608,23 @@ impl D2DRenderer {
                     let col = color.to_d2d_color(alpha);
 
                     if let Ok(brush) = rt.CreateSolidColorBrush(&col, None) {
-                        for i in 0..points.len() - 1 {
-                            let p0 = v2(points[i].x, points[i].y);
-                            let p1 = v2(points[i + 1].x, points[i + 1].y);
-                            rt.DrawLine(p0, p1, &brush, actual_width, None);
-
-                            let joint = D2D1_ELLIPSE {
-                                point: p0,
+                        if points.len() == 1 {
+                            let dot = D2D1_ELLIPSE {
+                                point: v2(points[0].x, points[0].y),
                                 radiusX: actual_width / 2.0,
                                 radiusY: actual_width / 2.0,
                             };
-                            rt.FillEllipse(&joint, &brush);
+                            rt.FillEllipse(&dot, &brush);
+                        } else if let Ok(path) = self.factory.CreatePathGeometry() {
+                            if let Ok(sink) = path.Open() {
+                                sink.BeginFigure(v2(points[0].x, points[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
+                                for pt in &points[1..] {
+                                    sink.AddLine(v2(pt.x, pt.y));
+                                }
+                                sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                                let _ = sink.Close();
+                                rt.DrawGeometry(&path, &brush, actual_width, Some(&self.round_stroke_style));
+                            }
                         }
                     }
                 }

@@ -11,8 +11,7 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-    SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS,
-    SRCCOPY,
+    SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
@@ -86,7 +85,7 @@ impl ScreenCapture {
                 if !hbitmap.is_invalid() && !bits_ptr.is_null() {
                     let old_bitmap = SelectObject(mem_dc, hbitmap.into());
 
-                    // Copy entire virtual screen area including layered windows
+                    // Fast hardware BitBlt without DWM pipeline stalls
                     let _ = BitBlt(
                         mem_dc,
                         0,
@@ -96,7 +95,7 @@ impl ScreenCapture {
                         Some(screen_dc),
                         x,
                         y,
-                        SRCCOPY | CAPTUREBLT,
+                        SRCCOPY,
                     );
 
                     let total_bytes = (width * height * 4) as usize;
