@@ -170,25 +170,50 @@ impl OverlayWindow {
     }
 
     pub fn enter_static_zoom(&mut self) {
-        self.mode = AppMode::StaticZoom;
-        self.capture_current_screen();
-
-        let mut cursor_screen = Point2D::new(self.screen_width as f32 / 2.0, self.screen_height as f32 / 2.0);
-        unsafe {
-            let mut pt = POINT::default();
-            if GetCursorPos(&mut pt).is_ok() {
-                cursor_screen = Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
+        let was_live_zoom = self.live_zoom.is_active();
+        if was_live_zoom {
+            let (off_x, off_y) = self.live_zoom.offsets();
+            let lvl = self.live_zoom.zoom_level();
+            self.live_zoom.stop();
+            self.capture_current_screen();
+            self.zoom.level = lvl;
+            self.zoom.target_level = lvl;
+            self.zoom.view_x = off_x;
+            self.zoom.view_y = off_y;
+            self.zoom.target_view_x = off_x;
+            self.zoom.target_view_y = off_y;
+        } else {
+            self.capture_current_screen();
+            let mut cursor_screen = Point2D::new(self.screen_width as f32 / 2.0, self.screen_height as f32 / 2.0);
+            unsafe {
+                let mut pt = POINT::default();
+                if GetCursorPos(&mut pt).is_ok() {
+                    cursor_screen = Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
+                }
             }
+            self.zoom.set_zoom_centered(2.0, cursor_screen, self.screen_width as f32, self.screen_height as f32);
         }
-        self.zoom.set_zoom_centered(2.0, cursor_screen, self.screen_width as f32, self.screen_height as f32);
+        self.mode = AppMode::StaticZoom;
         self.show_window();
         self.set_toast("🔎", "Static Zoom (Wheel: Zoom | Move: Pan | Click: Draw)");
     }
 
     pub fn enter_draw_mode(&mut self) {
+        let was_live_zoom = self.live_zoom.is_active();
         let was_idle = self.mode == AppMode::Idle;
-        self.mode = AppMode::Draw;
-        if was_idle {
+        
+        if was_live_zoom {
+            let (off_x, off_y) = self.live_zoom.offsets();
+            let lvl = self.live_zoom.zoom_level();
+            self.live_zoom.stop();
+            self.capture_current_screen();
+            self.zoom.level = lvl;
+            self.zoom.target_level = lvl;
+            self.zoom.view_x = off_x;
+            self.zoom.view_y = off_y;
+            self.zoom.target_view_x = off_x;
+            self.zoom.target_view_y = off_y;
+        } else if was_idle {
             self.capture_current_screen();
             self.zoom.level = 1.0;
             self.zoom.target_level = 1.0;
@@ -197,21 +222,44 @@ impl OverlayWindow {
             self.zoom.target_view_x = 0.0;
             self.zoom.target_view_y = 0.0;
         }
+        self.mode = AppMode::Draw;
         self.show_window();
         self.set_toast("✏️", "Draw Mode (P/H/L/A/R/U/E/T/N • r/g/b/y/o/p/c • Shift: Snip)");
     }
 
     pub fn enter_spotlight_mode(&mut self) {
+        let was_live_zoom = self.live_zoom.is_active();
+        if was_live_zoom {
+            let (off_x, off_y) = self.live_zoom.offsets();
+            let lvl = self.live_zoom.zoom_level();
+            self.live_zoom.stop();
+            self.capture_current_screen();
+            self.zoom.level = lvl;
+            self.zoom.target_level = lvl;
+            self.zoom.view_x = off_x;
+            self.zoom.view_y = off_y;
+            self.zoom.target_view_x = off_x;
+            self.zoom.target_view_y = off_y;
+        } else if self.mode == AppMode::Idle {
+            self.capture_current_screen();
+            self.zoom.level = 1.0;
+            self.zoom.target_level = 1.0;
+            self.zoom.view_x = 0.0;
+            self.zoom.view_y = 0.0;
+            self.zoom.target_view_x = 0.0;
+            self.zoom.target_view_y = 0.0;
+        }
         self.mode = AppMode::Spotlight;
-        self.capture_current_screen();
         self.spotlight.active = true;
         self.spotlight.pinned = false;
 
         unsafe {
             let mut pt = POINT::default();
             if GetCursorPos(&mut pt).is_ok() {
-                self.spotlight.x = (pt.x - self.screen_x) as f32;
-                self.spotlight.y = (pt.y - self.screen_y) as f32;
+                let screen_pt = Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
+                let canvas_pt = self.zoom.screen_to_canvas(screen_pt);
+                self.spotlight.x = canvas_pt.x;
+                self.spotlight.y = canvas_pt.y;
             }
         }
         self.show_window();
@@ -219,6 +267,9 @@ impl OverlayWindow {
     }
 
     pub fn enter_timer_mode(&mut self, minutes: u32) {
+        if self.live_zoom.is_active() {
+            self.live_zoom.stop();
+        }
         self.mode = AppMode::Timer;
         self.timer_seconds = minutes * 60;
         self.timer_remaining = self.timer_seconds as f64;
@@ -228,6 +279,9 @@ impl OverlayWindow {
     }
 
     pub fn enter_snip_mode(&mut self) {
+        if self.live_zoom.is_active() {
+            self.live_zoom.stop();
+        }
         self.mode = AppMode::Snip;
         self.capture_current_screen();
         self.current_tool = DrawTool::Snip;

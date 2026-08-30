@@ -88,6 +88,10 @@ impl LiveZoomEngine {
         self.zoom_level
     }
 
+    pub fn offsets(&self) -> (f32, f32) {
+        (self.current_x_offset, self.current_y_offset)
+    }
+
     pub fn start(&mut self, initial_level: f32) -> bool {
         if !self.is_supported() {
             return false;

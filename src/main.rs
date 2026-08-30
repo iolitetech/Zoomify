@@ -63,16 +63,6 @@ unsafe extern "system" fn tray_wnd_proc(
                 let hotkey_id = wparam.0 as i32;
                 let mut overlay = ctx.overlay.borrow_mut();
 
-                if hotkey_id != HOTKEY_LIVE_ZOOM 
-                    && hotkey_id != HOTKEY_LIVE_ZOOM_IN 
-                    && hotkey_id != HOTKEY_LIVE_ZOOM_OUT 
-                    && hotkey_id != HOTKEY_LIVE_ZOOM_IN_PLUS 
-                    && hotkey_id != HOTKEY_LIVE_ZOOM_OUT_MINUS 
-                    && overlay.live_zoom.is_active() 
-                {
-                    overlay.live_zoom.stop();
-                }
-
                 match hotkey_id {
                     HOTKEY_STATIC_ZOOM => {
                         overlay.enter_static_zoom();
