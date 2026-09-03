@@ -793,4 +793,249 @@ impl D2DRenderer {
             }
         }
     }
+
+    pub(super) unsafe fn render_drawing_snap_guides(&self, rt: &ID2D1RenderTarget, shape: &Shape) {
+        unsafe {
+            let guide_col = D2D1_COLOR_F {
+                r: 0.25,
+                g: 0.75,
+                b: 1.0,
+                a: 0.65,
+            };
+            let amber_col = D2D1_COLOR_F {
+                r: 1.0,
+                g: 0.85,
+                b: 0.25,
+                a: 0.80,
+            };
+            let card_bg = D2D1_COLOR_F {
+                r: 0.10,
+                g: 0.12,
+                b: 0.16,
+                a: 0.92,
+            };
+            let card_border = D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 0.22,
+            };
+            let text_col = D2D1_COLOR_F {
+                r: 0.95,
+                g: 0.96,
+                b: 0.98,
+                a: 1.0,
+            };
+
+            let guide_brush = rt.CreateSolidColorBrush(&guide_col, None).ok();
+            let amber_brush = rt.CreateSolidColorBrush(&amber_col, None).ok();
+            let bg_brush = rt.CreateSolidColorBrush(&card_bg, None).ok();
+            let border_brush = rt.CreateSolidColorBrush(&card_border, None).ok();
+            let text_brush = rt.CreateSolidColorBrush(&text_col, None).ok();
+
+            match shape {
+                Shape::Line { start, end, .. } | Shape::Arrow { start, end, .. } => {
+                    let dx = end.x - start.x;
+                    let dy = end.y - start.y;
+                    let dist = (dx * dx + dy * dy).sqrt();
+                    if dist < 6.0 {
+                        return;
+                    }
+
+                    // 1. Subtle dashed projection ray along the snapped angle
+                    if let Some(gb) = &guide_brush {
+                        let unit_x = dx / dist;
+                        let unit_y = dy / dist;
+                        let p1 = v2(start.x - unit_x * 24.0, start.y - unit_y * 24.0);
+                        let p2 = v2(end.x + unit_x * 40.0, end.y + unit_y * 40.0);
+                        rt.DrawLine(p1, p2, gb, 1.2, Some(&self.dashed_stroke_style));
+                    }
+
+                    // 2. Angle & Distance badge
+                    let raw_deg = dy.atan2(dx).to_degrees();
+                    let norm_deg = (raw_deg.round() as i32).rem_euclid(360);
+                    let angle_label = match norm_deg {
+                        0 | 360 => "0° (H)",
+                        45 => "45°",
+                        90 => "90° (V)",
+                        135 => "135°",
+                        180 => "180° (H)",
+                        225 => "225°",
+                        270 => "270° (V)",
+                        315 => "315°",
+                        _ => "Free",
+                    };
+
+                    let badge_text = format!("{} • {:.0} px", angle_label, dist);
+                    let badge_utf16: Vec<u16> = badge_text.encode_utf16().collect();
+
+                    let badge_w = (badge_text.len() as f32 * 8.0 + 16.0).max(80.0);
+                    let badge_h = 22.0;
+                    let badge_x = ((start.x + end.x) / 2.0 - badge_w / 2.0).max(4.0);
+                    let badge_y = ((start.y + end.y) / 2.0 - 28.0).max(4.0);
+
+                    let badge_rect = D2D_RECT_F {
+                        left: badge_x,
+                        top: badge_y,
+                        right: badge_x + badge_w,
+                        bottom: badge_y + badge_h,
+                    };
+                    let badge_rrect = D2D1_ROUNDED_RECT {
+                        rect: badge_rect,
+                        radiusX: 5.0,
+                        radiusY: 5.0,
+                    };
+
+                    if let (Some(bgb), Some(bdb), Some(tb)) =
+                        (&bg_brush, &border_brush, &text_brush)
+                    {
+                        rt.FillRoundedRectangle(&badge_rrect, bgb);
+                        rt.DrawRoundedRectangle(&badge_rrect, bdb, 1.0, None);
+                        rt.DrawText(
+                            &badge_utf16,
+                            &self.text_format_toolbar_small,
+                            &badge_rect,
+                            tb,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                    }
+                }
+
+                Shape::Rectangle {
+                    start,
+                    end,
+                    rounded,
+                    ..
+                } => {
+                    let (left, top, right, bottom) = normalize_rect(*start, *end);
+                    let w = right - left;
+                    let h = bottom - top;
+                    if w < 8.0 || h < 8.0 {
+                        return;
+                    }
+
+                    // 1. Dashed diagonal guideline showing 45° square symmetry
+                    if let Some(gb) = &guide_brush {
+                        rt.DrawLine(
+                            v2(left, top),
+                            v2(right, bottom),
+                            gb,
+                            1.2,
+                            Some(&self.dashed_stroke_style),
+                        );
+                    }
+
+                    // 2. 1:1 Square dimension badge
+                    let tag = if *rounded {
+                        "1:1 R-Square"
+                    } else {
+                        "1:1 Square"
+                    };
+                    let badge_text = format!("{} • {:.0} × {:.0} px", tag, w, h);
+                    let badge_utf16: Vec<u16> = badge_text.encode_utf16().collect();
+
+                    let badge_w = (badge_text.len() as f32 * 8.0 + 16.0).max(110.0);
+                    let badge_h = 22.0;
+                    let badge_x = (right - badge_w).max(left);
+                    let badge_y = bottom + 6.0;
+
+                    let badge_rect = D2D_RECT_F {
+                        left: badge_x,
+                        top: badge_y,
+                        right: badge_x + badge_w,
+                        bottom: badge_y + badge_h,
+                    };
+                    let badge_rrect = D2D1_ROUNDED_RECT {
+                        rect: badge_rect,
+                        radiusX: 5.0,
+                        radiusY: 5.0,
+                    };
+
+                    if let (Some(bgb), Some(bdb), Some(tb)) =
+                        (&bg_brush, &border_brush, &text_brush)
+                    {
+                        rt.FillRoundedRectangle(&badge_rrect, bgb);
+                        rt.DrawRoundedRectangle(&badge_rrect, bdb, 1.0, None);
+                        rt.DrawText(
+                            &badge_utf16,
+                            &self.text_format_toolbar_small,
+                            &badge_rect,
+                            tb,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                    }
+                }
+
+                Shape::Ellipse { start, end, .. } => {
+                    let (left, top, right, bottom) = normalize_rect(*start, *end);
+                    let w = right - left;
+                    let h = bottom - top;
+                    if w < 12.0 || h < 12.0 {
+                        return;
+                    }
+                    let cx = (left + right) / 2.0;
+                    let cy = (top + bottom) / 2.0;
+                    let rx = w / 2.0;
+
+                    // 1. Dashed bounding square
+                    if let Some(gb) = &guide_brush {
+                        let rect = D2D_RECT_F {
+                            left,
+                            top,
+                            right,
+                            bottom,
+                        };
+                        rt.DrawRectangle(&rect, gb, 1.0, Some(&self.dashed_stroke_style));
+                    }
+
+                    // 2. Center crosshair (+)
+                    if let Some(ab) = &amber_brush {
+                        let arm = 8.0;
+                        rt.DrawLine(v2(cx - arm, cy), v2(cx + arm, cy), ab, 1.5, None);
+                        rt.DrawLine(v2(cx, cy - arm), v2(cx, cy + arm), ab, 1.5, None);
+                    }
+
+                    // 3. 1:1 Circle dimension badge
+                    let badge_text = format!("1:1 Circle • ⌀ {:.0} px", rx * 2.0);
+                    let badge_utf16: Vec<u16> = badge_text.encode_utf16().collect();
+
+                    let badge_w = (badge_text.len() as f32 * 8.0 + 16.0).max(110.0);
+                    let badge_h = 22.0;
+                    let badge_x = (right - badge_w).max(left);
+                    let badge_y = bottom + 6.0;
+
+                    let badge_rect = D2D_RECT_F {
+                        left: badge_x,
+                        top: badge_y,
+                        right: badge_x + badge_w,
+                        bottom: badge_y + badge_h,
+                    };
+                    let badge_rrect = D2D1_ROUNDED_RECT {
+                        rect: badge_rect,
+                        radiusX: 5.0,
+                        radiusY: 5.0,
+                    };
+
+                    if let (Some(bgb), Some(bdb), Some(tb)) =
+                        (&bg_brush, &border_brush, &text_brush)
+                    {
+                        rt.FillRoundedRectangle(&badge_rrect, bgb);
+                        rt.DrawRoundedRectangle(&badge_rrect, bdb, 1.0, None);
+                        rt.DrawText(
+                            &badge_utf16,
+                            &self.text_format_toolbar_small,
+                            &badge_rect,
+                            tb,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                    }
+                }
+
+                _ => {}
+            }
+        }
+    }
 }

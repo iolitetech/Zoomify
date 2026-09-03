@@ -638,7 +638,6 @@ pub struct SnipSelection {
     pub start: Point2D,
     pub current: Point2D,
     pub shape: SnipShape,
-    pub with_guides: bool,
 }
 
 impl Default for SnipSelection {
@@ -648,7 +647,6 @@ impl Default for SnipSelection {
             start: Point2D::default(),
             current: Point2D::default(),
             shape: SnipShape::Rectangle,
-            with_guides: false,
         }
     }
 }
@@ -1497,7 +1495,6 @@ mod tests {
             start: Point2D::new(200.0, 300.0),
             current: Point2D::new(100.0, 150.0),
             shape: SnipShape::Rectangle,
-            with_guides: false,
         };
         let (l, t, r, b) = snip.rect();
         assert_eq!(l, 100.0);
@@ -1821,7 +1818,6 @@ mod tests {
             start: Point2D::new(100.0, 100.0),
             current: Point2D::new(300.0, 300.0),
             shape: SnipShape::Ellipse,
-            with_guides: false,
         };
         assert_eq!(snip.shape, SnipShape::Ellipse);
         let (l, t, r, b) = snip.rect();
@@ -2069,18 +2065,15 @@ mod tests {
     }
 
     #[test]
-    fn test_snip_with_guides() {
+    fn test_snip_selection_defaults() {
         let mut snip = SnipSelection::default();
         assert!(!snip.active);
-        assert!(!snip.with_guides);
 
         snip.active = true;
         snip.start = Point2D::new(100.0, 100.0);
         snip.current = Point2D::new(300.0, 200.0);
-        snip.with_guides = true;
 
         let (l, t, r, b) = snip.rect();
         assert_eq!((l, t, r, b), (100.0, 100.0, 300.0, 200.0));
-        assert!(snip.with_guides);
     }
 }

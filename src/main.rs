@@ -9,6 +9,7 @@ mod monitor;
 mod overlay;
 mod renderer;
 mod shapes;
+mod snip_notify;
 mod tray;
 mod types;
 
@@ -107,17 +108,11 @@ unsafe extern "system" fn tray_wnd_proc(
                             overlay.live_zoom.stop();
                             overlay.mode = AppMode::Idle;
                             overlay.hide_window();
-                            ctx.tray
-                                .show_balloon("Live Zoom Ended", "Restored standard desktop view");
                         } else {
                             if overlay.mode != AppMode::Idle {
                                 overlay.exit_overlay();
                             }
                             overlay.enter_live_zoom();
-                            ctx.tray.show_balloon(
-                                "Live Zoom Active (Ctrl+4)",
-                                "• Ctrl+Wheel (or Ctrl+Up/Down): Adjust Zoom Level\n• Ctrl+4: Exit Live Zoom",
-                            );
                         }
                     }
                     HOTKEY_LIVE_ZOOM_IN | HOTKEY_LIVE_ZOOM_IN_PLUS => {
@@ -190,14 +185,8 @@ unsafe extern "system" fn tray_wnd_proc(
                             overlay.live_zoom.stop();
                             overlay.mode = AppMode::Idle;
                             overlay.hide_window();
-                            ctx.tray
-                                .show_balloon("Live Zoom Ended", "Restored standard desktop view");
                         } else {
                             overlay.enter_live_zoom();
-                            ctx.tray.show_balloon(
-                                "Live Zoom Active (Ctrl+4)",
-                                "• Ctrl+Wheel (or Ctrl+Up/Down): Adjust Zoom Level\n• Ctrl+4: Exit Live Zoom",
-                            );
                         }
                     }
                     ID_TRAY_STATIC_ZOOM => {

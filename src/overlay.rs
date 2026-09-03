@@ -227,7 +227,6 @@ impl OverlayWindow {
                     start: Point2D::default(),
                     current: Point2D::default(),
                     shape: SnipShape::Rectangle,
-                    with_guides: false,
                 },
                 shapes: Vec::new(),
                 undo_history: Vec::new(),
@@ -1282,6 +1281,9 @@ impl OverlayWindow {
                         None
                     };
 
+                    let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                    let snap_guides = this.is_drawing && is_shift;
+
                     this.renderer.render_frame(
                         this.mode,
                         this.screen_width as f32,
@@ -1306,6 +1308,7 @@ impl OverlayWindow {
                         &this.laser_trail,
                         this.laser_pos,
                         this.eraser_pos,
+                        snap_guides,
                     );
 
                     let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
@@ -1506,7 +1509,6 @@ impl OverlayWindow {
 
                     if this.snip.active {
                         let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
-                        this.snip.with_guides = is_shift;
                         this.snip.current = if is_shift {
                             snap_to_square(this.snip.start, screen_pt)
                         } else {
@@ -1539,11 +1541,13 @@ impl OverlayWindow {
                         return LRESULT(0);
                     }
 
+                    let prev_mouse_pos = this.last_mouse_pos;
+                    this.last_mouse_pos = screen_pt;
+
                     if this.is_drawing {
                         if this.current_tool == DrawTool::Pen
-                            && screen_pt.distance(&this.last_mouse_pos) > 5.0
+                            && screen_pt.distance(&prev_mouse_pos) > 5.0
                         {
-                            this.last_mouse_pos = screen_pt;
                             this.last_mouse_dwell_time = Some(Instant::now());
                         }
 
@@ -1910,7 +1914,6 @@ impl OverlayWindow {
 
                     if this.snip.active {
                         this.snip.active = false;
-                        this.snip.with_guides = false;
                         let (l, t, r, b) = this.snip.rect();
                         let w = (r - l).round() as u32;
                         let h = (b - t).round() as u32;
@@ -1948,14 +1951,10 @@ impl OverlayWindow {
                                 cropped.height,
                                 &cropped.pixels,
                             ) {
-                                let label = if this.snip.shape == SnipShape::Ellipse {
-                                    "Circular Snip"
-                                } else {
-                                    "Snip"
-                                };
-                                this.set_toast(
-                                    "✂️",
-                                    format!("{} {}×{} px copied to Clipboard!", label, w, h),
+                                crate::snip_notify::show_snip_notification(
+                                    cropped.width,
+                                    cropped.height,
+                                    &cropped.pixels,
                                 );
                                 this.exit_overlay();
                                 return LRESULT(0);
@@ -2002,7 +2001,6 @@ impl OverlayWindow {
                     // If snip in progress, cancel snip
                     if this.snip.active {
                         this.snip.active = false;
-                        this.snip.with_guides = false;
                         this.request_repaint();
                         return LRESULT(0);
                     }
@@ -2015,7 +2013,13 @@ impl OverlayWindow {
                     // Two-stage exit: If in Draw mode, return to StaticZoom (Pan & Zoom) mode!
                     if this.mode == AppMode::Draw {
                         this.mode = AppMode::StaticZoom;
-                        this.set_toast("🔎", "Pan & Zoom Mode (Right-click again to exit)");
+                        let w = this.screen_width as f32;
+                        let h = this.screen_height as f32;
+                        this.toolbar.update_layout(w, h);
+                        this.set_toast(
+                            "🔎",
+                            "Switched to Pan & Zoom Mode (Press Esc again to Exit)",
+                        );
                         this.request_repaint();
                         return LRESULT(0);
                     }
@@ -2147,10 +2151,38 @@ impl OverlayWindow {
                     let is_ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
                     let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
 
-                    if this.snip.active && key == VK_SHIFT.0 as i32 {
-                        this.snip.with_guides = true;
-                        this.snip.current = snap_to_square(this.snip.start, this.last_mouse_pos);
-                        this.request_repaint();
+                    if key == VK_SHIFT.0 as i32 {
+                        let mut pt = POINT::default();
+                        let current_screen_pt = if GetCursorPos(&mut pt).is_ok() {
+                            Point2D::new(
+                                (pt.x - this.screen_x) as f32,
+                                (pt.y - this.screen_y) as f32,
+                            )
+                        } else {
+                            this.last_mouse_pos
+                        };
+                        this.last_mouse_pos = current_screen_pt;
+
+                        if this.snip.active {
+                            this.snip.current = snap_to_square(this.snip.start, current_screen_pt);
+                            this.request_repaint();
+                        } else if this.is_drawing {
+                            let canvas_pt = this.zoom.screen_to_canvas(current_screen_pt);
+                            let start_pt = this.draw_start_pt;
+                            match &mut this.active_shape {
+                                Some(Shape::Line { end, .. }) | Some(Shape::Arrow { end, .. }) => {
+                                    *end = snap_to_angle(start_pt, canvas_pt);
+                                    this.request_repaint();
+                                }
+                                Some(Shape::Rectangle { end, .. })
+                                | Some(Shape::Ellipse { end, .. }) => {
+                                    *end = snap_to_square(start_pt, canvas_pt);
+                                    this.request_repaint();
+                                }
+                                _ => {}
+                            }
+                        }
+                        return LRESULT(0);
                     }
 
                     // ── Text editor intercepts all keys first ──
@@ -2315,7 +2347,6 @@ impl OverlayWindow {
                                 this.request_repaint();
                             } else if this.snip.active {
                                 this.snip.active = false;
-                                this.snip.with_guides = false;
                                 this.request_repaint();
                             } else {
                                 this.exit_overlay();
@@ -2903,10 +2934,35 @@ impl OverlayWindow {
 
                 windows::Win32::UI::WindowsAndMessaging::WM_KEYUP => {
                     let key = wparam.0 as i32;
-                    if this.snip.active && key == VK_SHIFT.0 as i32 {
-                        this.snip.with_guides = false;
-                        this.snip.current = this.last_mouse_pos;
-                        this.request_repaint();
+                    if key == VK_SHIFT.0 as i32 {
+                        let mut pt = POINT::default();
+                        let current_screen_pt = if GetCursorPos(&mut pt).is_ok() {
+                            Point2D::new(
+                                (pt.x - this.screen_x) as f32,
+                                (pt.y - this.screen_y) as f32,
+                            )
+                        } else {
+                            this.last_mouse_pos
+                        };
+                        this.last_mouse_pos = current_screen_pt;
+
+                        if this.snip.active {
+                            this.snip.current = current_screen_pt;
+                            this.request_repaint();
+                        } else if this.is_drawing {
+                            let canvas_pt = this.zoom.screen_to_canvas(current_screen_pt);
+                            match &mut this.active_shape {
+                                Some(Shape::Line { end, .. })
+                                | Some(Shape::Arrow { end, .. })
+                                | Some(Shape::Rectangle { end, .. })
+                                | Some(Shape::Ellipse { end, .. }) => {
+                                    *end = canvas_pt;
+                                    this.request_repaint();
+                                }
+                                _ => {}
+                            }
+                        }
+                        return LRESULT(0);
                     }
                     LRESULT(0)
                 }

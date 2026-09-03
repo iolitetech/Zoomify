@@ -412,6 +412,7 @@ impl D2DRenderer {
         laser_trail: &[LaserTrailPoint],
         laser_pos: Option<Point2D>,
         eraser_pos: Option<Point2D>,
+        snap_guides: bool,
     ) {
         let rt = match &self.render_target {
             Some(rt) => rt,
@@ -498,6 +499,9 @@ impl D2DRenderer {
 
             if let Some(shape) = active_shape {
                 self.render_single_shape(rt, shape);
+                if snap_guides {
+                    self.render_drawing_snap_guides(rt, shape);
+                }
             }
 
             if let Some(editor) = text_input {
