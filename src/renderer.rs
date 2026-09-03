@@ -1290,7 +1290,12 @@ impl D2DRenderer {
                     let text = number.to_string();
                     let text_utf16: Vec<u16> = text.encode_utf16().collect();
                     let text_col = match fill {
-                        FillMode::Solid => D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                        FillMode::Solid => match color {
+                            ColorPreset::Yellow | ColorPreset::Cyan | ColorPreset::White => {
+                                D2D1_COLOR_F { r: 0.10, g: 0.11, b: 0.15, a: 1.0 }
+                            }
+                            _ => D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+                        },
                         FillMode::Tinted => D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
                         FillMode::None => col,
                     };
@@ -1471,10 +1476,54 @@ impl D2DRenderer {
                 }
             }
 
+            // ── Guide Lines When Snipping with Shift ──
+            if snip.with_guides {
+                let guide_col = D2D1_COLOR_F { r: 0.15, g: 0.75, b: 1.0, a: 0.55 };
+                let center_guide_col = D2D1_COLOR_F { r: 1.0, g: 0.85, b: 0.2, a: 0.70 };
+                let grid_col = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.25 };
+
+                if let Ok(guide_brush) = rt.CreateSolidColorBrush(&guide_col, None) {
+                    // Full-screen boundary projection lines
+                    rt.DrawLine(v2(0.0, top), v2(screen_w, top), &guide_brush, 1.0, Some(&self.dashed_stroke_style));
+                    rt.DrawLine(v2(0.0, bottom), v2(screen_w, bottom), &guide_brush, 1.0, Some(&self.dashed_stroke_style));
+                    rt.DrawLine(v2(left, 0.0), v2(left, screen_h), &guide_brush, 1.0, Some(&self.dashed_stroke_style));
+                    rt.DrawLine(v2(right, 0.0), v2(right, screen_h), &guide_brush, 1.0, Some(&self.dashed_stroke_style));
+                }
+
+                // Rule-of-Thirds Grid inside the selection
+                let sw_w = right - left;
+                let sw_h = bottom - top;
+                if sw_w > 40.0 && sw_h > 40.0 {
+                    if let Ok(grid_brush) = rt.CreateSolidColorBrush(&grid_col, None) {
+                        let x1 = left + sw_w / 3.0;
+                        let x2 = left + sw_w * 2.0 / 3.0;
+                        let y1 = top + sw_h / 3.0;
+                        let y2 = top + sw_h * 2.0 / 3.0;
+
+                        rt.DrawLine(v2(x1, top), v2(x1, bottom), &grid_brush, 1.0, Some(&self.dotted_stroke_style));
+                        rt.DrawLine(v2(x2, top), v2(x2, bottom), &grid_brush, 1.0, Some(&self.dotted_stroke_style));
+                        rt.DrawLine(v2(left, y1), v2(right, y1), &grid_brush, 1.0, Some(&self.dotted_stroke_style));
+                        rt.DrawLine(v2(left, y2), v2(right, y2), &grid_brush, 1.0, Some(&self.dotted_stroke_style));
+                    }
+                }
+
+                // Center crosshair
+                let mid_x = (left + right) / 2.0;
+                let mid_y = (top + bottom) / 2.0;
+                if let Ok(c_brush) = rt.CreateSolidColorBrush(&center_guide_col, None) {
+                    rt.DrawLine(v2(mid_x - 12.0, mid_y), v2(mid_x + 12.0, mid_y), &c_brush, 1.5, None);
+                    rt.DrawLine(v2(mid_x, mid_y - 12.0), v2(mid_x, mid_y + 12.0), &c_brush, 1.5, None);
+                }
+            }
+
             let w_px = (right - left).round() as u32;
             let h_px = (bottom - top).round() as u32;
             let shape_tag = if snip.shape == SnipShape::Ellipse { "⭕ Circle" } else { "🔲 Rect" };
-            let badge_text = format!("✂️ {} ({}×{} px) • Tab: Switch | Shift: Square", shape_tag, w_px, h_px);
+            let badge_text = if snip.with_guides {
+                format!("✂️ {} ({}×{} px 1:1) • Guides Active (Shift)", shape_tag, w_px, h_px)
+            } else {
+                format!("✂️ {} ({}×{} px) • Tab: Switch | Shift: Square & Guides", shape_tag, w_px, h_px)
+            };
             let utf16: Vec<u16> = badge_text.encode_utf16().collect();
 
             let badge_x = left.max(10.0);
@@ -1483,7 +1532,7 @@ impl D2DRenderer {
             let badge_rect = D2D_RECT_F {
                 left: badge_x,
                 top: badge_y,
-                right: badge_x + 310.0,
+                right: badge_x + 330.0,
                 bottom: badge_y + 26.0,
             };
 
@@ -2601,6 +2650,7 @@ impl D2DRenderer {
                         FluentAction::SetStrokeWidth(w) => {
                             if (w - 2.0).abs() < 0.1 { ("2px", "Fine stroke: 2px") }
                             else if (w - 4.0).abs() < 0.1 { ("4px", "Medium stroke: 4px") }
+                            else if (w - 6.0).abs() < 0.1 { ("6px", "Thick stroke: 6px") }
                             else if (w - 8.0).abs() < 0.1 { ("8px", "Thick stroke: 8px") }
                             else { ("14px", "Heavy stroke: 14px") }
                         }

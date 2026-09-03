@@ -33,10 +33,11 @@ use crate::live_zoom::LiveZoomEngine;
 use crate::renderer::D2DRenderer;
 use crate::shapes::{recognize_smart_shape, shape_intersects_circle, snap_to_angle, snap_to_square};
 use crate::types::{
-    AppMode, ArrowStyle, BadgeShape, BadgeSize, CanvasBackground, ColorPreset, DrawTool,
+    AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, CanvasBackground, ColorPreset, DrawTool,
     FillMode, FluentAction, FluentToolbarState, HistoryAction, LaserTrailPoint, Point2D,
-    Shape, SnipSelection, SnipShape, SpotlightState, StrokePattern, TextCardStyle, TextEditorState,
-    TextFontFamily, TimerAction, TimerWidgetState, ToastNotification, ZoomState,
+    Shape, ShapeToolSettings, SnipSelection, SnipShape, SpotlightState, StepBadgeToolSettings,
+    StrokePattern, StrokeToolSettings, TextCardStyle, TextEditorState, TextFontFamily, TextToolSettings,
+    TimerAction, TimerWidgetState, ToastNotification, ZoomState,
 };
 
 const OVERLAY_CLASS_NAME: PCWSTR = w!("ZoomifyFullscreenOverlay");
@@ -78,6 +79,15 @@ pub struct OverlayWindow {
     pub text_is_italic: bool,
     pub text_card_style: TextCardStyle,
     pub text_font_family: TextFontFamily,
+    pub pen_settings: StrokeToolSettings,
+    pub highlighter_settings: StrokeToolSettings,
+    pub line_settings: StrokeToolSettings,
+    pub arrow_settings: ArrowToolSettings,
+    pub rect_settings: ShapeToolSettings,
+    pub rounded_rect_settings: ShapeToolSettings,
+    pub ellipse_settings: ShapeToolSettings,
+    pub badge_settings: StepBadgeToolSettings,
+    pub text_settings: TextToolSettings,
     pub toast: Option<ToastNotification>,
     pub show_cheat_sheet: bool,
     pub show_hud: bool,
@@ -213,6 +223,7 @@ impl OverlayWindow {
                     start: Point2D::default(),
                     current: Point2D::default(),
                     shape: SnipShape::Rectangle,
+                    with_guides: false,
                 },
                 shapes: Vec::new(),
                 undo_history: Vec::new(),
@@ -226,6 +237,15 @@ impl OverlayWindow {
                 arrow_style,
                 badge_size,
                 badge_shape,
+                pen_settings: StrokeToolSettings { stroke_width: 3.0, pattern: StrokePattern::Solid },
+                highlighter_settings: StrokeToolSettings { stroke_width: 14.0, pattern: StrokePattern::Solid },
+                line_settings: StrokeToolSettings { stroke_width: 3.0, pattern: StrokePattern::Solid },
+                arrow_settings: ArrowToolSettings { stroke_width: 4.0, style: ArrowStyle::Single, pattern: StrokePattern::Solid },
+                rect_settings: ShapeToolSettings { stroke_width: 3.0, fill_mode: FillMode::None, pattern: StrokePattern::Solid },
+                rounded_rect_settings: ShapeToolSettings { stroke_width: 3.0, fill_mode: FillMode::None, pattern: StrokePattern::Solid },
+                ellipse_settings: ShapeToolSettings { stroke_width: 3.0, fill_mode: FillMode::None, pattern: StrokePattern::Solid },
+                badge_settings: StepBadgeToolSettings { size: BadgeSize::Medium, shape: BadgeShape::Circle, fill: FillMode::Solid, stroke_width: 2.0 },
+                text_settings: TextToolSettings { font_size: 20.0, is_bold: false, is_italic: false, card_style: TextCardStyle::Transparent, font_family: TextFontFamily::SegoeUI },
                 live_zoom: LiveZoomEngine::new(),
                 is_drawing: false,
                 draw_start_pt: Point2D::default(),
@@ -299,6 +319,86 @@ impl OverlayWindow {
         self.toolbar.active_tool = None;
         self.show_window();
         self.set_toast("🔎", "Static Zoom (F1: Help)");
+    }
+
+    pub fn sync_tool_to_toolbar(&mut self) {
+        match self.current_tool {
+            DrawTool::Pen => {
+                self.stroke_width = self.pen_settings.stroke_width;
+                self.stroke_pattern = self.pen_settings.pattern;
+                self.toolbar.stroke_width = self.pen_settings.stroke_width;
+                self.toolbar.current_stroke_pattern = self.pen_settings.pattern;
+            }
+            DrawTool::Highlighter => {
+                self.stroke_width = self.highlighter_settings.stroke_width;
+                self.stroke_pattern = self.highlighter_settings.pattern;
+                self.toolbar.stroke_width = self.highlighter_settings.stroke_width;
+                self.toolbar.current_stroke_pattern = self.highlighter_settings.pattern;
+            }
+            DrawTool::Line => {
+                self.stroke_width = self.line_settings.stroke_width;
+                self.stroke_pattern = self.line_settings.pattern;
+                self.toolbar.stroke_width = self.line_settings.stroke_width;
+                self.toolbar.current_stroke_pattern = self.line_settings.pattern;
+            }
+            DrawTool::Arrow => {
+                self.stroke_width = self.arrow_settings.stroke_width;
+                self.stroke_pattern = self.arrow_settings.pattern;
+                self.arrow_style = self.arrow_settings.style;
+                self.toolbar.stroke_width = self.arrow_settings.stroke_width;
+                self.toolbar.current_stroke_pattern = self.arrow_settings.pattern;
+                self.toolbar.current_arrow_style = self.arrow_settings.style;
+            }
+            DrawTool::Rectangle => {
+                self.stroke_width = self.rect_settings.stroke_width;
+                self.fill_mode = self.rect_settings.fill_mode;
+                self.stroke_pattern = self.rect_settings.pattern;
+                self.toolbar.stroke_width = self.rect_settings.stroke_width;
+                self.toolbar.current_fill_mode = self.rect_settings.fill_mode;
+                self.toolbar.current_stroke_pattern = self.rect_settings.pattern;
+            }
+            DrawTool::RoundedRectangle => {
+                self.stroke_width = self.rounded_rect_settings.stroke_width;
+                self.fill_mode = self.rounded_rect_settings.fill_mode;
+                self.stroke_pattern = self.rounded_rect_settings.pattern;
+                self.toolbar.stroke_width = self.rounded_rect_settings.stroke_width;
+                self.toolbar.current_fill_mode = self.rounded_rect_settings.fill_mode;
+                self.toolbar.current_stroke_pattern = self.rounded_rect_settings.pattern;
+            }
+            DrawTool::Ellipse => {
+                self.stroke_width = self.ellipse_settings.stroke_width;
+                self.fill_mode = self.ellipse_settings.fill_mode;
+                self.stroke_pattern = self.ellipse_settings.pattern;
+                self.toolbar.stroke_width = self.ellipse_settings.stroke_width;
+                self.toolbar.current_fill_mode = self.ellipse_settings.fill_mode;
+                self.toolbar.current_stroke_pattern = self.ellipse_settings.pattern;
+            }
+            DrawTool::StepBadge => {
+                self.badge_size = self.badge_settings.size;
+                self.badge_shape = self.badge_settings.shape;
+                self.fill_mode = self.badge_settings.fill;
+                self.stroke_width = self.badge_settings.stroke_width;
+                self.stroke_pattern = StrokePattern::Solid;
+                self.toolbar.current_badge_size = self.badge_settings.size;
+                self.toolbar.current_badge_shape = self.badge_settings.shape;
+                self.toolbar.current_fill_mode = self.badge_settings.fill;
+                self.toolbar.stroke_width = self.badge_settings.stroke_width;
+                self.toolbar.current_stroke_pattern = StrokePattern::Solid;
+            }
+            DrawTool::Text => {
+                self.font_size = self.text_settings.font_size;
+                self.text_is_bold = self.text_settings.is_bold;
+                self.text_is_italic = self.text_settings.is_italic;
+                self.text_card_style = self.text_settings.card_style;
+                self.text_font_family = self.text_settings.font_family;
+                self.toolbar.current_font_size = self.text_settings.font_size;
+                self.toolbar.text_is_bold = self.text_settings.is_bold;
+                self.toolbar.text_is_italic = self.text_settings.is_italic;
+                self.toolbar.text_card_style = self.text_settings.card_style;
+                self.toolbar.text_font_family = self.text_settings.font_family;
+            }
+            _ => {}
+        }
     }
 
     pub fn enter_draw_mode(&mut self) {
@@ -1001,6 +1101,7 @@ impl OverlayWindow {
 
                     if this.snip.active {
                         let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                        this.snip.with_guides = is_shift;
                         this.snip.current = if is_shift {
                             snap_to_square(this.snip.start, screen_pt)
                         } else {
@@ -1145,6 +1246,7 @@ impl OverlayWindow {
                                     } else {
                                         this.toolbar.active_tool = Some(t);
                                     }
+                                    this.sync_tool_to_toolbar();
                                     let sw = this.screen_width as f32;
                                     let sh = this.screen_height as f32;
                                     this.toolbar.update_layout(sw, sh);
@@ -1177,6 +1279,17 @@ impl OverlayWindow {
                                     this.toolbar.update_layout(sw, sh);
                                 }
                                 FluentAction::SetStrokeWidth(w) => {
+                                    match this.current_tool {
+                                        DrawTool::Pen => this.pen_settings.stroke_width = w,
+                                        DrawTool::Highlighter => this.highlighter_settings.stroke_width = w,
+                                        DrawTool::Line => this.line_settings.stroke_width = w,
+                                        DrawTool::Arrow => this.arrow_settings.stroke_width = w,
+                                        DrawTool::Rectangle => this.rect_settings.stroke_width = w,
+                                        DrawTool::RoundedRectangle => this.rounded_rect_settings.stroke_width = w,
+                                        DrawTool::Ellipse => this.ellipse_settings.stroke_width = w,
+                                        DrawTool::StepBadge => this.badge_settings.stroke_width = w,
+                                        _ => {},
+                                    }
                                     this.stroke_width = w;
                                     this.toolbar.stroke_width = w;
                                     let sw = this.screen_width as f32;
@@ -1186,6 +1299,13 @@ impl OverlayWindow {
                                     this.set_toast("✏️", format!("Stroke Width: {:.0}px", w));
                                 }
                                 FluentAction::SetFillMode(fm) => {
+                                    match this.current_tool {
+                                        DrawTool::Rectangle => this.rect_settings.fill_mode = fm,
+                                        DrawTool::RoundedRectangle => this.rounded_rect_settings.fill_mode = fm,
+                                        DrawTool::Ellipse => this.ellipse_settings.fill_mode = fm,
+                                        DrawTool::StepBadge => this.badge_settings.fill = fm,
+                                        _ => {},
+                                    }
                                     this.fill_mode = fm;
                                     this.toolbar.current_fill_mode = fm;
                                     let sw = this.screen_width as f32;
@@ -1194,6 +1314,15 @@ impl OverlayWindow {
                                     this.set_toast("🎨", format!("Fill: {}", fm.name()));
                                 }
                                 FluentAction::SetStrokePattern(sp) => {
+                                    match this.current_tool {
+                                        DrawTool::Pen => this.pen_settings.pattern = sp,
+                                        DrawTool::Line => this.line_settings.pattern = sp,
+                                        DrawTool::Arrow => this.arrow_settings.pattern = sp,
+                                        DrawTool::Rectangle => this.rect_settings.pattern = sp,
+                                        DrawTool::RoundedRectangle => this.rounded_rect_settings.pattern = sp,
+                                        DrawTool::Ellipse => this.ellipse_settings.pattern = sp,
+                                        _ => {},
+                                    }
                                     this.stroke_pattern = sp;
                                     this.toolbar.current_stroke_pattern = sp;
                                     let sw = this.screen_width as f32;
@@ -1202,6 +1331,7 @@ impl OverlayWindow {
                                     this.set_toast("✏️", format!("Pattern: {}", sp.name()));
                                 }
                                 FluentAction::SetArrowStyle(as_) => {
+                                    this.arrow_settings.style = as_;
                                     this.arrow_style = as_;
                                     this.toolbar.current_arrow_style = as_;
                                     let sw = this.screen_width as f32;
@@ -1210,6 +1340,7 @@ impl OverlayWindow {
                                     this.set_toast("🏹", format!("Arrow: {}", as_.name()));
                                 }
                                 FluentAction::SetBadgeSize(bs) => {
+                                    this.badge_settings.size = bs;
                                     this.badge_size = bs;
                                     this.toolbar.current_badge_size = bs;
                                     let sw = this.screen_width as f32;
@@ -1218,6 +1349,7 @@ impl OverlayWindow {
                                     this.set_toast("🔢", format!("Badge Size: {}", bs.name()));
                                 }
                                 FluentAction::SetBadgeShape(bsh) => {
+                                    this.badge_settings.shape = bsh;
                                     this.badge_shape = bsh;
                                     this.toolbar.current_badge_shape = bsh;
                                     let sw = this.screen_width as f32;
@@ -1234,6 +1366,7 @@ impl OverlayWindow {
                                     this.set_toast("↺", "Step badge reset to #1");
                                 }
                                 FluentAction::SetFontSize(sz) => {
+                                    this.text_settings.font_size = sz;
                                     this.font_size = sz;
                                     this.toolbar.current_font_size = sz;
                                     if let Some(ed) = &mut this.text_editor {
@@ -1245,7 +1378,8 @@ impl OverlayWindow {
                                     this.set_toast("🔤", format!("Font Size: {:.0}px", sz));
                                 }
                                 FluentAction::ToggleBold => {
-                                    this.text_is_bold = !this.text_is_bold;
+                                    this.text_settings.is_bold = !this.text_settings.is_bold;
+                                    this.text_is_bold = this.text_settings.is_bold;
                                     let bold = this.text_is_bold;
                                     this.toolbar.text_is_bold = bold;
                                     if let Some(ed) = &mut this.text_editor {
@@ -1257,7 +1391,8 @@ impl OverlayWindow {
                                     this.set_toast("𝐁", if bold { "Bold: On" } else { "Bold: Off" });
                                 }
                                 FluentAction::ToggleItalic => {
-                                    this.text_is_italic = !this.text_is_italic;
+                                    this.text_settings.is_italic = !this.text_settings.is_italic;
+                                    this.text_is_italic = this.text_settings.is_italic;
                                     let italic = this.text_is_italic;
                                     this.toolbar.text_is_italic = italic;
                                     if let Some(ed) = &mut this.text_editor {
@@ -1269,6 +1404,7 @@ impl OverlayWindow {
                                     this.set_toast("𝐼", if italic { "Italic: On" } else { "Italic: Off" });
                                 }
                                 FluentAction::SetTextCardStyle(cs) => {
+                                    this.text_settings.card_style = cs;
                                     this.text_card_style = cs;
                                     this.toolbar.text_card_style = cs;
                                     if let Some(ed) = &mut this.text_editor {
@@ -1280,6 +1416,7 @@ impl OverlayWindow {
                                     this.set_toast("🏷️", format!("Text Card: {}", cs.name()));
                                 }
                                 FluentAction::SetFontFamily(ff) => {
+                                    this.text_settings.font_family = ff;
                                     this.text_font_family = ff;
                                     this.toolbar.text_font_family = ff;
                                     if let Some(ed) = &mut this.text_editor {
@@ -1411,12 +1548,12 @@ impl OverlayWindow {
 
                     if this.current_tool == DrawTool::StepBadge {
                         let num = this.step_counter;
-                        let rad = this.badge_size.radius();
+                        let rad = this.badge_settings.size.radius();
                         let col = this.current_color;
-                        let bshape = this.badge_shape;
-                        let bfill = this.fill_mode;
-                        let bwidth = this.stroke_width;
-                        let bpattern = this.stroke_pattern;
+                        let bshape = this.badge_settings.shape;
+                        let bfill = this.badge_settings.fill;
+                        let bwidth = this.badge_settings.stroke_width;
+                        let bpattern = StrokePattern::Solid;
                         this.push_shape(Shape::StepBadge {
                             center: canvas_pt,
                             number: num,
@@ -1517,9 +1654,9 @@ impl OverlayWindow {
                             Shape::Stroke {
                                 points: vec![canvas_pt],
                                 color: this.current_color,
-                                width: this.stroke_width,
+                                width: this.pen_settings.stroke_width,
                                 is_highlighter: false,
-                                pattern: this.stroke_pattern,
+                                pattern: this.pen_settings.pattern,
                             }
                         }
                     } else {
@@ -1528,7 +1665,7 @@ impl OverlayWindow {
                             DrawTool::Highlighter => Shape::Stroke {
                                 points: vec![canvas_pt],
                                 color: this.current_color,
-                                width: this.stroke_width,
+                                width: this.highlighter_settings.stroke_width,
                                 is_highlighter: true,
                                 pattern: StrokePattern::Solid,
                             },
@@ -1536,49 +1673,49 @@ impl OverlayWindow {
                                 start: canvas_pt,
                                 end: canvas_pt,
                                 color: this.current_color,
-                                width: this.stroke_width,
-                                pattern: this.stroke_pattern,
+                                width: this.line_settings.stroke_width,
+                                pattern: this.line_settings.pattern,
                             },
                             DrawTool::Arrow => Shape::Arrow {
                                 start: canvas_pt,
                                 end: canvas_pt,
                                 color: this.current_color,
-                                width: this.stroke_width,
-                                style: this.arrow_style,
-                                pattern: this.stroke_pattern,
+                                width: this.arrow_settings.stroke_width,
+                                style: this.arrow_settings.style,
+                                pattern: this.arrow_settings.pattern,
                             },
                             DrawTool::Rectangle => Shape::Rectangle {
                                 start: canvas_pt,
                                 end: canvas_pt,
                                 color: this.current_color,
-                                width: this.stroke_width,
+                                width: this.rect_settings.stroke_width,
                                 rounded: false,
-                                fill: this.fill_mode,
-                                pattern: this.stroke_pattern,
+                                fill: this.rect_settings.fill_mode,
+                                pattern: this.rect_settings.pattern,
                             },
                             DrawTool::RoundedRectangle => Shape::Rectangle {
                                 start: canvas_pt,
                                 end: canvas_pt,
                                 color: this.current_color,
-                                width: this.stroke_width,
+                                width: this.rounded_rect_settings.stroke_width,
                                 rounded: true,
-                                fill: this.fill_mode,
-                                pattern: this.stroke_pattern,
+                                fill: this.rounded_rect_settings.fill_mode,
+                                pattern: this.rounded_rect_settings.pattern,
                             },
                             DrawTool::Ellipse => Shape::Ellipse {
                                 start: canvas_pt,
                                 end: canvas_pt,
                                 color: this.current_color,
-                                width: this.stroke_width,
-                                fill: this.fill_mode,
-                                pattern: this.stroke_pattern,
+                                width: this.ellipse_settings.stroke_width,
+                                fill: this.ellipse_settings.fill_mode,
+                                pattern: this.ellipse_settings.pattern,
                             },
                             _ => Shape::Stroke {
                                 points: vec![canvas_pt],
                                 color: this.current_color,
-                                width: this.stroke_width,
+                                width: this.pen_settings.stroke_width,
                                 is_highlighter: false,
-                                pattern: this.stroke_pattern,
+                                pattern: this.pen_settings.pattern,
                             },
                         }
                     };
@@ -1613,6 +1750,7 @@ impl OverlayWindow {
 
                     if this.snip.active {
                         this.snip.active = false;
+                        this.snip.with_guides = false;
                         let (l, t, r, b) = this.snip.rect();
                         let w = (r - l).round() as u32;
                         let h = (b - t).round() as u32;
@@ -1688,6 +1826,7 @@ impl OverlayWindow {
                     // If snip in progress, cancel snip
                     if this.snip.active {
                         this.snip.active = false;
+                        this.snip.with_guides = false;
                         this.request_repaint();
                         return LRESULT(0);
                     }
@@ -1819,6 +1958,12 @@ impl OverlayWindow {
                     let key = wparam.0 as i32;
                     let is_ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
                     let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+
+                    if this.snip.active && key == VK_SHIFT.0 as i32 {
+                        this.snip.with_guides = true;
+                        this.snip.current = snap_to_square(this.snip.start, this.last_mouse_pos);
+                        this.request_repaint();
+                    }
 
                     // ── Text editor intercepts all keys first ──
                     if this.text_editor.is_some() {
@@ -1963,6 +2108,7 @@ impl OverlayWindow {
                                 this.request_repaint();
                             } else if this.snip.active {
                                 this.snip.active = false;
+                                this.snip.with_guides = false;
                                 this.request_repaint();
                             } else {
                                 this.exit_overlay();
@@ -2144,6 +2290,7 @@ impl OverlayWindow {
                         k if k == 'T' as i32 => {
                             this.current_tool = DrawTool::Text;
                             this.toolbar.active_tool = Some(DrawTool::Text);
+                            this.sync_tool_to_toolbar();
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
                             this.toolbar.update_layout(sw, sh);
@@ -2153,6 +2300,7 @@ impl OverlayWindow {
                         k if k == 'H' as i32 => {
                             this.current_tool = DrawTool::Highlighter;
                             this.toolbar.active_tool = Some(DrawTool::Highlighter);
+                            this.sync_tool_to_toolbar();
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
                             this.toolbar.update_layout(sw, sh);
@@ -2162,6 +2310,7 @@ impl OverlayWindow {
                         k if k == 'L' as i32 => {
                             this.current_tool = DrawTool::Line;
                             this.toolbar.active_tool = Some(DrawTool::Line);
+                            this.sync_tool_to_toolbar();
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
                             this.toolbar.update_layout(sw, sh);
@@ -2171,6 +2320,7 @@ impl OverlayWindow {
                         k if k == 'A' as i32 => {
                             this.current_tool = DrawTool::Arrow;
                             this.toolbar.active_tool = Some(DrawTool::Arrow);
+                            this.sync_tool_to_toolbar();
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
                             this.toolbar.update_layout(sw, sh);
@@ -2180,6 +2330,7 @@ impl OverlayWindow {
                         k if k == 'R' as i32 && is_shift => {
                             this.current_tool = DrawTool::Rectangle;
                             this.toolbar.active_tool = Some(DrawTool::Rectangle);
+                            this.sync_tool_to_toolbar();
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
                             this.toolbar.update_layout(sw, sh);
@@ -2189,6 +2340,7 @@ impl OverlayWindow {
                         k if k == 'U' as i32 => {
                             this.current_tool = DrawTool::RoundedRectangle;
                             this.toolbar.active_tool = Some(DrawTool::RoundedRectangle);
+                            this.sync_tool_to_toolbar();
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
                             this.toolbar.update_layout(sw, sh);
@@ -2198,6 +2350,7 @@ impl OverlayWindow {
                         k if k == 'Q' as i32 => {
                             this.current_tool = DrawTool::Ellipse;
                             this.toolbar.active_tool = Some(DrawTool::Ellipse);
+                            this.sync_tool_to_toolbar();
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
                             this.toolbar.update_layout(sw, sh);
@@ -2210,6 +2363,13 @@ impl OverlayWindow {
                                 FillMode::Tinted => FillMode::Solid,
                                 FillMode::Solid => FillMode::None,
                             };
+                            match this.current_tool {
+                                DrawTool::Rectangle => this.rect_settings.fill_mode = new_fm,
+                                DrawTool::RoundedRectangle => this.rounded_rect_settings.fill_mode = new_fm,
+                                DrawTool::Ellipse => this.ellipse_settings.fill_mode = new_fm,
+                                DrawTool::StepBadge => this.badge_settings.fill = new_fm,
+                                _ => {},
+                            }
                             this.fill_mode = new_fm;
                             this.toolbar.current_fill_mode = new_fm;
                             let sw = this.screen_width as f32;
@@ -2225,6 +2385,15 @@ impl OverlayWindow {
                                 StrokePattern::Dashed => StrokePattern::Dotted,
                                 StrokePattern::Dotted => StrokePattern::Solid,
                             };
+                            match this.current_tool {
+                                DrawTool::Pen => this.pen_settings.pattern = new_sp,
+                                DrawTool::Line => this.line_settings.pattern = new_sp,
+                                DrawTool::Arrow => this.arrow_settings.pattern = new_sp,
+                                DrawTool::Rectangle => this.rect_settings.pattern = new_sp,
+                                DrawTool::RoundedRectangle => this.rounded_rect_settings.pattern = new_sp,
+                                DrawTool::Ellipse => this.ellipse_settings.pattern = new_sp,
+                                _ => {},
+                            }
                             this.stroke_pattern = new_sp;
                             this.toolbar.current_stroke_pattern = new_sp;
                             let sw = this.screen_width as f32;
@@ -2247,6 +2416,7 @@ impl OverlayWindow {
                             let next_num = this.step_counter;
                             this.current_tool = DrawTool::StepBadge;
                             this.toolbar.active_tool = Some(DrawTool::StepBadge);
+                            this.sync_tool_to_toolbar();
                             this.toolbar.badge_counter = this.step_counter;
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
@@ -2257,6 +2427,7 @@ impl OverlayWindow {
                         k if k == 'P' as i32 => {
                             this.current_tool = DrawTool::Pen;
                             this.toolbar.active_tool = Some(DrawTool::Pen);
+                            this.sync_tool_to_toolbar();
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
                             this.toolbar.update_layout(sw, sh);
@@ -2266,6 +2437,7 @@ impl OverlayWindow {
                         k if k == 'S' as i32 => {
                             this.current_tool = DrawTool::Snip;
                             this.toolbar.active_tool = Some(DrawTool::Snip);
+                            this.sync_tool_to_toolbar();
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
                             this.toolbar.update_layout(sw, sh);
@@ -2275,6 +2447,7 @@ impl OverlayWindow {
                         k if k == 'X' as i32 => {
                             this.current_tool = DrawTool::Eraser;
                             this.toolbar.active_tool = Some(DrawTool::Eraser);
+                            this.sync_tool_to_toolbar();
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
                             this.toolbar.update_layout(sw, sh);
@@ -2292,6 +2465,17 @@ impl OverlayWindow {
                             let idx = (k - '1' as i32) as usize;
                             let widths = [2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 22.0, 28.0, 36.0];
                             let w = widths[idx.min(8)];
+                            match this.current_tool {
+                                DrawTool::Pen => this.pen_settings.stroke_width = w,
+                                DrawTool::Highlighter => this.highlighter_settings.stroke_width = w,
+                                DrawTool::Line => this.line_settings.stroke_width = w,
+                                DrawTool::Arrow => this.arrow_settings.stroke_width = w,
+                                DrawTool::Rectangle => this.rect_settings.stroke_width = w,
+                                DrawTool::RoundedRectangle => this.rounded_rect_settings.stroke_width = w,
+                                DrawTool::Ellipse => this.ellipse_settings.stroke_width = w,
+                                DrawTool::StepBadge => this.badge_settings.stroke_width = w,
+                                _ => {},
+                            }
                             this.stroke_width = w;
                             this.toolbar.stroke_width = w;
                             let sw = this.screen_width as f32;
@@ -2308,11 +2492,12 @@ impl OverlayWindow {
                                 this.spotlight.radius = new_rad;
                                 this.set_toast("🔦", format!("⌀{} px", (new_rad * 2.0).round() as u32));
                             } else if this.current_tool == DrawTool::StepBadge {
-                                let new_bs = match this.badge_size {
+                                let new_bs = match this.badge_settings.size {
                                     BadgeSize::ExtraLarge => BadgeSize::Large,
                                     BadgeSize::Large => BadgeSize::Medium,
                                     _ => BadgeSize::Small,
                                 };
+                                this.badge_settings.size = new_bs;
                                 this.badge_size = new_bs;
                                 this.toolbar.current_badge_size = new_bs;
                                 let sw = this.screen_width as f32;
@@ -2322,6 +2507,16 @@ impl OverlayWindow {
                                 this.set_toast("🔢", format!("Badge Size: {}", nm));
                             } else {
                                 let new_w = (this.stroke_width - 2.0).max(1.0);
+                                match this.current_tool {
+                                    DrawTool::Pen => this.pen_settings.stroke_width = new_w,
+                                    DrawTool::Highlighter => this.highlighter_settings.stroke_width = new_w,
+                                    DrawTool::Line => this.line_settings.stroke_width = new_w,
+                                    DrawTool::Arrow => this.arrow_settings.stroke_width = new_w,
+                                    DrawTool::Rectangle => this.rect_settings.stroke_width = new_w,
+                                    DrawTool::RoundedRectangle => this.rounded_rect_settings.stroke_width = new_w,
+                                    DrawTool::Ellipse => this.ellipse_settings.stroke_width = new_w,
+                                    _ => {},
+                                }
                                 this.stroke_width = new_w;
                                 this.toolbar.stroke_width = new_w;
                                 let sw = this.screen_width as f32;
@@ -2337,11 +2532,12 @@ impl OverlayWindow {
                                 this.spotlight.radius = new_rad;
                                 this.set_toast("🔦", format!("⌀{} px", (new_rad * 2.0).round() as u32));
                             } else if this.current_tool == DrawTool::StepBadge {
-                                let new_bs = match this.badge_size {
+                                let new_bs = match this.badge_settings.size {
                                     BadgeSize::Small => BadgeSize::Medium,
                                     BadgeSize::Medium => BadgeSize::Large,
                                     _ => BadgeSize::ExtraLarge,
                                 };
+                                this.badge_settings.size = new_bs;
                                 this.badge_size = new_bs;
                                 this.toolbar.current_badge_size = new_bs;
                                 let sw = this.screen_width as f32;
@@ -2351,6 +2547,16 @@ impl OverlayWindow {
                                 this.set_toast("🔢", format!("Badge Size: {}", nm));
                             } else {
                                 let new_w = (this.stroke_width + 2.0).min(40.0);
+                                match this.current_tool {
+                                    DrawTool::Pen => this.pen_settings.stroke_width = new_w,
+                                    DrawTool::Highlighter => this.highlighter_settings.stroke_width = new_w,
+                                    DrawTool::Line => this.line_settings.stroke_width = new_w,
+                                    DrawTool::Arrow => this.arrow_settings.stroke_width = new_w,
+                                    DrawTool::Rectangle => this.rect_settings.stroke_width = new_w,
+                                    DrawTool::RoundedRectangle => this.rounded_rect_settings.stroke_width = new_w,
+                                    DrawTool::Ellipse => this.ellipse_settings.stroke_width = new_w,
+                                    _ => {},
+                                }
                                 this.stroke_width = new_w;
                                 this.toolbar.stroke_width = new_w;
                                 let sw = this.screen_width as f32;
@@ -2420,6 +2626,16 @@ impl OverlayWindow {
                         _ => {}
                     }
 
+                    LRESULT(0)
+                }
+
+                windows::Win32::UI::WindowsAndMessaging::WM_KEYUP => {
+                    let key = wparam.0 as i32;
+                    if this.snip.active && key == VK_SHIFT.0 as i32 {
+                        this.snip.with_guides = false;
+                        this.snip.current = this.last_mouse_pos;
+                        this.request_repaint();
+                    }
                     LRESULT(0)
                 }
 

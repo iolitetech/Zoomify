@@ -583,6 +583,43 @@ impl ZoomState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StrokeToolSettings {
+    pub stroke_width: f32,
+    pub pattern: StrokePattern,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapeToolSettings {
+    pub stroke_width: f32,
+    pub fill_mode: FillMode,
+    pub pattern: StrokePattern,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArrowToolSettings {
+    pub stroke_width: f32,
+    pub style: ArrowStyle,
+    pub pattern: StrokePattern,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StepBadgeToolSettings {
+    pub size: BadgeSize,
+    pub shape: BadgeShape,
+    pub fill: FillMode,
+    pub stroke_width: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextToolSettings {
+    pub font_size: f32,
+    pub is_bold: bool,
+    pub is_italic: bool,
+    pub card_style: TextCardStyle,
+    pub font_family: TextFontFamily,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SnipShape {
     Rectangle,
@@ -595,6 +632,19 @@ pub struct SnipSelection {
     pub start: Point2D,
     pub current: Point2D,
     pub shape: SnipShape,
+    pub with_guides: bool,
+}
+
+impl Default for SnipSelection {
+    fn default() -> Self {
+        Self {
+            active: false,
+            start: Point2D::default(),
+            current: Point2D::default(),
+            shape: SnipShape::Rectangle,
+            with_guides: false,
+        }
+    }
 }
 
 impl SnipSelection {
@@ -1368,6 +1418,7 @@ mod tests {
             start: Point2D::new(200.0, 300.0),
             current: Point2D::new(100.0, 150.0),
             shape: SnipShape::Rectangle,
+            with_guides: false,
         };
         let (l, t, r, b) = snip.rect();
         assert_eq!(l, 100.0);
@@ -1645,6 +1696,7 @@ mod tests {
             start: Point2D::new(100.0, 100.0),
             current: Point2D::new(300.0, 300.0),
             shape: SnipShape::Ellipse,
+            with_guides: false,
         };
         assert_eq!(snip.shape, SnipShape::Ellipse);
         let (l, t, r, b) = snip.rect();
@@ -1785,4 +1837,59 @@ mod tests {
         assert_eq!(r3, screen_w - 24.0);
         assert_eq!(b3, screen_h - 24.0);
     }
+
+    #[test]
+    fn test_per_tool_settings_independence() {
+        // Verify tool settings are independent structs and can be mutated without cross-contamination
+        let pen = StrokeToolSettings { stroke_width: 2.0, pattern: StrokePattern::Solid };
+        let mut highlighter = StrokeToolSettings { stroke_width: 14.0, pattern: StrokePattern::Solid };
+        let mut arrow = ArrowToolSettings { stroke_width: 4.0, style: ArrowStyle::Single, pattern: StrokePattern::Solid };
+        let mut rect = ShapeToolSettings { stroke_width: 3.0, fill_mode: FillMode::None, pattern: StrokePattern::Solid };
+        let badge = StepBadgeToolSettings { size: BadgeSize::Medium, shape: BadgeShape::Circle, fill: FillMode::Solid, stroke_width: 2.0 };
+        let mut text = TextToolSettings { font_size: 20.0, is_bold: false, is_italic: false, card_style: TextCardStyle::Transparent, font_family: TextFontFamily::SegoeUI };
+
+        // Mutate highlighter stroke width
+        highlighter.stroke_width = 24.0;
+        assert_eq!(highlighter.stroke_width, 24.0);
+        assert_eq!(pen.stroke_width, 2.0); // Pen remains untouched!
+        assert_eq!(badge.stroke_width, 2.0); // Badge remains untouched!
+        assert_eq!(rect.stroke_width, 3.0); // Rect remains untouched!
+
+        // Mutate arrow style and pattern
+        arrow.style = ArrowStyle::Double;
+        arrow.pattern = StrokePattern::Dashed;
+        assert_eq!(arrow.style, ArrowStyle::Double);
+        assert_eq!(arrow.pattern, StrokePattern::Dashed);
+        assert_eq!(rect.pattern, StrokePattern::Solid); // Rect pattern is Solid!
+        assert_eq!(pen.pattern, StrokePattern::Solid); // Pen pattern is Solid!
+
+        // Mutate rect fill
+        rect.fill_mode = FillMode::Tinted;
+        assert_eq!(rect.fill_mode, FillMode::Tinted);
+        assert_eq!(badge.fill, FillMode::Solid); // Badge fill is still Solid!
+
+        // Mutate text font size
+        text.font_size = 32.0;
+        text.is_bold = true;
+        assert_eq!(text.font_size, 32.0);
+        assert!(text.is_bold);
+        assert_eq!(badge.size, BadgeSize::Medium);
+    }
+
+    #[test]
+    fn test_snip_with_guides() {
+        let mut snip = SnipSelection::default();
+        assert!(!snip.active);
+        assert!(!snip.with_guides);
+
+        snip.active = true;
+        snip.start = Point2D::new(100.0, 100.0);
+        snip.current = Point2D::new(300.0, 200.0);
+        snip.with_guides = true;
+
+        let (l, t, r, b) = snip.rect();
+        assert_eq!((l, t, r, b), (100.0, 100.0, 300.0, 200.0));
+        assert!(snip.with_guides);
+    }
 }
+
