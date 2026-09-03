@@ -1,9 +1,34 @@
 #![allow(dead_code)]
 
 use windows::core::{s, BOOL};
-use windows::Win32::Foundation::{HMODULE, POINT};
+use windows::Win32::Foundation::{HMODULE, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetSystemMetrics};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, GetCursorPos, GetSystemMetrics, SetWindowsHookExW, UnhookWindowsHookEx,
+    HHOOK, MSLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, WH_MOUSE_LL, WM_MOUSEWHEEL,
+};
+
+static mut LIVE_ZOOM_HOOK: HHOOK = HHOOK(std::ptr::null_mut());
+static mut ENGINE_RAW_PTR: *mut LiveZoomEngine = std::ptr::null_mut();
+
+unsafe extern "system" fn live_zoom_mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    unsafe {
+        if code >= 0 && wparam.0 as u32 == WM_MOUSEWHEEL {
+            let is_ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
+            if is_ctrl && !ENGINE_RAW_PTR.is_null() {
+                let hook_struct = *(lparam.0 as *const MSLLHOOKSTRUCT);
+                let delta = ((hook_struct.mouseData >> 16) as i16 as f32) / 120.0;
+                let engine = &mut *ENGINE_RAW_PTR;
+                if engine.is_active {
+                    engine.adjust_zoom(delta * 0.25);
+                    return LRESULT(1);
+                }
+            }
+        }
+        CallNextHookEx(None, code, wparam, lparam)
+    }
+}
 
 type MagInitFn = unsafe extern "system" fn() -> BOOL;
 type MagUninitFn = unsafe extern "system" fn() -> BOOL;
@@ -24,6 +49,10 @@ pub struct LiveZoomEngine {
     current_y_offset: f32,
     target_x_offset: f32,
     target_y_offset: f32,
+    pub monitor_x: i32,
+    pub monitor_y: i32,
+    pub monitor_w: u32,
+    pub monitor_h: u32,
 }
 
 impl LiveZoomEngine {
@@ -41,10 +70,21 @@ impl LiveZoomEngine {
             current_y_offset: 0.0,
             target_x_offset: 0.0,
             target_y_offset: 0.0,
+            monitor_x: 0,
+            monitor_y: 0,
+            monitor_w: 0,
+            monitor_h: 0,
         };
 
         engine.load_dll();
         engine
+    }
+
+    pub fn set_monitor_bounds(&mut self, x: i32, y: i32, w: u32, h: u32) {
+        self.monitor_x = x;
+        self.monitor_y = y;
+        self.monitor_w = w;
+        self.monitor_h = h;
     }
 
     fn load_dll(&mut self) {
@@ -115,6 +155,15 @@ impl LiveZoomEngine {
                             self.current_y_offset.round() as i32,
                         );
                     }
+
+                    // Install low-level mouse wheel hook for Ctrl+Wheel zooming
+                    ENGINE_RAW_PTR = self as *mut LiveZoomEngine;
+                    if LIVE_ZOOM_HOOK.0.is_null() {
+                        if let Ok(hook) = SetWindowsHookExW(WH_MOUSE_LL, Some(live_zoom_mouse_hook), None, 0) {
+                            LIVE_ZOOM_HOOK = hook;
+                        }
+                    }
+
                     return true;
                 }
             }
@@ -128,6 +177,12 @@ impl LiveZoomEngine {
         }
 
         unsafe {
+            if !LIVE_ZOOM_HOOK.0.is_null() {
+                let _ = UnhookWindowsHookEx(LIVE_ZOOM_HOOK);
+                LIVE_ZOOM_HOOK = HHOOK(std::ptr::null_mut());
+            }
+            ENGINE_RAW_PTR = std::ptr::null_mut();
+
             if let Some(set_fn) = self.mag_set_transform {
                 let _ = set_fn(1.0, 0, 0);
             }
@@ -158,34 +213,37 @@ impl LiveZoomEngine {
         unsafe {
             let mut pt = POINT::default();
             if GetCursorPos(&mut pt).is_ok() {
-                let screen_w = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
-                let screen_h = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
+                let mon_x = self.monitor_x as f32;
+                let mon_y = self.monitor_y as f32;
+                let mon_w = if self.monitor_w > 0 { self.monitor_w as f32 } else { GetSystemMetrics(SM_CXSCREEN) as f32 };
+                let mon_h = if self.monitor_h > 0 { self.monitor_h as f32 } else { GetSystemMetrics(SM_CYSCREEN) as f32 };
 
-                let view_w = screen_w / self.zoom_level;
-                let view_h = screen_h / self.zoom_level;
+                let view_w = mon_w / self.zoom_level;
+                let view_h = mon_h / self.zoom_level;
 
-                let target_x = (pt.x as f32) - (view_w / 2.0);
-                let target_y = (pt.y as f32) - (view_h / 2.0);
+                let cur_rel_x = (pt.x as f32 - mon_x).clamp(0.0, mon_w);
+                let cur_rel_y = (pt.y as f32 - mon_y).clamp(0.0, mon_h);
 
-                let max_x = (screen_w - view_w).max(0.0);
-                let max_y = (screen_h - view_h).max(0.0);
+                let target_x = cur_rel_x - (view_w / 2.0);
+                let target_y = cur_rel_y - (view_h / 2.0);
 
-                self.target_x_offset = target_x.clamp(0.0, max_x);
-                self.target_y_offset = target_y.clamp(0.0, max_y);
+                let max_x = (mon_w - view_w).max(0.0);
+                let max_y = (mon_h - view_h).max(0.0);
+
+                self.target_x_offset = mon_x + target_x.clamp(0.0, max_x);
+                self.target_y_offset = mon_y + target_y.clamp(0.0, max_y);
             }
         }
     }
 
-    pub fn tick_smooth_pan(&mut self, lerp_factor: f32) {
+    pub fn tick_smooth_pan(&mut self, _lerp_factor: f32) {
         if !self.is_active {
             return;
         }
 
         self.update_target_from_cursor();
-
-        let factor = lerp_factor.clamp(0.05, 1.0);
-        self.current_x_offset += (self.target_x_offset - self.current_x_offset) * factor;
-        self.current_y_offset += (self.target_y_offset - self.current_y_offset) * factor;
+        self.current_x_offset = self.target_x_offset;
+        self.current_y_offset = self.target_y_offset;
 
         self.apply_transform();
     }
@@ -194,17 +252,10 @@ impl LiveZoomEngine {
         if self.is_active {
             if let Some(set_fn) = self.mag_set_transform {
                 unsafe {
-                    let screen_w = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN) as f32;
-                    let screen_h = GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CYSCREEN) as f32;
-                    let max_x = (screen_w - (screen_w / self.zoom_level)).max(0.0);
-                    let max_y = (screen_h - (screen_h / self.zoom_level)).max(0.0);
-                    let clamped_x = self.current_x_offset.clamp(0.0, max_x).round() as i32;
-                    let clamped_y = self.current_y_offset.clamp(0.0, max_y).round() as i32;
-
                     let _ = set_fn(
                         self.zoom_level,
-                        clamped_x,
-                        clamped_y,
+                        self.current_x_offset.round() as i32,
+                        self.current_y_offset.round() as i32,
                     );
                 }
             }

@@ -27,13 +27,8 @@ pub struct ScreenCapture {
 }
 
 impl ScreenCapture {
-    pub fn capture_screen() -> Option<Self> {
+    pub fn capture_rect(x: i32, y: i32, width: u32, height: u32) -> Option<Self> {
         unsafe {
-            let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-            let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN) as u32;
-            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN) as u32;
-
             if width == 0 || height == 0 {
                 return None;
             }
@@ -125,6 +120,16 @@ impl ScreenCapture {
             let _ = DeleteDC(mem_dc);
             let _ = ReleaseDC(None, screen_dc);
             None
+        }
+    }
+
+    pub fn capture_screen() -> Option<Self> {
+        unsafe {
+            let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN) as u32;
+            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN) as u32;
+            Self::capture_rect(x, y, width, height)
         }
     }
 

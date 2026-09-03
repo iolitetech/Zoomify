@@ -2,8 +2,10 @@
 
 mod capture;
 mod clipboard;
+mod config;
 mod hotkeys;
 mod live_zoom;
+mod monitor;
 mod overlay;
 mod renderer;
 mod shapes;
@@ -26,15 +28,23 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
     GetWindowLongPtrW, MessageBoxW, PostQuitMessage, RegisterClassExW,
-    SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, MB_ICONINFORMATION, MB_OK, MB_SYSTEMMODAL,
-    MSG, WM_COMMAND, WM_DESTROY, WM_HOTKEY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, MB_ICONINFORMATION,
+    MB_OK, MB_SYSTEMMODAL, MSG, WM_COMMAND, WM_DESTROY, WM_DISPLAYCHANGE, WM_HOTKEY,
+    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
 use hotkeys::*;
 use overlay::OverlayWindow;
 use tray::*;
-use types::AppMode;
+use types::{AppMode, CanvasBackground, DrawTool};
+
+fn ensure_live_zoom_stopped(overlay: &mut OverlayWindow) {
+    if overlay.live_zoom.is_active() || overlay.mode == AppMode::LiveZoom {
+        overlay.live_zoom.stop();
+        overlay.mode = AppMode::Idle;
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
 
 struct AppContext {
     overlay: Rc<RefCell<OverlayWindow>>,
@@ -65,6 +75,7 @@ unsafe extern "system" fn tray_wnd_proc(
 
                 match hotkey_id {
                     HOTKEY_STATIC_ZOOM => {
+                        ensure_live_zoom_stopped(&mut *overlay);
                         if overlay.mode == AppMode::StaticZoom {
                             overlay.exit_overlay();
                         } else {
@@ -72,6 +83,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         }
                     }
                     HOTKEY_DRAW => {
+                        ensure_live_zoom_stopped(&mut *overlay);
                         if overlay.mode == AppMode::Draw {
                             overlay.exit_overlay();
                         } else {
@@ -79,6 +91,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         }
                     }
                     HOTKEY_SPOTLIGHT => {
+                        ensure_live_zoom_stopped(&mut *overlay);
                         if overlay.mode == AppMode::Spotlight {
                             overlay.exit_overlay();
                         } else if overlay.mode == AppMode::StaticZoom || overlay.mode == AppMode::Draw {
@@ -92,11 +105,16 @@ unsafe extern "system" fn tray_wnd_proc(
                             overlay.live_zoom.stop();
                             overlay.mode = AppMode::Idle;
                             overlay.hide_window();
+                            ctx.tray.show_balloon("Live Zoom Ended", "Restored standard desktop view");
                         } else {
                             if overlay.mode != AppMode::Idle {
                                 overlay.exit_overlay();
                             }
                             overlay.enter_live_zoom();
+                            ctx.tray.show_balloon(
+                                "Live Zoom Active (Ctrl+4)",
+                                "• Ctrl+Wheel (or Ctrl+Up/Down): Adjust Zoom Level\n• Ctrl+4: Exit Live Zoom",
+                            );
                         }
                     }
                     HOTKEY_LIVE_ZOOM_IN | HOTKEY_LIVE_ZOOM_IN_PLUS => {
@@ -112,9 +130,11 @@ unsafe extern "system" fn tray_wnd_proc(
                         }
                     }
                     HOTKEY_TIMER => {
-                        overlay.enter_timer_mode(10);
+                        ensure_live_zoom_stopped(&mut *overlay);
+                        overlay.enter_timer_mode(0);
                     }
                     HOTKEY_SNIP => {
+                        ensure_live_zoom_stopped(&mut *overlay);
                         overlay.enter_snip_mode();
                     }
                     _ => {}
@@ -132,15 +152,28 @@ unsafe extern "system" fn tray_wnd_proc(
 
             WM_TRAY_ICON => {
                 let event = lparam.0 as u32;
-                if event == WM_RBUTTONUP {
+                if event == WM_RBUTTONUP || event == WM_LBUTTONUP {
                     ctx.tray.show_menu();
-                } else if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
+                } else if event == WM_LBUTTONDBLCLK {
                     let mut overlay = ctx.overlay.borrow_mut();
                     if overlay.live_zoom.is_active() {
                         overlay.live_zoom.stop();
                     }
                     overlay.enter_static_zoom();
                 }
+                LRESULT(0)
+            }
+
+            WM_DISPLAYCHANGE => {
+                let mut overlay = ctx.overlay.borrow_mut();
+                overlay.refresh_monitors();
+                let count = overlay.available_monitors.len();
+                let label = if count > 1 {
+                    format!("Displays updated: {} screens detected", count)
+                } else {
+                    "Displays updated: 1 screen detected".to_string()
+                };
+                overlay.set_toast("🖥️", label);
                 LRESULT(0)
             }
 
@@ -154,50 +187,93 @@ unsafe extern "system" fn tray_wnd_proc(
                             overlay.live_zoom.stop();
                             overlay.mode = AppMode::Idle;
                             overlay.hide_window();
+                            ctx.tray.show_balloon("Live Zoom Ended", "Restored standard desktop view");
                         } else {
                             overlay.enter_live_zoom();
+                            ctx.tray.show_balloon(
+                                "Live Zoom Active (Ctrl+4)",
+                                "• Ctrl+Wheel (or Ctrl+Up/Down): Adjust Zoom Level\n• Ctrl+4: Exit Live Zoom",
+                            );
                         }
                     }
                     ID_TRAY_STATIC_ZOOM => {
                         let mut overlay = ctx.overlay.borrow_mut();
-                        if overlay.live_zoom.is_active() {
-                            overlay.live_zoom.stop();
-                        }
+                        ensure_live_zoom_stopped(&mut *overlay);
                         overlay.enter_static_zoom();
                     }
                     ID_TRAY_DRAW => {
                         let mut overlay = ctx.overlay.borrow_mut();
-                        if overlay.live_zoom.is_active() {
-                            overlay.live_zoom.stop();
-                        }
+                        ensure_live_zoom_stopped(&mut *overlay);
                         overlay.enter_draw_mode();
                     }
                     ID_TRAY_SPOTLIGHT => {
                         let mut overlay = ctx.overlay.borrow_mut();
-                        if overlay.live_zoom.is_active() {
-                            overlay.live_zoom.stop();
-                        }
+                        ensure_live_zoom_stopped(&mut *overlay);
                         overlay.enter_spotlight_mode();
                     }
                     ID_TRAY_SNIP => {
                         let mut overlay = ctx.overlay.borrow_mut();
-                        if overlay.live_zoom.is_active() {
-                            overlay.live_zoom.stop();
-                        }
+                        ensure_live_zoom_stopped(&mut *overlay);
                         overlay.enter_snip_mode();
                     }
                     ID_TRAY_TIMER => {
                         let mut overlay = ctx.overlay.borrow_mut();
-                        if overlay.live_zoom.is_active() {
-                            overlay.live_zoom.stop();
+                        ensure_live_zoom_stopped(&mut *overlay);
+                        overlay.enter_timer_mode(0);
+                    }
+                    ID_TRAY_LASER => {
+                        let mut overlay = ctx.overlay.borrow_mut();
+                        ensure_live_zoom_stopped(&mut *overlay);
+                        overlay.enter_draw_mode();
+                        overlay.current_tool = DrawTool::LaserPointer;
+                        overlay.set_toast("🔴", "Laser Pointer Active (K)");
+                        overlay.request_repaint();
+                    }
+                    ID_TRAY_ERASER => {
+                        let mut overlay = ctx.overlay.borrow_mut();
+                        ensure_live_zoom_stopped(&mut *overlay);
+                        overlay.enter_draw_mode();
+                        overlay.current_tool = DrawTool::Eraser;
+                        overlay.set_toast("🧹", "Stroke Eraser Active (X)");
+                        overlay.request_repaint();
+                    }
+                    ID_TRAY_WHITEBOARD => {
+                        let mut overlay = ctx.overlay.borrow_mut();
+                        ensure_live_zoom_stopped(&mut *overlay);
+                        overlay.enter_draw_mode();
+                        overlay.background_type = CanvasBackground::Whiteboard;
+                        overlay.set_toast("📄", "Whiteboard Canvas Active (W)");
+                        overlay.request_repaint();
+                    }
+                    ID_TRAY_BLACKBOARD => {
+                        let mut overlay = ctx.overlay.borrow_mut();
+                        ensure_live_zoom_stopped(&mut *overlay);
+                        overlay.enter_draw_mode();
+                        overlay.background_type = CanvasBackground::Blackboard;
+                        overlay.set_toast("⬛", "Blackboard Canvas Active (Shift+K)");
+                        overlay.request_repaint();
+                    }
+                    ID_TRAY_RESET_TOOLBAR => {
+                        let mut overlay = ctx.overlay.borrow_mut();
+                        overlay.toolbar.custom_position = None;
+                        overlay.toolbar.collapsed = false;
+                        let w = overlay.screen_width as f32;
+                        let h = overlay.screen_height as f32;
+                        overlay.toolbar.update_layout(w, h);
+                        overlay.set_toast("📌", "Toolbar Position Reset to Top Center");
+                        overlay.request_repaint();
+                    }
+                    ID_TRAY_OPEN_CONFIG => {
+                        if let Some(appdata) = std::env::var_os("APPDATA") {
+                            let mut path = std::path::PathBuf::from(appdata);
+                            path.push("Zoomify");
+                            path.push("config.json");
+                            let _ = std::process::Command::new("notepad.exe").arg(path).spawn();
                         }
-                        overlay.enter_timer_mode(10);
                     }
                     ID_TRAY_CHEATSHEET => {
                         let mut overlay = ctx.overlay.borrow_mut();
-                        if overlay.live_zoom.is_active() {
-                            overlay.live_zoom.stop();
-                        }
+                        ensure_live_zoom_stopped(&mut *overlay);
                         overlay.enter_draw_mode();
                         overlay.show_cheat_sheet = true;
                         overlay.request_repaint();
@@ -208,13 +284,14 @@ unsafe extern "system" fn tray_wnd_proc(
                             Built with Direct2D, DirectWrite & Windows Magnification API.\n\n\
                             Key Shortcuts:\n\
                             • Ctrl+1: Static Freeze Zoom (Wheel zoom, Pan, Click to draw)\n\
-                            • Ctrl+2: Draw Mode (P/H/L/A/R/U/E/T/N)\n\
-                            • Ctrl+3 / Tab: Spotlight Mode (Wheel resize, Space to pin)\n\
-                            • Ctrl+4: Live Zoom (Real-time hardware magnification)\n\
+                            • Ctrl+2: Draw Mode (P/H/L/A/R/U/Q/T/N)\n\
+                            • Ctrl+3 / F3: Spotlight Mode (Ctrl+Wheel to resize, Click / Space to pin)\n\
+                            • Ctrl+4: Live Zoom (Ctrl+Wheel or Ctrl+Up/Down to zoom)\n\
                             • Ctrl+5: Presentation Countdown Timer\n\
-                            • Ctrl+Shift+S / Shift+Drag: Snip Region to Clipboard\n\
-                            • F1: Shortcut Cheat Sheet Overlay\n\
-                            • Colors: r, g, b, y, o, p, c, w, k"
+                            • Ctrl+Shift+S / Snip: Snip Region to Clipboard\n\
+                            • F1: Shortcut Cheat Sheet Overlay | F2: Toggle HUD\n\
+                            • Mouse Modifiers: Shift=Line, Ctrl=Rect, Tab=Ellipse, Shift+Ctrl=Arrow\n\
+                            • Colors: r, g, b, y, o, p, c | Shift+W: White | Shift+K: Black"
                         );
                         let _ = MessageBoxW(
                             None,
