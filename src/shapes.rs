@@ -33,7 +33,11 @@ pub fn snap_to_square(start: Point2D, current: Point2D) -> Point2D {
     }
 }
 
-pub fn calculate_arrow_head(start: Point2D, end: Point2D, head_length: f32) -> (Point2D, Point2D, Point2D) {
+pub fn calculate_arrow_head(
+    start: Point2D,
+    end: Point2D,
+    head_length: f32,
+) -> (Point2D, Point2D, Point2D) {
     let dx = end.x - start.x;
     let dy = end.y - start.y;
     let length = (dx * dx + dy * dy).sqrt();
@@ -86,7 +90,10 @@ pub fn points_to_bezier_segments(points: &[Point2D]) -> Vec<(Point2D, Point2D, P
         let p0 = points[0];
         let p1 = points[1];
         let c1 = Point2D::new(p0.x + (p1.x - p0.x) / 3.0, p0.y + (p1.y - p0.y) / 3.0);
-        let c2 = Point2D::new(p0.x + 2.0 * (p1.x - p0.x) / 3.0, p0.y + 2.0 * (p1.y - p0.y) / 3.0);
+        let c2 = Point2D::new(
+            p0.x + 2.0 * (p1.x - p0.x) / 3.0,
+            p0.y + 2.0 * (p1.y - p0.y) / 3.0,
+        );
         return vec![(c1, c2, p1)];
     }
     let n = points.len();
@@ -136,11 +143,18 @@ pub fn shape_intersects_circle(shape: &Shape, center: Point2D, radius: f32) -> b
             }
             false
         }
-        Shape::Line { start, end, width, .. } | Shape::Arrow { start, end, width, .. } => {
+        Shape::Line {
+            start, end, width, ..
+        }
+        | Shape::Arrow {
+            start, end, width, ..
+        } => {
             let threshold = radius + *width / 2.0;
             point_to_segment_distance(center, *start, *end) <= threshold
         }
-        Shape::Rectangle { start, end, width, .. } => {
+        Shape::Rectangle {
+            start, end, width, ..
+        } => {
             let (l, t, r, b) = normalize_rect(*start, *end);
             let threshold = radius + *width / 2.0;
             if center.x >= l && center.x <= r && center.y >= t && center.y <= b {
@@ -155,7 +169,9 @@ pub fn shape_intersects_circle(shape: &Shape, center: Point2D, radius: f32) -> b
                 || point_to_segment_distance(center, p3, p4) <= threshold
                 || point_to_segment_distance(center, p4, p1) <= threshold
         }
-        Shape::Ellipse { start, end, width, .. } => {
+        Shape::Ellipse {
+            start, end, width, ..
+        } => {
             let (l, t, r, b) = normalize_rect(*start, *end);
             let cx = (l + r) / 2.0;
             let cy = (t + b) / 2.0;
@@ -168,22 +184,33 @@ pub fn shape_intersects_circle(shape: &Shape, center: Point2D, radius: f32) -> b
             if val <= 1.0 {
                 return true;
             }
-            center.x >= l - threshold && center.x <= r + threshold
-                && center.y >= t - threshold && center.y <= b + threshold
+            center.x >= l - threshold
+                && center.x <= r + threshold
+                && center.y >= t - threshold
+                && center.y <= b + threshold
         }
-        Shape::Text { origin, font_size, text, .. } => {
+        Shape::Text {
+            origin,
+            font_size,
+            text,
+            ..
+        } => {
             let est_width = (text.len() as f32 * font_size * 0.6).max(20.0);
             let est_height = *font_size;
             let l = origin.x;
             let t = origin.y;
             let r = l + est_width;
             let b = t + est_height;
-            center.x >= l - radius && center.x <= r + radius
-                && center.y >= t - radius && center.y <= b + radius
+            center.x >= l - radius
+                && center.x <= r + radius
+                && center.y >= t - radius
+                && center.y <= b + radius
         }
-        Shape::StepBadge { center: c, radius: r, .. } => {
-            center.distance(c) <= (r + radius)
-        }
+        Shape::StepBadge {
+            center: c,
+            radius: r,
+            ..
+        } => center.distance(c) <= (r + radius),
     }
 }
 
@@ -263,10 +290,22 @@ pub fn recognize_smart_shape(
         let c3 = Point2D::new(max_x, max_y);
         let c4 = Point2D::new(min_x, max_y);
 
-        let d1 = points.iter().map(|p| p.distance(&c1)).fold(f32::MAX, f32::min);
-        let d2 = points.iter().map(|p| p.distance(&c2)).fold(f32::MAX, f32::min);
-        let d3 = points.iter().map(|p| p.distance(&c3)).fold(f32::MAX, f32::min);
-        let d4 = points.iter().map(|p| p.distance(&c4)).fold(f32::MAX, f32::min);
+        let d1 = points
+            .iter()
+            .map(|p| p.distance(&c1))
+            .fold(f32::MAX, f32::min);
+        let d2 = points
+            .iter()
+            .map(|p| p.distance(&c2))
+            .fold(f32::MAX, f32::min);
+        let d3 = points
+            .iter()
+            .map(|p| p.distance(&c3))
+            .fold(f32::MAX, f32::min);
+        let d4 = points
+            .iter()
+            .map(|p| p.distance(&c4))
+            .fold(f32::MAX, f32::min);
         let avg_corner_dist = (d1 + d2 + d3 + d4) / 4.0;
         let min_dim = bb_w.min(bb_h);
         let corner_ratio = avg_corner_dist / min_dim;
@@ -376,9 +415,17 @@ mod tests {
             pattern: StrokePattern::Solid,
         };
         // Circle right on the line
-        assert!(shape_intersects_circle(&line, Point2D::new(50.0, 2.0), 10.0));
+        assert!(shape_intersects_circle(
+            &line,
+            Point2D::new(50.0, 2.0),
+            10.0
+        ));
         // Circle far from the line
-        assert!(!shape_intersects_circle(&line, Point2D::new(50.0, 50.0), 10.0));
+        assert!(!shape_intersects_circle(
+            &line,
+            Point2D::new(50.0, 50.0),
+            10.0
+        ));
 
         let rect = Shape::Rectangle {
             start: Point2D::new(10.0, 10.0),
@@ -390,9 +437,17 @@ mod tests {
             pattern: StrokePattern::Solid,
         };
         // Inside rectangle
-        assert!(shape_intersects_circle(&rect, Point2D::new(50.0, 50.0), 5.0));
+        assert!(shape_intersects_circle(
+            &rect,
+            Point2D::new(50.0, 50.0),
+            5.0
+        ));
         // Outside rectangle
-        assert!(!shape_intersects_circle(&rect, Point2D::new(200.0, 200.0), 5.0));
+        assert!(!shape_intersects_circle(
+            &rect,
+            Point2D::new(200.0, 200.0),
+            5.0
+        ));
     }
 
     #[test]
@@ -421,10 +476,18 @@ mod tests {
 
         // Hand-drawn rectangle with 4 corners
         let mut rect_points = Vec::new();
-        for x in (0..=100).step_by(10) { rect_points.push(Point2D::new(x as f32, 0.0)); }
-        for y in (0..=100).step_by(10) { rect_points.push(Point2D::new(100.0, y as f32)); }
-        for x in (0..=100).rev().step_by(10) { rect_points.push(Point2D::new(x as f32, 100.0)); }
-        for y in (0..=100).rev().step_by(10) { rect_points.push(Point2D::new(0.0, y as f32)); }
+        for x in (0..=100).step_by(10) {
+            rect_points.push(Point2D::new(x as f32, 0.0));
+        }
+        for y in (0..=100).step_by(10) {
+            rect_points.push(Point2D::new(100.0, y as f32));
+        }
+        for x in (0..=100).rev().step_by(10) {
+            rect_points.push(Point2D::new(x as f32, 100.0));
+        }
+        for y in (0..=100).rev().step_by(10) {
+            rect_points.push(Point2D::new(0.0, y as f32));
+        }
         rect_points.push(rect_points[0]);
         let recognized_rect = recognize_smart_shape(&rect_points, 4.0, ColorPreset::Blue);
         assert!(matches!(recognized_rect, Some(Shape::Rectangle { .. })));
@@ -434,7 +497,10 @@ mod tests {
         for i in 0..24 {
             let angle = i as f32 * (std::f32::consts::PI * 2.0 / 24.0);
             let jitter = if i % 2 == 0 { 2.5 } else { -2.5 };
-            jitter_circle.push(Point2D::new(cx + (r + jitter) * angle.cos(), cy + (r + jitter) * angle.sin()));
+            jitter_circle.push(Point2D::new(
+                cx + (r + jitter) * angle.cos(),
+                cy + (r + jitter) * angle.sin(),
+            ));
         }
         jitter_circle.push(jitter_circle[0]);
         let recognized_jitter = recognize_smart_shape(&jitter_circle, 4.0, ColorPreset::Cyan);

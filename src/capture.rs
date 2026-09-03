@@ -1,21 +1,17 @@
 #![allow(dead_code)]
 
 use std::ffi::c_void;
-use windows::core::Result;
-use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_SIZE_U, D2D1_PIXEL_FORMAT,
-};
-use windows::Win32::Graphics::Direct2D::{
-    ID2D1Bitmap, ID2D1RenderTarget, D2D1_BITMAP_PROPERTIES,
-};
+use windows::Win32::Graphics::Direct2D::Common::{D2D_SIZE_U, D2D1_PIXEL_FORMAT};
+use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_PROPERTIES, ID2D1Bitmap, ID2D1RenderTarget};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-    SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
+use windows::core::Result;
 
 #[derive(Clone)]
 pub struct ScreenCapture {
@@ -67,54 +63,53 @@ impl ScreenCapture {
             };
 
             let mut bits_ptr: *mut c_void = std::ptr::null_mut();
-            let hbitmap = CreateDIBSection(
-                Some(mem_dc),
-                &bmi,
-                DIB_RGB_COLORS,
-                &mut bits_ptr,
-                None,
-                0,
-            );
+            let hbitmap =
+                CreateDIBSection(Some(mem_dc), &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0);
 
-            if let Ok(hbitmap) = hbitmap {
-                if !hbitmap.is_invalid() && !bits_ptr.is_null() {
-                    let old_bitmap = SelectObject(mem_dc, hbitmap.into());
+            if let Ok(hbitmap) = hbitmap
+                && !hbitmap.is_invalid()
+                && !bits_ptr.is_null()
+            {
+                let old_bitmap = SelectObject(mem_dc, hbitmap.into());
 
-                    // Fast hardware BitBlt without DWM pipeline stalls
-                    let _ = BitBlt(
-                        mem_dc,
-                        0,
-                        0,
-                        width as i32,
-                        height as i32,
-                        Some(screen_dc),
-                        x,
-                        y,
-                        SRCCOPY,
-                    );
+                // Fast hardware BitBlt without DWM pipeline stalls
+                let _ = BitBlt(
+                    mem_dc,
+                    0,
+                    0,
+                    width as i32,
+                    height as i32,
+                    Some(screen_dc),
+                    x,
+                    y,
+                    SRCCOPY,
+                );
 
-                    let total_bytes = (width * height * 4) as usize;
-                    let mut pixels = vec![0u8; total_bytes];
-                    std::ptr::copy_nonoverlapping(bits_ptr as *const u8, pixels.as_mut_ptr(), total_bytes);
+                let total_bytes = (width * height * 4) as usize;
+                let mut pixels = vec![0u8; total_bytes];
+                std::ptr::copy_nonoverlapping(
+                    bits_ptr as *const u8,
+                    pixels.as_mut_ptr(),
+                    total_bytes,
+                );
 
-                    // Ensure opaque alpha
-                    for chunk in pixels.chunks_exact_mut(4) {
-                        chunk[3] = 255;
-                    }
-
-                    let _ = SelectObject(mem_dc, old_bitmap);
-                    let _ = DeleteObject(hbitmap.into());
-                    let _ = DeleteDC(mem_dc);
-                    let _ = ReleaseDC(None, screen_dc);
-
-                    return Some(Self {
-                        x,
-                        y,
-                        width,
-                        height,
-                        pixels,
-                    });
+                // Ensure opaque alpha
+                for chunk in pixels.chunks_exact_mut(4) {
+                    chunk[3] = 255;
                 }
+
+                let _ = SelectObject(mem_dc, old_bitmap);
+                let _ = DeleteObject(hbitmap.into());
+                let _ = DeleteDC(mem_dc);
+                let _ = ReleaseDC(None, screen_dc);
+
+                return Some(Self {
+                    x,
+                    y,
+                    width,
+                    height,
+                    pixels,
+                });
             }
 
             let _ = DeleteDC(mem_dc);
@@ -150,11 +145,22 @@ impl ScreenCapture {
 
         unsafe {
             let pitch = self.width * 4;
-            render_target.CreateBitmap(size, Some(self.pixels.as_ptr() as *const c_void), pitch, &props)
+            render_target.CreateBitmap(
+                size,
+                Some(self.pixels.as_ptr() as *const c_void),
+                pitch,
+                &props,
+            )
         }
     }
 
-    pub fn crop(&self, crop_x: i32, crop_y: i32, crop_w: u32, crop_h: u32) -> Option<ScreenCapture> {
+    pub fn crop(
+        &self,
+        crop_x: i32,
+        crop_y: i32,
+        crop_w: u32,
+        crop_h: u32,
+    ) -> Option<ScreenCapture> {
         if crop_w == 0 || crop_h == 0 {
             return None;
         }
@@ -211,6 +217,6 @@ impl ScreenCapture {
             self.height,
             image::ExtendedColorType::Rgba8,
         )
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+        .map_err(|e| std::io::Error::other(e.to_string()))
     }
 }

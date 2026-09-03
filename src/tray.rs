@@ -1,21 +1,21 @@
 #![allow(dead_code)]
 
-use windows::core::{s, w, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    CreateBitmap, CreateDIBSection, DeleteObject, GetDC, ReleaseDC,
-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, RGBQUAD,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
+    DeleteObject, GetDC, RGBQUAD, ReleaseDC,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NOTIFYICONDATAW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
-    LoadIconW, SetForegroundWindow, TrackPopupMenuEx, HICON, ICONINFO, IDI_APPLICATION,
-    MF_POPUP, MF_SEPARATOR, MF_STRING, TPM_LEFTALIGN, TPM_RIGHTBUTTON,
+    HICON, ICONINFO, IDI_APPLICATION, LoadIconW, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    SetForegroundWindow, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TrackPopupMenuEx,
 };
+use windows::core::{PCWSTR, s, w};
 
 pub const WM_TRAY_ICON: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 200;
 
@@ -38,15 +38,15 @@ pub const ID_TRAY_RESET_TOOLBAR: usize = 2015;
 /// Enable authentic Windows 11 / Windows 10 Dark Mode for Win32 popup menus
 pub fn enable_windows_dark_mode_for_menus() {
     unsafe {
-        if let Ok(hmodule) = LoadLibraryA(s!("uxtheme.dll")) {
-            if !hmodule.is_invalid() {
-                // Ordinal 135 is SetPreferredAppMode
-                let proc = GetProcAddress(hmodule, windows::core::PCSTR(135 as *const u8));
-                if let Some(f) = proc {
-                    type SetPreferredAppModeFn = unsafe extern "system" fn(i32) -> i32;
-                    let set_preferred_app_mode: SetPreferredAppModeFn = std::mem::transmute(f);
-                    let _ = set_preferred_app_mode(2); // 2 = ForceDark
-                }
+        if let Ok(hmodule) = LoadLibraryA(s!("uxtheme.dll"))
+            && !hmodule.is_invalid()
+        {
+            // Ordinal 135 is SetPreferredAppMode
+            let proc = GetProcAddress(hmodule, windows::core::PCSTR(135 as *const u8));
+            if let Some(f) = proc {
+                type SetPreferredAppModeFn = unsafe extern "system" fn(i32) -> i32;
+                let set_preferred_app_mode: SetPreferredAppModeFn = std::mem::transmute(f);
+                let _ = set_preferred_app_mode(2); // 2 = ForceDark
             }
         }
     }
@@ -116,28 +116,78 @@ impl TrayIcon {
             };
 
             // 1. Primary Modes
-            let _ = AppendMenuW(menu, MF_STRING, ID_TRAY_STATIC_ZOOM, w!("Static Zoom\tCtrl+1"));
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                ID_TRAY_STATIC_ZOOM,
+                w!("Static Zoom\tCtrl+1"),
+            );
             let _ = AppendMenuW(menu, MF_STRING, ID_TRAY_LIVE_ZOOM, w!("Live Zoom\tCtrl+4"));
             let _ = AppendMenuW(menu, MF_STRING, ID_TRAY_DRAW, w!("Draw Mode\tCtrl+2"));
-            let _ = AppendMenuW(menu, MF_STRING, ID_TRAY_SPOTLIGHT, w!("Spotlight Mode\tCtrl+3"));
-            let _ = AppendMenuW(menu, MF_STRING, ID_TRAY_SNIP, w!("Snip Selection\tCtrl+Shift+S"));
-            let _ = AppendMenuW(menu, MF_STRING, ID_TRAY_TIMER, w!("Countdown Timer\tCtrl+5"));
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                ID_TRAY_SPOTLIGHT,
+                w!("Spotlight Mode\tCtrl+3"),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                ID_TRAY_SNIP,
+                w!("Snip Selection\tCtrl+Shift+S"),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                ID_TRAY_TIMER,
+                w!("Countdown Timer\tCtrl+5"),
+            );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
 
             // 2. Presenter Tools Submenu
             if let Ok(tools_menu) = CreatePopupMenu() {
                 let _ = AppendMenuW(tools_menu, MF_STRING, ID_TRAY_LASER, w!("Laser Pointer\tK"));
-                let _ = AppendMenuW(tools_menu, MF_STRING, ID_TRAY_ERASER, w!("Stroke Eraser\tX"));
-                let _ = AppendMenuW(tools_menu, MF_STRING, ID_TRAY_WHITEBOARD, w!("Whiteboard Slate\tW"));
-                let _ = AppendMenuW(tools_menu, MF_STRING, ID_TRAY_BLACKBOARD, w!("Blackboard Slate\tShift+K"));
+                let _ = AppendMenuW(
+                    tools_menu,
+                    MF_STRING,
+                    ID_TRAY_ERASER,
+                    w!("Stroke Eraser\tX"),
+                );
+                let _ = AppendMenuW(
+                    tools_menu,
+                    MF_STRING,
+                    ID_TRAY_WHITEBOARD,
+                    w!("Whiteboard Slate\tW"),
+                );
+                let _ = AppendMenuW(
+                    tools_menu,
+                    MF_STRING,
+                    ID_TRAY_BLACKBOARD,
+                    w!("Blackboard Slate\tShift+K"),
+                );
                 let _ = AppendMenuW(menu, MF_POPUP, tools_menu.0 as usize, w!("Presenter Tools"));
             }
 
             // 3. Settings & Help Submenu
             if let Ok(opts_menu) = CreatePopupMenu() {
-                let _ = AppendMenuW(opts_menu, MF_STRING, ID_TRAY_CHEATSHEET, w!("Keyboard Shortcuts\tF1"));
-                let _ = AppendMenuW(opts_menu, MF_STRING, ID_TRAY_RESET_TOOLBAR, w!("Reset Toolbar Position\tF2"));
-                let _ = AppendMenuW(opts_menu, MF_STRING, ID_TRAY_OPEN_CONFIG, w!("Open Settings (config.json)"));
+                let _ = AppendMenuW(
+                    opts_menu,
+                    MF_STRING,
+                    ID_TRAY_CHEATSHEET,
+                    w!("Keyboard Shortcuts\tF1"),
+                );
+                let _ = AppendMenuW(
+                    opts_menu,
+                    MF_STRING,
+                    ID_TRAY_RESET_TOOLBAR,
+                    w!("Reset Toolbar Position\tF2"),
+                );
+                let _ = AppendMenuW(
+                    opts_menu,
+                    MF_STRING,
+                    ID_TRAY_OPEN_CONFIG,
+                    w!("Open Settings (config.json)"),
+                );
                 let _ = AppendMenuW(opts_menu, MF_SEPARATOR, 0, PCWSTR::null());
                 let _ = AppendMenuW(opts_menu, MF_STRING, ID_TRAY_ABOUT, w!("About Zoomify"));
                 let _ = AppendMenuW(menu, MF_POPUP, opts_menu.0 as usize, w!("Settings & Help"));
@@ -186,117 +236,118 @@ impl TrayIcon {
 
             let screen_dc = GetDC(None);
             let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-            let hbm_color = CreateDIBSection(
-                Some(screen_dc),
-                &bmi,
-                DIB_RGB_COLORS,
-                &mut bits,
-                None,
-                0,
-            );
+            let hbm_color =
+                CreateDIBSection(Some(screen_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0);
             ReleaseDC(None, screen_dc);
 
             let mut mask_bytes = [0xFFu8; (32 * 32 / 8)]; // Start with fully transparent 1-mask
 
-            if let Ok(color_bmp) = hbm_color {
-                if !color_bmp.is_invalid() && !bits.is_null() {
-                    let pixel_slice = std::slice::from_raw_parts_mut(bits as *mut u32, (width * height) as usize);
+            if let Ok(color_bmp) = hbm_color
+                && !color_bmp.is_invalid()
+                && !bits.is_null()
+            {
+                let pixel_slice =
+                    std::slice::from_raw_parts_mut(bits as *mut u32, (width * height) as usize);
 
-                    // Draw 32-bit ARGB Windows 11 Fluent Magnifier Icon with crisp antialiasing
-                    let center_x = 12.0f32;
-                    let center_y = 12.0f32;
-                    let outer_radius = 9.8f32;
-                    let inner_radius = 6.6f32;
+                // Draw 32-bit ARGB Windows 11 Fluent Magnifier Icon with crisp antialiasing
+                let center_x = 12.0f32;
+                let center_y = 12.0f32;
+                let outer_radius = 9.8f32;
+                let inner_radius = 6.6f32;
 
-                    for y in 0..height {
-                        for x in 0..width {
-                            let fx = x as f32 + 0.5;
-                            let fy = y as f32 + 0.5;
+                for y in 0..height {
+                    for x in 0..width {
+                        let fx = x as f32 + 0.5;
+                        let fy = y as f32 + 0.5;
 
-                            let dist_lens = ((fx - center_x).powi(2) + (fy - center_y).powi(2)).sqrt();
+                        let dist_lens = ((fx - center_x).powi(2) + (fy - center_y).powi(2)).sqrt();
 
-                            // 45-degree grip handle projection
-                            // From (16, 16) down to (27, 27)
-                            let h_dx = fx - 16.0;
-                            let h_dy = fy - 16.0;
-                            let handle_len = (h_dx + h_dy) / std::f32::consts::SQRT_2;
-                            let handle_dist = (h_dx - h_dy).abs() / std::f32::consts::SQRT_2;
-                            let in_handle = handle_len >= 0.0 && handle_len <= 15.0 && handle_dist <= 2.2;
-                            let in_handle_tip = ((fx - 26.5).powi(2) + (fy - 26.5).powi(2)).sqrt() <= 2.2;
+                        // 45-degree grip handle projection
+                        // From (16, 16) down to (27, 27)
+                        let h_dx = fx - 16.0;
+                        let h_dy = fy - 16.0;
+                        let handle_len = (h_dx + h_dy) / std::f32::consts::SQRT_2;
+                        let handle_dist = (h_dx - h_dy).abs() / std::f32::consts::SQRT_2;
+                        let in_handle = (0.0..=15.0).contains(&handle_len) && handle_dist <= 2.2;
+                        let in_handle_tip =
+                            ((fx - 26.5).powi(2) + (fy - 26.5).powi(2)).sqrt() <= 2.2;
 
-                            let (r, g, b, a): (u8, u8, u8, u8) = if in_handle || in_handle_tip {
-                                // Fluent Metallic Dark Grip Handle with silver highlight
-                                if handle_dist < 0.8 {
-                                    (140, 155, 175, 255) // Silver top highlight
-                                } else {
-                                    (55, 65, 80, 255) // Deep slate metal body
-                                }
-                            } else if dist_lens >= inner_radius && dist_lens <= outer_radius {
-                                // Antialiased Fluent Accent Blue lens ring
-                                let edge_fade = if dist_lens > outer_radius - 0.7 {
-                                    ((outer_radius - dist_lens) / 0.7).clamp(0.0, 1.0)
-                                } else if dist_lens < inner_radius + 0.7 {
-                                    ((dist_lens - inner_radius) / 0.7).clamp(0.0, 1.0)
-                                } else {
-                                    1.0
-                                };
-                                let alpha = (255.0 * edge_fade) as u8;
-                                (0, 120, 212, alpha) // Windows 11 Accent Blue #0078D4
-                            } else if dist_lens < inner_radius {
-                                // Glass interior
-                                let is_specular = fx < 12.0 && fy < 12.0 && dist_lens >= 3.5 && dist_lens <= 5.8;
-                                let is_cross_h = (fy - center_y).abs() <= 0.8 && (fx - center_x).abs() <= 3.2;
-                                let is_cross_v = (fx - center_x).abs() <= 0.8 && (fy - center_y).abs() <= 3.2;
-
-                                if is_cross_h || is_cross_v {
-                                    (255, 255, 255, 240) // Crisp white center plus target
-                                } else if is_specular {
-                                    (210, 240, 255, 180) // Curved glass reflection shine
-                                } else {
-                                    (15, 65, 125, 85) // Translucent deep sky glass
-                                }
+                        let (r, g, b, a): (u8, u8, u8, u8) = if in_handle || in_handle_tip {
+                            // Fluent Metallic Dark Grip Handle with silver highlight
+                            if handle_dist < 0.8 {
+                                (140, 155, 175, 255) // Silver top highlight
                             } else {
-                                (0, 0, 0, 0)
-                            };
-
-                            // Premultiply alpha for high-fidelity Windows taskbar compositing
-                            let pr = ((r as u32 * a as u32) + 127) / 255;
-                            let pg = ((g as u32 * a as u32) + 127) / 255;
-                            let pb = ((b as u32 * a as u32) + 127) / 255;
-                            pixel_slice[(y * width + x) as usize] = ((a as u32) << 24) | (pr << 16) | (pg << 8) | pb;
-
-                            // Update 1-bpp AND mask bit (0 = opaque, 1 = transparent)
-                            if a >= 32 {
-                                let byte_idx = (y * 4 + x / 8) as usize;
-                                let bit_idx = 7 - (x % 8);
-                                mask_bytes[byte_idx] &= !(1 << bit_idx);
+                                (55, 65, 80, 255) // Deep slate metal body
                             }
-                        }
-                    }
+                        } else if dist_lens >= inner_radius && dist_lens <= outer_radius {
+                            // Antialiased Fluent Accent Blue lens ring
+                            let edge_fade = if dist_lens > outer_radius - 0.7 {
+                                ((outer_radius - dist_lens) / 0.7).clamp(0.0, 1.0)
+                            } else if dist_lens < inner_radius + 0.7 {
+                                ((dist_lens - inner_radius) / 0.7).clamp(0.0, 1.0)
+                            } else {
+                                1.0
+                            };
+                            let alpha = (255.0 * edge_fade) as u8;
+                            (0, 120, 212, alpha) // Windows 11 Accent Blue #0078D4
+                        } else if dist_lens < inner_radius {
+                            // Glass interior
+                            let is_specular =
+                                fx < 12.0 && fy < 12.0 && (3.5..=5.8).contains(&dist_lens);
+                            let is_cross_h =
+                                (fy - center_y).abs() <= 0.8 && (fx - center_x).abs() <= 3.2;
+                            let is_cross_v =
+                                (fx - center_x).abs() <= 0.8 && (fy - center_y).abs() <= 3.2;
 
-                    let hbm_mask = CreateBitmap(32, 32, 1, 1, Some(mask_bytes.as_ptr() as *const _));
-
-                    if !hbm_mask.is_invalid() {
-                        let mut icon_info = ICONINFO {
-                            fIcon: true.into(),
-                            xHotspot: 0,
-                            yHotspot: 0,
-                            hbmMask: hbm_mask,
-                            hbmColor: color_bmp,
+                            if is_cross_h || is_cross_v {
+                                (255, 255, 255, 240) // Crisp white center plus target
+                            } else if is_specular {
+                                (210, 240, 255, 180) // Curved glass reflection shine
+                            } else {
+                                (15, 65, 125, 85) // Translucent deep sky glass
+                            }
+                        } else {
+                            (0, 0, 0, 0)
                         };
 
-                        let created_icon = CreateIconIndirect(&mut icon_info);
-                        let _ = DeleteObject(color_bmp.into());
-                        let _ = DeleteObject(hbm_mask.into());
+                        // Premultiply alpha for high-fidelity Windows taskbar compositing
+                        let pr = ((r as u32 * a as u32) + 127) / 255;
+                        let pg = ((g as u32 * a as u32) + 127) / 255;
+                        let pb = ((b as u32 * a as u32) + 127) / 255;
+                        pixel_slice[(y * width + x) as usize] =
+                            ((a as u32) << 24) | (pr << 16) | (pg << 8) | pb;
 
-                        if let Ok(icon) = created_icon {
-                            if !icon.is_invalid() {
-                                return icon;
-                            }
+                        // Update 1-bpp AND mask bit (0 = opaque, 1 = transparent)
+                        if a >= 32 {
+                            let byte_idx = (y * 4 + x / 8) as usize;
+                            let bit_idx = 7 - (x % 8);
+                            mask_bytes[byte_idx] &= !(1 << bit_idx);
                         }
-                    } else {
-                        let _ = DeleteObject(color_bmp.into());
                     }
+                }
+
+                let hbm_mask = CreateBitmap(32, 32, 1, 1, Some(mask_bytes.as_ptr() as *const _));
+
+                if !hbm_mask.is_invalid() {
+                    let icon_info = ICONINFO {
+                        fIcon: true.into(),
+                        xHotspot: 0,
+                        yHotspot: 0,
+                        hbmMask: hbm_mask,
+                        hbmColor: color_bmp,
+                    };
+
+                    let created_icon = CreateIconIndirect(&icon_info);
+                    let _ = DeleteObject(color_bmp.into());
+                    let _ = DeleteObject(hbm_mask.into());
+
+                    if let Ok(icon) = created_icon
+                        && !icon.is_invalid()
+                    {
+                        return icon;
+                    }
+                } else {
+                    let _ = DeleteObject(color_bmp.into());
                 }
             }
 

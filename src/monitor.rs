@@ -1,15 +1,15 @@
 #![allow(dead_code)]
 
-use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HDC, HMONITOR,
-    MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
     SM_YVIRTUALSCREEN,
 };
+use windows::core::BOOL;
 
 const MONITORINFOF_PRIMARY: u32 = 0x00000001;
 
@@ -231,7 +231,11 @@ impl MonitorManager {
 
                 Some(MonitorInfo {
                     hmonitor: hmon.0 as isize,
-                    name: if is_primary { "Primary Display".to_string() } else { "External Display".to_string() },
+                    name: if is_primary {
+                        "Primary Display".to_string()
+                    } else {
+                        "External Display".to_string()
+                    },
                     index: 0,
                     is_primary,
                     x: mi.rcMonitor.left,

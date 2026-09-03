@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
 use windows::Win32::Foundation::{HANDLE, HGLOBAL};
-use windows::Win32::Graphics::Gdi::{BITMAPINFOHEADER, BI_RGB};
+use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFOHEADER};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 
 const CF_DIB: u32 = 8;
 const CF_UNICODETEXT: u32 = 13;

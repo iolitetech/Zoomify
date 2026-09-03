@@ -63,7 +63,7 @@ pub enum ColorPreset {
 }
 
 impl ColorPreset {
-    pub fn to_d2d_color(&self, alpha: f32) -> D2D1_COLOR_F {
+    pub fn to_d2d_color(self, alpha: f32) -> D2D1_COLOR_F {
         let (r, g, b) = match self {
             Self::Red => (0.95, 0.15, 0.15),
             Self::Green => (0.15, 0.85, 0.25),
@@ -412,14 +412,8 @@ impl TextEditorState {
 #[derive(Debug, Clone)]
 pub enum HistoryAction {
     AddShape(Shape),
-    AddStepBadge {
-        shape: Shape,
-        prev_counter: u32,
-    },
-    DeleteShape {
-        index: usize,
-        shape: Shape,
-    },
+    AddStepBadge { shape: Shape, prev_counter: u32 },
+    DeleteShape { index: usize, shape: Shape },
     Clear(Vec<Shape>),
 }
 
@@ -516,7 +510,13 @@ impl ZoomState {
         self.view_y = self.view_y.clamp(0.0, max_y);
     }
 
-    pub fn update_target_from_cursor(&mut self, cursor_x: f32, cursor_y: f32, screen_w: f32, screen_h: f32) {
+    pub fn update_target_from_cursor(
+        &mut self,
+        cursor_x: f32,
+        cursor_y: f32,
+        screen_w: f32,
+        screen_h: f32,
+    ) {
         let z = self.level.max(1.0);
         if z <= 1.001 || screen_w <= 0.0 || screen_h <= 0.0 {
             self.target_view_x = 0.0;
@@ -539,7 +539,13 @@ impl ZoomState {
         self.view_y = self.target_view_y;
     }
 
-    pub fn set_zoom_centered(&mut self, new_level: f32, center_screen: Point2D, screen_w: f32, screen_h: f32) {
+    pub fn set_zoom_centered(
+        &mut self,
+        new_level: f32,
+        center_screen: Point2D,
+        screen_w: f32,
+        screen_h: f32,
+    ) {
         let old_z = self.level.max(1.0);
         let new_z = new_level.clamp(1.0, 10.0);
 
@@ -707,7 +713,14 @@ impl TimerWidgetState {
         } else {
             (screen_w / 2.0, screen_h / 2.0)
         };
-        (cx - card_w / 2.0, cy - card_h / 2.0, cx + card_w / 2.0, cy + card_h / 2.0, cx, cy)
+        (
+            cx - card_w / 2.0,
+            cy - card_h / 2.0,
+            cx + card_w / 2.0,
+            cy + card_h / 2.0,
+            cx,
+            cy,
+        )
     }
 
     pub fn get_pill_rect(&self, screen_w: f32, screen_h: f32) -> (f32, f32, f32, f32) {
@@ -716,9 +729,24 @@ impl TimerWidgetState {
         let margin = 24.0;
         match self.pill_corner {
             1 => (margin, margin, margin + pill_w, margin + pill_h), // Top-Left
-            2 => (margin, screen_h - margin - pill_h, margin + pill_w, screen_h - margin), // Bottom-Left
-            3 => (screen_w - margin - pill_w, screen_h - margin - pill_h, screen_w - margin, screen_h - margin), // Bottom-Right
-            _ => (screen_w - margin - pill_w, margin, screen_w - margin, margin + pill_h), // Top-Right (default 0)
+            2 => (
+                margin,
+                screen_h - margin - pill_h,
+                margin + pill_w,
+                screen_h - margin,
+            ), // Bottom-Left
+            3 => (
+                screen_w - margin - pill_w,
+                screen_h - margin - pill_h,
+                screen_w - margin,
+                screen_h - margin,
+            ), // Bottom-Right
+            _ => (
+                screen_w - margin - pill_w,
+                margin,
+                screen_w - margin,
+                margin + pill_h,
+            ), // Top-Right (default 0)
         }
     }
 
@@ -731,27 +759,44 @@ impl TimerWidgetState {
             }
 
             // b0: Corner cycle button (left + 6.0 .. left + 34.0)
-            if pt.x >= left + 6.0 && pt.x <= left + 34.0 && pt.y >= top + 8.0 && pt.y <= bottom - 8.0 {
+            if pt.x >= left + 6.0
+                && pt.x <= left + 34.0
+                && pt.y >= top + 8.0
+                && pt.y <= bottom - 8.0
+            {
                 return Some(TimerAction::CycleCorner);
             }
 
             // b1: Play/Pause (right - 105.0 .. right - 72.0, top + 8.0 .. bottom - 8.0)
-            if pt.x >= right - 105.0 && pt.x <= right - 72.0 && pt.y >= top + 8.0 && pt.y <= bottom - 8.0 {
+            if pt.x >= right - 105.0
+                && pt.x <= right - 72.0
+                && pt.y >= top + 8.0
+                && pt.y <= bottom - 8.0
+            {
                 return Some(TimerAction::PlayPause);
             }
             // b2: Expand / ToggleMinimize (right - 68.0 .. right - 38.0, top + 8.0 .. bottom - 8.0)
-            if pt.x >= right - 68.0 && pt.x <= right - 38.0 && pt.y >= top + 8.0 && pt.y <= bottom - 8.0 {
+            if pt.x >= right - 68.0
+                && pt.x <= right - 38.0
+                && pt.y >= top + 8.0
+                && pt.y <= bottom - 8.0
+            {
                 return Some(TimerAction::ToggleMinimize);
             }
             // b3: Close (right - 35.0 .. right - 5.0, top + 8.0 .. bottom - 8.0)
-            if pt.x >= right - 35.0 && pt.x <= right - 5.0 && pt.y >= top + 8.0 && pt.y <= bottom - 8.0 {
+            if pt.x >= right - 35.0
+                && pt.x <= right - 5.0
+                && pt.y >= top + 8.0
+                && pt.y <= bottom - 8.0
+            {
                 return Some(TimerAction::Close);
             }
 
             return Some(TimerAction::ToggleMinimize);
         }
 
-        let (card_left, card_top, card_right, card_bottom, cx, cy) = self.get_card_bounds(screen_w, screen_h);
+        let (card_left, card_top, card_right, card_bottom, cx, cy) =
+            self.get_card_bounds(screen_w, screen_h);
 
         // Outside card?
         if pt.x < card_left || pt.x > card_right || pt.y < card_top || pt.y > card_bottom {
@@ -778,7 +823,11 @@ impl TimerWidgetState {
         let durations = [5, 10, 15, 25, 30];
         for (i, &dur) in durations.iter().enumerate() {
             let px = pill_row_x + i as f32 * (pill_w + pill_gap);
-            if pt.x >= px && pt.x <= px + pill_w && pt.y >= pill_row_y && pt.y <= pill_row_y + pill_h {
+            if pt.x >= px
+                && pt.x <= px + pill_w
+                && pt.y >= pill_row_y
+                && pt.y <= pill_row_y + pill_h
+            {
                 return Some(TimerAction::SetDuration(dur));
             }
         }
@@ -964,7 +1013,13 @@ impl Default for FluentToolbarState {
 
 impl FluentToolbarState {
     pub fn update_layout(&mut self, screen_w: f32, screen_h: f32) {
-        let (bar, items, grip, seps) = compute_toolbar_layout(screen_w, screen_h, self.collapsed, self.custom_position, self.monitor_count);
+        let (bar, items, grip, seps) = compute_toolbar_layout(
+            screen_w,
+            screen_h,
+            self.collapsed,
+            self.custom_position,
+            self.monitor_count,
+        );
         self.bar_rect = bar;
         self.items = items;
         self.grip_rect = grip;
@@ -1005,12 +1060,20 @@ impl FluentToolbarState {
             return None;
         }
         for item in &self.items {
-            if x >= item.rect.left && x <= item.rect.right && y >= item.rect.top && y <= item.rect.bottom {
+            if x >= item.rect.left
+                && x <= item.rect.right
+                && y >= item.rect.top
+                && y <= item.rect.bottom
+            {
                 return Some(item.action);
             }
         }
         for item in &self.subbar_items {
-            if x >= item.rect.left && x <= item.rect.right && y >= item.rect.top && y <= item.rect.bottom {
+            if x >= item.rect.left
+                && x <= item.rect.right
+                && y >= item.rect.top
+                && y <= item.rect.bottom
+            {
                 return Some(item.action);
             }
         }
@@ -1021,19 +1084,26 @@ impl FluentToolbarState {
         if !self.visible {
             return false;
         }
-        let in_main = x >= self.bar_rect.left && x <= self.bar_rect.right && y >= self.bar_rect.top && y <= self.bar_rect.bottom;
+        let in_main = x >= self.bar_rect.left
+            && x <= self.bar_rect.right
+            && y >= self.bar_rect.top
+            && y <= self.bar_rect.bottom;
         if in_main {
             return true;
         }
-        if let Some(sb) = self.subbar_rect {
-            if x >= sb.left && x <= sb.right && y >= sb.top && y <= sb.bottom {
-                return true;
-            }
+        if let Some(sb) = self.subbar_rect
+            && x >= sb.left
+            && x <= sb.right
+            && y >= sb.top
+            && y <= sb.bottom
+        {
+            return true;
         }
         false
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn compute_subbar_layout(
     bar_rect: D2D_RECT_F,
     active_tool: Option<DrawTool>,
@@ -1124,9 +1194,7 @@ pub fn compute_subbar_layout(
                 (FluentAction::SetStrokeWidth(4.0), 28.0),
                 (FluentAction::SetStrokeWidth(6.0), 28.0),
             ]);
-            groups.push(vec![
-                (FluentAction::ResetBadgeCounter, 54.0),
-            ]);
+            groups.push(vec![(FluentAction::ResetBadgeCounter, 54.0)]);
         }
         DrawTool::Pen | DrawTool::Highlighter => {
             groups.push(vec![
@@ -1152,13 +1220,19 @@ pub fn compute_subbar_layout(
                 (FluentAction::ToggleItalic, 30.0),
             ]);
             groups.push(vec![
-                (FluentAction::SetTextCardStyle(TextCardStyle::Transparent), 44.0),
+                (
+                    FluentAction::SetTextCardStyle(TextCardStyle::Transparent),
+                    44.0,
+                ),
                 (FluentAction::SetTextCardStyle(TextCardStyle::Badge), 48.0),
                 (FluentAction::SetTextCardStyle(TextCardStyle::Solid), 46.0),
             ]);
             groups.push(vec![
                 (FluentAction::SetFontFamily(TextFontFamily::SegoeUI), 42.0),
-                (FluentAction::SetFontFamily(TextFontFamily::CascadiaCode), 46.0),
+                (
+                    FluentAction::SetFontFamily(TextFontFamily::CascadiaCode),
+                    46.0,
+                ),
             ]);
         }
         _ => return (None, Vec::new(), Vec::new()),
@@ -1193,7 +1267,12 @@ pub fn compute_subbar_layout(
     let right = left + total_w;
     let bottom = top + sub_h;
 
-    let subbar_rect = D2D_RECT_F { left, top, right, bottom };
+    let subbar_rect = D2D_RECT_F {
+        left,
+        top,
+        right,
+        bottom,
+    };
 
     let mut items = Vec::new();
     let mut separators = Vec::new();
@@ -1446,11 +1525,13 @@ mod tests {
 
     #[test]
     fn test_zoom_state_coordinate_mapping() {
-        let mut zoom = ZoomState::default();
-        zoom.level = 2.0;
-        zoom.target_level = 2.0;
-        zoom.view_x = 100.0;
-        zoom.view_y = 50.0;
+        let zoom = ZoomState {
+            level: 2.0,
+            target_level: 2.0,
+            view_x: 100.0,
+            view_y: 50.0,
+            ..Default::default()
+        };
 
         let screen_pt = Point2D::new(400.0, 200.0);
         let canvas_pt = zoom.screen_to_canvas(screen_pt);
@@ -1508,8 +1589,10 @@ mod tests {
 
     #[test]
     fn test_direct_cursor_pan() {
-        let mut zoom = ZoomState::default();
-        zoom.level = 2.0;
+        let mut zoom = ZoomState {
+            level: 2.0,
+            ..Default::default()
+        };
         let screen_w = 1920.0;
         let screen_h = 1080.0;
 
@@ -1608,12 +1691,17 @@ mod tests {
     fn test_fluent_toolbar_multi_monitor_cycle_display() {
         let screen_w = 1920.0;
         let screen_h = 1080.0;
-        let mut tb = FluentToolbarState::default();
-        tb.monitor_count = 2;
+        let mut tb = FluentToolbarState {
+            monitor_count: 2,
+            ..Default::default()
+        };
         tb.update_layout(screen_w, screen_h);
 
         // Verify CycleDisplay is present in items
-        let cycle_display_item = tb.items.iter().find(|it| it.action == FluentAction::CycleDisplay);
+        let cycle_display_item = tb
+            .items
+            .iter()
+            .find(|it| it.action == FluentAction::CycleDisplay);
         assert!(cycle_display_item.is_some());
         let item = cycle_display_item.unwrap();
         let mid_x = (item.rect.left + item.rect.right) / 2.0;
@@ -1626,16 +1714,23 @@ mod tests {
         let screen_w = 1920.0;
         let screen_h = 1080.0;
         let mut widget = TimerWidgetState::default();
-        let (_card_left, card_top, card_right, _card_bottom, cx, cy) = widget.get_card_bounds(screen_w, screen_h);
+        let (_card_left, card_top, card_right, _card_bottom, cx, cy) =
+            widget.get_card_bounds(screen_w, screen_h);
 
         // 1. Full center card mode
         // Clock face center click toggles PlayPause
         let clock_center = Point2D::new(cx, cy - 10.0);
-        assert_eq!(widget.get_action_at(clock_center, screen_w, screen_h), Some(TimerAction::PlayPause));
+        assert_eq!(
+            widget.get_action_at(clock_center, screen_w, screen_h),
+            Some(TimerAction::PlayPause)
+        );
 
         // Quick duration pill (5m)
         let pill_5m = Point2D::new(cx - 150.0, cy - 150.0);
-        assert_eq!(widget.get_action_at(pill_5m, screen_w, screen_h), Some(TimerAction::SetDuration(5)));
+        assert_eq!(
+            widget.get_action_at(pill_5m, screen_w, screen_h),
+            Some(TimerAction::SetDuration(5))
+        );
 
         // Far away click hits nothing
         let outside = Point2D::new(50.0, 50.0);
@@ -1646,27 +1741,45 @@ mod tests {
 
         // Hero Play/Pause button (center)
         let hero_pt = Point2D::new(cx, btn_y);
-        assert_eq!(widget.get_action_at(hero_pt, screen_w, screen_h), Some(TimerAction::PlayPause));
+        assert_eq!(
+            widget.get_action_at(hero_pt, screen_w, screen_h),
+            Some(TimerAction::PlayPause)
+        );
 
         // +1m button (cx + 60.0)
         let plus1_pt = Point2D::new(cx + 60.0, btn_y);
-        assert_eq!(widget.get_action_at(plus1_pt, screen_w, screen_h), Some(TimerAction::AddMinute));
+        assert_eq!(
+            widget.get_action_at(plus1_pt, screen_w, screen_h),
+            Some(TimerAction::AddMinute)
+        );
 
         // -1m button (cx - 120.0)
         let minus1_pt = Point2D::new(cx - 120.0, btn_y);
-        assert_eq!(widget.get_action_at(minus1_pt, screen_w, screen_h), Some(TimerAction::SubMinute));
+        assert_eq!(
+            widget.get_action_at(minus1_pt, screen_w, screen_h),
+            Some(TimerAction::SubMinute)
+        );
 
         // Reset button (cx - 60.0)
         let reset_pt = Point2D::new(cx - 60.0, btn_y);
-        assert_eq!(widget.get_action_at(reset_pt, screen_w, screen_h), Some(TimerAction::Reset));
+        assert_eq!(
+            widget.get_action_at(reset_pt, screen_w, screen_h),
+            Some(TimerAction::Reset)
+        );
 
         // Mini button (cx + 120.0)
         let mini_pt = Point2D::new(cx + 120.0, btn_y);
-        assert_eq!(widget.get_action_at(mini_pt, screen_w, screen_h), Some(TimerAction::ToggleMinimize));
+        assert_eq!(
+            widget.get_action_at(mini_pt, screen_w, screen_h),
+            Some(TimerAction::ToggleMinimize)
+        );
 
         // Close button (top right: card_right - 32.0, card_top + 28.0)
         let close_pt = Point2D::new(card_right - 32.0, card_top + 28.0);
-        assert_eq!(widget.get_action_at(close_pt, screen_w, screen_h), Some(TimerAction::Close));
+        assert_eq!(
+            widget.get_action_at(close_pt, screen_w, screen_h),
+            Some(TimerAction::Close)
+        );
 
         // 2. Corner mini-pill mode
         widget.minimized = true;
@@ -1674,19 +1787,31 @@ mod tests {
 
         // Cycle corner button in mini-pill (left + 15, top + 15)
         let mini_cycle = Point2D::new(left + 15.0, top + 15.0);
-        assert_eq!(widget.get_action_at(mini_cycle, screen_w, screen_h), Some(TimerAction::CycleCorner));
+        assert_eq!(
+            widget.get_action_at(mini_cycle, screen_w, screen_h),
+            Some(TimerAction::CycleCorner)
+        );
 
         // Play/Pause button in mini-pill (right - 90, top + 15)
         let mini_play = Point2D::new(right - 90.0, top + 15.0);
-        assert_eq!(widget.get_action_at(mini_play, screen_w, screen_h), Some(TimerAction::PlayPause));
+        assert_eq!(
+            widget.get_action_at(mini_play, screen_w, screen_h),
+            Some(TimerAction::PlayPause)
+        );
 
         // Expand button in mini-pill (right - 50, top + 15)
         let mini_expand = Point2D::new(right - 50.0, top + 15.0);
-        assert_eq!(widget.get_action_at(mini_expand, screen_w, screen_h), Some(TimerAction::ToggleMinimize));
+        assert_eq!(
+            widget.get_action_at(mini_expand, screen_w, screen_h),
+            Some(TimerAction::ToggleMinimize)
+        );
 
         // Close button in mini-pill (right - 20, top + 15)
         let mini_close = Point2D::new(right - 20.0, top + 15.0);
-        assert_eq!(widget.get_action_at(mini_close, screen_w, screen_h), Some(TimerAction::Close));
+        assert_eq!(
+            widget.get_action_at(mini_close, screen_w, screen_h),
+            Some(TimerAction::Close)
+        );
     }
 
     #[test]
@@ -1769,25 +1894,65 @@ mod tests {
         // 2. Arrow tool selected -> subbar should contain arrow styles
         tb.active_tool = Some(DrawTool::Arrow);
         tb.update_layout(1920.0, 1080.0);
-        assert!(tb.subbar_items.iter().any(|i| i.action == FluentAction::SetArrowStyle(ArrowStyle::Double)));
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::SetArrowStyle(ArrowStyle::Double))
+        );
 
         // 3. StepBadge tool selected -> subbar should contain sizes, shapes, fills, widths, reset
         tb.active_tool = Some(DrawTool::StepBadge);
         tb.update_layout(1920.0, 1080.0);
-        assert!(tb.subbar_items.iter().any(|i| i.action == FluentAction::ResetBadgeCounter));
-        assert!(tb.subbar_items.iter().any(|i| i.action == FluentAction::SetBadgeSize(BadgeSize::Large)));
-        assert!(tb.subbar_items.iter().any(|i| i.action == FluentAction::SetBadgeShape(BadgeShape::Hexagon)));
-        assert!(tb.subbar_items.iter().any(|i| i.action == FluentAction::SetFillMode(FillMode::Solid)));
-        assert!(tb.subbar_items.iter().any(|i| i.action == FluentAction::SetStrokeWidth(4.0)));
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::ResetBadgeCounter)
+        );
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::SetBadgeSize(BadgeSize::Large))
+        );
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::SetBadgeShape(BadgeShape::Hexagon))
+        );
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::SetFillMode(FillMode::Solid))
+        );
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::SetStrokeWidth(4.0))
+        );
 
         // 4. Text tool selected -> subbar should contain font sizes, bold, italic, card style, fonts
         tb.active_tool = Some(DrawTool::Text);
         tb.update_layout(1920.0, 1080.0);
         assert!(tb.subbar_rect.is_some());
-        assert!(tb.subbar_items.iter().any(|i| i.action == FluentAction::SetFontSize(20.0)));
-        assert!(tb.subbar_items.iter().any(|i| i.action == FluentAction::ToggleBold));
-        assert!(tb.subbar_items.iter().any(|i| i.action == FluentAction::SetTextCardStyle(TextCardStyle::Badge)));
-        assert!(tb.subbar_items.iter().any(|i| i.action == FluentAction::SetFontFamily(TextFontFamily::CascadiaCode)));
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::SetFontSize(20.0))
+        );
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::ToggleBold)
+        );
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::SetTextCardStyle(TextCardStyle::Badge))
+        );
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::SetFontFamily(TextFontFamily::CascadiaCode))
+        );
 
         // 5. Deselect tool (None) -> subbar disappears completely
         tb.active_tool = None;
@@ -1800,10 +1965,12 @@ mod tests {
     fn test_timer_corner_positions_and_custom_drag() {
         let screen_w = 1920.0;
         let screen_h = 1080.0;
-        let mut widget = TimerWidgetState::default();
+        let mut widget = TimerWidgetState {
+            custom_pos: Some(Point2D::new(400.0, 300.0)),
+            ..Default::default()
+        };
 
         // Check custom dragging position
-        widget.custom_pos = Some(Point2D::new(400.0, 300.0));
         let (cl, ct, cr, cb, cx, cy) = widget.get_card_bounds(screen_w, screen_h);
         assert_eq!(cx, 400.0);
         assert_eq!(cy, 300.0);
@@ -1841,12 +2008,37 @@ mod tests {
     #[test]
     fn test_per_tool_settings_independence() {
         // Verify tool settings are independent structs and can be mutated without cross-contamination
-        let pen = StrokeToolSettings { stroke_width: 2.0, pattern: StrokePattern::Solid };
-        let mut highlighter = StrokeToolSettings { stroke_width: 14.0, pattern: StrokePattern::Solid };
-        let mut arrow = ArrowToolSettings { stroke_width: 4.0, style: ArrowStyle::Single, pattern: StrokePattern::Solid };
-        let mut rect = ShapeToolSettings { stroke_width: 3.0, fill_mode: FillMode::None, pattern: StrokePattern::Solid };
-        let badge = StepBadgeToolSettings { size: BadgeSize::Medium, shape: BadgeShape::Circle, fill: FillMode::Solid, stroke_width: 2.0 };
-        let mut text = TextToolSettings { font_size: 20.0, is_bold: false, is_italic: false, card_style: TextCardStyle::Transparent, font_family: TextFontFamily::SegoeUI };
+        let pen = StrokeToolSettings {
+            stroke_width: 2.0,
+            pattern: StrokePattern::Solid,
+        };
+        let mut highlighter = StrokeToolSettings {
+            stroke_width: 14.0,
+            pattern: StrokePattern::Solid,
+        };
+        let mut arrow = ArrowToolSettings {
+            stroke_width: 4.0,
+            style: ArrowStyle::Single,
+            pattern: StrokePattern::Solid,
+        };
+        let mut rect = ShapeToolSettings {
+            stroke_width: 3.0,
+            fill_mode: FillMode::None,
+            pattern: StrokePattern::Solid,
+        };
+        let badge = StepBadgeToolSettings {
+            size: BadgeSize::Medium,
+            shape: BadgeShape::Circle,
+            fill: FillMode::Solid,
+            stroke_width: 2.0,
+        };
+        let mut text = TextToolSettings {
+            font_size: 20.0,
+            is_bold: false,
+            is_italic: false,
+            card_style: TextCardStyle::Transparent,
+            font_family: TextFontFamily::SegoeUI,
+        };
 
         // Mutate highlighter stroke width
         highlighter.stroke_width = 24.0;
@@ -1892,4 +2084,3 @@ mod tests {
         assert!(snip.with_guides);
     }
 }
-

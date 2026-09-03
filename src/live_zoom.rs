@@ -1,18 +1,22 @@
 #![allow(dead_code)]
 
-use windows::core::{s, BOOL};
 use windows::Win32::Foundation::{HMODULE, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetCursorPos, GetSystemMetrics, SetWindowsHookExW, UnhookWindowsHookEx,
-    HHOOK, MSLLHOOKSTRUCT, SM_CXSCREEN, SM_CYSCREEN, WH_MOUSE_LL, WM_MOUSEWHEEL,
+    CallNextHookEx, GetCursorPos, GetSystemMetrics, HHOOK, MSLLHOOKSTRUCT, SM_CXSCREEN,
+    SM_CYSCREEN, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WM_MOUSEWHEEL,
 };
+use windows::core::{BOOL, s};
 
 static mut LIVE_ZOOM_HOOK: HHOOK = HHOOK(std::ptr::null_mut());
 static mut ENGINE_RAW_PTR: *mut LiveZoomEngine = std::ptr::null_mut();
 
-unsafe extern "system" fn live_zoom_mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+unsafe extern "system" fn live_zoom_mouse_hook(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     unsafe {
         if code >= 0 && wparam.0 as u32 == WM_MOUSEWHEEL {
             let is_ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
@@ -35,6 +39,7 @@ type MagUninitFn = unsafe extern "system" fn() -> BOOL;
 type MagSetFullscreenTransformFn = unsafe extern "system" fn(f32, i32, i32) -> BOOL;
 type MagGetFullscreenTransformFn = unsafe extern "system" fn(*mut f32, *mut i32, *mut i32) -> BOOL;
 type MagShowSystemCursorFn = unsafe extern "system" fn(BOOL) -> BOOL;
+type FarProc = unsafe extern "system" fn() -> isize;
 
 pub struct LiveZoomEngine {
     module: Option<HMODULE>,
@@ -89,25 +94,32 @@ impl LiveZoomEngine {
 
     fn load_dll(&mut self) {
         unsafe {
-            if let Ok(hmodule) = LoadLibraryA(s!("magnification.dll")) {
-                if !hmodule.is_invalid() {
-                    self.module = Some(hmodule);
+            if let Ok(hmodule) = LoadLibraryA(s!("magnification.dll"))
+                && !hmodule.is_invalid()
+            {
+                self.module = Some(hmodule);
 
-                    if let Some(f) = GetProcAddress(hmodule, s!("MagInitialize")) {
-                        self.mag_init = Some(std::mem::transmute(f));
-                    }
-                    if let Some(f) = GetProcAddress(hmodule, s!("MagUninitialize")) {
-                        self.mag_uninit = Some(std::mem::transmute(f));
-                    }
-                    if let Some(f) = GetProcAddress(hmodule, s!("MagSetFullscreenTransform")) {
-                        self.mag_set_transform = Some(std::mem::transmute(f));
-                    }
-                    if let Some(f) = GetProcAddress(hmodule, s!("MagGetFullscreenTransform")) {
-                        self.mag_get_transform = Some(std::mem::transmute(f));
-                    }
-                    if let Some(f) = GetProcAddress(hmodule, s!("MagShowSystemCursor")) {
-                        self.mag_show_cursor = Some(std::mem::transmute(f));
-                    }
+                if let Some(f) = GetProcAddress(hmodule, s!("MagInitialize")) {
+                    self.mag_init = Some(std::mem::transmute::<FarProc, MagInitFn>(f));
+                }
+                if let Some(f) = GetProcAddress(hmodule, s!("MagUninitialize")) {
+                    self.mag_uninit = Some(std::mem::transmute::<FarProc, MagUninitFn>(f));
+                }
+                if let Some(f) = GetProcAddress(hmodule, s!("MagSetFullscreenTransform")) {
+                    self.mag_set_transform = Some(std::mem::transmute::<
+                        FarProc,
+                        MagSetFullscreenTransformFn,
+                    >(f));
+                }
+                if let Some(f) = GetProcAddress(hmodule, s!("MagGetFullscreenTransform")) {
+                    self.mag_get_transform = Some(std::mem::transmute::<
+                        FarProc,
+                        MagGetFullscreenTransformFn,
+                    >(f));
+                }
+                if let Some(f) = GetProcAddress(hmodule, s!("MagShowSystemCursor")) {
+                    self.mag_show_cursor =
+                        Some(std::mem::transmute::<FarProc, MagShowSystemCursorFn>(f));
                 }
             }
         }
@@ -139,33 +151,34 @@ impl LiveZoomEngine {
         }
 
         unsafe {
-            if let Some(init_fn) = self.mag_init {
-                if init_fn().as_bool() {
-                    self.is_active = true;
-                    self.zoom_level = initial_level.clamp(1.25, 10.0);
+            if let Some(init_fn) = self.mag_init
+                && init_fn().as_bool()
+            {
+                self.is_active = true;
+                self.zoom_level = initial_level.clamp(1.25, 10.0);
 
-                    self.update_target_from_cursor();
-                    self.current_x_offset = self.target_x_offset;
-                    self.current_y_offset = self.target_y_offset;
+                self.update_target_from_cursor();
+                self.current_x_offset = self.target_x_offset;
+                self.current_y_offset = self.target_y_offset;
 
-                    if let Some(set_fn) = self.mag_set_transform {
-                        let _ = set_fn(
-                            self.zoom_level,
-                            self.current_x_offset.round() as i32,
-                            self.current_y_offset.round() as i32,
-                        );
-                    }
-
-                    // Install low-level mouse wheel hook for Ctrl+Wheel zooming
-                    ENGINE_RAW_PTR = self as *mut LiveZoomEngine;
-                    if LIVE_ZOOM_HOOK.0.is_null() {
-                        if let Ok(hook) = SetWindowsHookExW(WH_MOUSE_LL, Some(live_zoom_mouse_hook), None, 0) {
-                            LIVE_ZOOM_HOOK = hook;
-                        }
-                    }
-
-                    return true;
+                if let Some(set_fn) = self.mag_set_transform {
+                    let _ = set_fn(
+                        self.zoom_level,
+                        self.current_x_offset.round() as i32,
+                        self.current_y_offset.round() as i32,
+                    );
                 }
+
+                // Install low-level mouse wheel hook for Ctrl+Wheel zooming
+                ENGINE_RAW_PTR = self as *mut LiveZoomEngine;
+                if LIVE_ZOOM_HOOK.0.is_null()
+                    && let Ok(hook) =
+                        SetWindowsHookExW(WH_MOUSE_LL, Some(live_zoom_mouse_hook), None, 0)
+                {
+                    LIVE_ZOOM_HOOK = hook;
+                }
+
+                return true;
             }
         }
         false
@@ -215,8 +228,16 @@ impl LiveZoomEngine {
             if GetCursorPos(&mut pt).is_ok() {
                 let mon_x = self.monitor_x as f32;
                 let mon_y = self.monitor_y as f32;
-                let mon_w = if self.monitor_w > 0 { self.monitor_w as f32 } else { GetSystemMetrics(SM_CXSCREEN) as f32 };
-                let mon_h = if self.monitor_h > 0 { self.monitor_h as f32 } else { GetSystemMetrics(SM_CYSCREEN) as f32 };
+                let mon_w = if self.monitor_w > 0 {
+                    self.monitor_w as f32
+                } else {
+                    GetSystemMetrics(SM_CXSCREEN) as f32
+                };
+                let mon_h = if self.monitor_h > 0 {
+                    self.monitor_h as f32
+                } else {
+                    GetSystemMetrics(SM_CYSCREEN) as f32
+                };
 
                 let view_w = mon_w / self.zoom_level;
                 let view_h = mon_h / self.zoom_level;
@@ -249,15 +270,15 @@ impl LiveZoomEngine {
     }
 
     fn apply_transform(&self) {
-        if self.is_active {
-            if let Some(set_fn) = self.mag_set_transform {
-                unsafe {
-                    let _ = set_fn(
-                        self.zoom_level,
-                        self.current_x_offset.round() as i32,
-                        self.current_y_offset.round() as i32,
-                    );
-                }
+        if self.is_active
+            && let Some(set_fn) = self.mag_set_transform
+        {
+            unsafe {
+                let _ = set_fn(
+                    self.zoom_level,
+                    self.current_x_offset.round() as i32,
+                    self.current_y_offset.round() as i32,
+                );
             }
         }
     }

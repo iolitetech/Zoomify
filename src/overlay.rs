@@ -4,40 +4,40 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
 
-use windows::core::{w, PCWSTR, Result};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
 use windows::Win32::Graphics::Gdi::InvalidateRect;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1,
     VK_F2, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetCursorPos,
-    GetWindowLongPtrW, LoadCursorW, RegisterClassExW, SetCursor, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW,
-    IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL,
-    SWP_SHOWWINDOW, SW_HIDE, SW_SHOW, WM_CHAR, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, HWND_TOPMOST,
+    IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, LoadCursorW, RegisterClassExW, SW_HIDE,
+    SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
+use windows::core::{PCWSTR, Result, w};
 
 use crate::capture::ScreenCapture;
 use crate::clipboard::{copy_bgra_to_clipboard, get_clipboard_text};
 use crate::live_zoom::LiveZoomEngine;
 use crate::renderer::D2DRenderer;
-use crate::shapes::{recognize_smart_shape, shape_intersects_circle, snap_to_angle, snap_to_square};
+use crate::shapes::{
+    recognize_smart_shape, shape_intersects_circle, snap_to_angle, snap_to_square,
+};
 use crate::types::{
-    AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, CanvasBackground, ColorPreset, DrawTool,
-    FillMode, FluentAction, FluentToolbarState, HistoryAction, LaserTrailPoint, Point2D,
+    AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, CanvasBackground, ColorPreset,
+    DrawTool, FillMode, FluentAction, FluentToolbarState, HistoryAction, LaserTrailPoint, Point2D,
     Shape, ShapeToolSettings, SnipSelection, SnipShape, SpotlightState, StepBadgeToolSettings,
-    StrokePattern, StrokeToolSettings, TextCardStyle, TextEditorState, TextFontFamily, TextToolSettings,
-    TimerAction, TimerWidgetState, ToastNotification, ZoomState,
+    StrokePattern, StrokeToolSettings, TextCardStyle, TextEditorState, TextFontFamily,
+    TextToolSettings, TimerAction, TimerWidgetState, ToastNotification, ZoomState,
 };
 
 const OVERLAY_CLASS_NAME: PCWSTR = w!("ZoomifyFullscreenOverlay");
@@ -131,7 +131,7 @@ impl OverlayWindow {
             RegisterClassExW(&wnd_class);
 
             let available_monitors = crate::monitor::MonitorManager::enumerate_monitors();
-            let current_monitor = available_monitors.get(0).cloned().unwrap_or_default();
+            let current_monitor = available_monitors.first().cloned().unwrap_or_default();
             let screen_x = current_monitor.x;
             let screen_y = current_monitor.y;
             let screen_width = current_monitor.width;
@@ -158,15 +158,10 @@ impl OverlayWindow {
             renderer.init_hwnd(hwnd, screen_width, screen_height)?;
 
             let cfg = crate::config::AppConfig::load();
-            let mut toolbar = FluentToolbarState::default();
-            toolbar.collapsed = cfg.toolbar_collapsed;
-            toolbar.monitor_count = available_monitors.len();
-            toolbar.current_monitor_index = 0;
-            if let Some((cx, cy)) = cfg.toolbar_custom_position {
-                toolbar.custom_position = Some(Point2D::new(cx, cy));
-            }
-            let mut spotlight = SpotlightState::default();
-            spotlight.radius = cfg.spotlight_radius;
+            let spotlight = SpotlightState {
+                radius: cfg.spotlight_radius,
+                ..Default::default()
+            };
             let timer_secs = (cfg.timer_duration_mins * 60).max(60);
             let initial_color = match cfg.default_color.to_lowercase().as_str() {
                 "red" => ColorPreset::Red,
@@ -200,14 +195,23 @@ impl OverlayWindow {
             let badge_shape = BadgeShape::Circle;
             let arrow_style = ArrowStyle::Single;
 
-            toolbar.current_fill_mode = fill_mode;
-            toolbar.current_stroke_pattern = stroke_pattern;
-            toolbar.current_arrow_style = arrow_style;
-            toolbar.current_badge_size = badge_size;
-            toolbar.current_badge_shape = badge_shape;
-            toolbar.stroke_width = cfg.default_stroke_width;
-            toolbar.badge_counter = 1;
-            toolbar.active_tool = None;
+            let toolbar = FluentToolbarState {
+                collapsed: cfg.toolbar_collapsed,
+                monitor_count: available_monitors.len(),
+                current_monitor_index: 0,
+                custom_position: cfg
+                    .toolbar_custom_position
+                    .map(|(cx, cy)| Point2D::new(cx, cy)),
+                current_fill_mode: fill_mode,
+                current_stroke_pattern: stroke_pattern,
+                current_arrow_style: arrow_style,
+                current_badge_size: badge_size,
+                current_badge_shape: badge_shape,
+                stroke_width: cfg.default_stroke_width,
+                badge_counter: 1,
+                active_tool: None,
+                ..Default::default()
+            };
 
             let state = Rc::new(RefCell::new(Self {
                 hwnd,
@@ -237,15 +241,51 @@ impl OverlayWindow {
                 arrow_style,
                 badge_size,
                 badge_shape,
-                pen_settings: StrokeToolSettings { stroke_width: 3.0, pattern: StrokePattern::Solid },
-                highlighter_settings: StrokeToolSettings { stroke_width: 14.0, pattern: StrokePattern::Solid },
-                line_settings: StrokeToolSettings { stroke_width: 3.0, pattern: StrokePattern::Solid },
-                arrow_settings: ArrowToolSettings { stroke_width: 4.0, style: ArrowStyle::Single, pattern: StrokePattern::Solid },
-                rect_settings: ShapeToolSettings { stroke_width: 3.0, fill_mode: FillMode::None, pattern: StrokePattern::Solid },
-                rounded_rect_settings: ShapeToolSettings { stroke_width: 3.0, fill_mode: FillMode::None, pattern: StrokePattern::Solid },
-                ellipse_settings: ShapeToolSettings { stroke_width: 3.0, fill_mode: FillMode::None, pattern: StrokePattern::Solid },
-                badge_settings: StepBadgeToolSettings { size: BadgeSize::Medium, shape: BadgeShape::Circle, fill: FillMode::Solid, stroke_width: 2.0 },
-                text_settings: TextToolSettings { font_size: 20.0, is_bold: false, is_italic: false, card_style: TextCardStyle::Transparent, font_family: TextFontFamily::SegoeUI },
+                pen_settings: StrokeToolSettings {
+                    stroke_width: 3.0,
+                    pattern: StrokePattern::Solid,
+                },
+                highlighter_settings: StrokeToolSettings {
+                    stroke_width: 14.0,
+                    pattern: StrokePattern::Solid,
+                },
+                line_settings: StrokeToolSettings {
+                    stroke_width: 3.0,
+                    pattern: StrokePattern::Solid,
+                },
+                arrow_settings: ArrowToolSettings {
+                    stroke_width: 4.0,
+                    style: ArrowStyle::Single,
+                    pattern: StrokePattern::Solid,
+                },
+                rect_settings: ShapeToolSettings {
+                    stroke_width: 3.0,
+                    fill_mode: FillMode::None,
+                    pattern: StrokePattern::Solid,
+                },
+                rounded_rect_settings: ShapeToolSettings {
+                    stroke_width: 3.0,
+                    fill_mode: FillMode::None,
+                    pattern: StrokePattern::Solid,
+                },
+                ellipse_settings: ShapeToolSettings {
+                    stroke_width: 3.0,
+                    fill_mode: FillMode::None,
+                    pattern: StrokePattern::Solid,
+                },
+                badge_settings: StepBadgeToolSettings {
+                    size: BadgeSize::Medium,
+                    shape: BadgeShape::Circle,
+                    fill: FillMode::Solid,
+                    stroke_width: 2.0,
+                },
+                text_settings: TextToolSettings {
+                    font_size: 20.0,
+                    is_bold: false,
+                    is_italic: false,
+                    card_style: TextCardStyle::Transparent,
+                    font_family: TextFontFamily::SegoeUI,
+                },
                 live_zoom: LiveZoomEngine::new(),
                 is_drawing: false,
                 draw_start_pt: Point2D::default(),
@@ -284,7 +324,12 @@ impl OverlayWindow {
             let raw_ptr = Rc::into_raw(Rc::clone(&state));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw_ptr as isize);
 
-            windows::Win32::UI::WindowsAndMessaging::SetTimer(Some(hwnd), TIMER_ID_ANIMATION, 16, None);
+            windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                Some(hwnd),
+                TIMER_ID_ANIMATION,
+                16,
+                None,
+            );
 
             Ok(state)
         }
@@ -307,14 +352,23 @@ impl OverlayWindow {
         }
         self.target_monitor_under_cursor();
         self.capture_current_screen();
-        let mut cursor_screen = Point2D::new(self.screen_width as f32 / 2.0, self.screen_height as f32 / 2.0);
+        let mut cursor_screen = Point2D::new(
+            self.screen_width as f32 / 2.0,
+            self.screen_height as f32 / 2.0,
+        );
         unsafe {
             let mut pt = POINT::default();
             if GetCursorPos(&mut pt).is_ok() {
-                cursor_screen = Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
+                cursor_screen =
+                    Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
             }
         }
-        self.zoom.set_zoom_centered(2.0, cursor_screen, self.screen_width as f32, self.screen_height as f32);
+        self.zoom.set_zoom_centered(
+            2.0,
+            cursor_screen,
+            self.screen_width as f32,
+            self.screen_height as f32,
+        );
         self.mode = AppMode::StaticZoom;
         self.toolbar.active_tool = None;
         self.show_window();
@@ -435,7 +489,8 @@ impl OverlayWindow {
         unsafe {
             let mut pt = POINT::default();
             if GetCursorPos(&mut pt).is_ok() {
-                let screen_pt = Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
+                let screen_pt =
+                    Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
                 self.spotlight.x = screen_pt.x;
                 self.spotlight.y = screen_pt.y;
             }
@@ -452,14 +507,24 @@ impl OverlayWindow {
         self.capture_current_screen();
         self.mode = AppMode::Timer;
         self.toolbar.active_tool = None;
-        let mins = if minutes > 0 { minutes } else { (self.timer_seconds / 60).max(1) };
+        let mins = if minutes > 0 {
+            minutes
+        } else {
+            (self.timer_seconds / 60).max(1)
+        };
         self.timer_seconds = mins * 60;
         self.timer_remaining = self.timer_seconds as f64;
         self.timer_paused = false;
         self.timer_alarm_sounded = false;
         self.timer_last_tick = Instant::now();
         self.show_window();
-        self.set_toast("⏱️", format!("Presentation Timer: {}m (Wheel: ±1m | Ctrl+Wheel: Dim | Tab: Mini)", mins));
+        self.set_toast(
+            "⏱️",
+            format!(
+                "Presentation Timer: {}m (Wheel: ±1m | Ctrl+Wheel: Dim | Tab: Mini)",
+                mins
+            ),
+        );
     }
 
     pub fn enter_snip_mode(&mut self) {
@@ -478,7 +543,11 @@ impl OverlayWindow {
             SnipShape::Rectangle
         };
         self.show_window();
-        let shape_name = if self.snip.shape == SnipShape::Ellipse { "Circular Snip" } else { "Rectangular Snip" };
+        let shape_name = if self.snip.shape == SnipShape::Ellipse {
+            "Circular Snip"
+        } else {
+            "Rectangular Snip"
+        };
         self.set_toast("✂️", format!("{} (Tab: Switch | Drag: Snip)", shape_name));
     }
 
@@ -488,7 +557,8 @@ impl OverlayWindow {
             unsafe {
                 let mut pt = POINT::default();
                 if GetCursorPos(&mut pt).is_ok() {
-                    let screen_pt = Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
+                    let screen_pt =
+                        Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
                     self.spotlight.x = screen_pt.x;
                     self.spotlight.y = screen_pt.y;
                 }
@@ -578,12 +648,16 @@ impl OverlayWindow {
             self.screen_height = sh;
             self.live_zoom.set_monitor_bounds(sx, sy, sw, sh);
 
-            let is_visible = unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.hwnd).as_bool() };
-            let flags = if is_visible && self.mode != AppMode::Idle && self.mode != AppMode::LiveZoom {
-                SWP_SHOWWINDOW
-            } else {
-                windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
+            let is_visible = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.hwnd).as_bool()
             };
+            let flags =
+                if is_visible && self.mode != AppMode::Idle && self.mode != AppMode::LiveZoom {
+                    SWP_SHOWWINDOW
+                } else {
+                    windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE
+                        | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
+                };
 
             unsafe {
                 self.renderer.resize(sw, sh);
@@ -614,7 +688,12 @@ impl OverlayWindow {
         self.set_active_monitor(next_idx);
 
         // Recapture screen for new monitor if in visual freeze modes
-        if self.mode == AppMode::StaticZoom || self.mode == AppMode::Draw || self.mode == AppMode::Spotlight || self.mode == AppMode::Timer || self.mode == AppMode::Snip {
+        if self.mode == AppMode::StaticZoom
+            || self.mode == AppMode::Draw
+            || self.mode == AppMode::Spotlight
+            || self.mode == AppMode::Timer
+            || self.mode == AppMode::Snip
+        {
             self.capture_current_screen();
         }
 
@@ -641,7 +720,8 @@ impl OverlayWindow {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
             let _ = SetForegroundWindow(self.hwnd);
             let _ = SetFocus(Some(self.hwnd));
-            self.toolbar.update_layout(self.screen_width as f32, self.screen_height as f32);
+            self.toolbar
+                .update_layout(self.screen_width as f32, self.screen_height as f32);
             self.request_repaint();
         }
     }
@@ -653,7 +733,9 @@ impl OverlayWindow {
     }
 
     pub fn capture_current_screen(&mut self) {
-        let is_visible = unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.hwnd).as_bool() };
+        let is_visible = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(self.hwnd).as_bool()
+        };
         if is_visible {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -661,11 +743,16 @@ impl OverlayWindow {
             std::thread::sleep(std::time::Duration::from_millis(15));
         }
 
-        if let Some(cap) = ScreenCapture::capture_rect(self.screen_x, self.screen_y, self.screen_width, self.screen_height) {
-            if let Some(rt) = &self.renderer.render_target {
-                if let Ok(bmp) = cap.create_d2d_bitmap(rt) {
-                    self.background_bitmap = Some(bmp);
-                }
+        if let Some(cap) = ScreenCapture::capture_rect(
+            self.screen_x,
+            self.screen_y,
+            self.screen_width,
+            self.screen_height,
+        ) {
+            if let Some(rt) = &self.renderer.render_target
+                && let Ok(bmp) = cap.create_d2d_bitmap(rt)
+            {
+                self.background_bitmap = Some(bmp);
             }
             self.background_capture = Some(cap);
         }
@@ -728,7 +815,8 @@ impl OverlayWindow {
                 HistoryAction::DeleteShape { index, shape } => {
                     let insert_idx = index.min(self.shapes.len());
                     self.shapes.insert(insert_idx, shape.clone());
-                    self.redo_history.push(HistoryAction::DeleteShape { index, shape });
+                    self.redo_history
+                        .push(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↩️", "Restored Erased Shape");
                 }
                 HistoryAction::Clear(prev_shapes) => {
@@ -749,7 +837,10 @@ impl OverlayWindow {
                     self.undo_history.push(HistoryAction::AddShape(shape));
                     self.set_toast("↪️", "Redo Shape");
                 }
-                HistoryAction::AddStepBadge { shape, prev_counter } => {
+                HistoryAction::AddStepBadge {
+                    shape,
+                    prev_counter,
+                } => {
                     self.shapes.push(shape.clone());
                     self.step_counter = prev_counter + 1;
                     self.undo_history.push(HistoryAction::AddStepBadge {
@@ -764,11 +855,12 @@ impl OverlayWindow {
                     } else if !self.shapes.is_empty() {
                         self.shapes.pop();
                     }
-                    self.undo_history.push(HistoryAction::DeleteShape { index, shape });
+                    self.undo_history
+                        .push(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↪️", "Re-erased Shape");
                 }
                 HistoryAction::Clear(_prev_shapes) => {
-                    let current_shapes = std::mem::replace(&mut self.shapes, Vec::new());
+                    let current_shapes = std::mem::take(&mut self.shapes);
                     self.undo_history.push(HistoryAction::Clear(current_shapes));
                     self.set_toast("↪️", "Re-cleared Canvas");
                 }
@@ -807,7 +899,10 @@ impl OverlayWindow {
 
     pub fn get_composite_capture(&self, include_spotlight: bool) -> Option<ScreenCapture> {
         let text_input = self.text_editor.as_ref();
-        let bg_pixels = self.background_capture.as_ref().map(|c| c.pixels.as_slice());
+        let bg_pixels = self
+            .background_capture
+            .as_ref()
+            .map(|c| c.pixels.as_slice());
         self.renderer.render_to_capture(
             self.screen_x,
             self.screen_y,
@@ -825,10 +920,10 @@ impl OverlayWindow {
     }
 
     pub fn copy_screen_to_clipboard(&mut self) {
-        if let Some(composite) = self.get_composite_capture(self.spotlight.active) {
-            if copy_bgra_to_clipboard(composite.width, composite.height, &composite.pixels) {
-                self.set_toast("📋", "Copied Screen + Drawings to Clipboard!");
-            }
+        if let Some(composite) = self.get_composite_capture(self.spotlight.active)
+            && copy_bgra_to_clipboard(composite.width, composite.height, &composite.pixels)
+        {
+            self.set_toast("📋", "Copied Screen + Drawings to Clipboard!");
         }
     }
 
@@ -847,11 +942,299 @@ impl OverlayWindow {
 
             let filename = format!("{}\\Zoomify_{}.png", pictures_dir, timestamp);
             if composite.save_png(&filename).is_ok() {
-                self.set_toast("💾", format!("Saved to Pictures\\Zoomify_{}.png", timestamp));
+                self.set_toast(
+                    "💾",
+                    format!("Saved to Pictures\\Zoomify_{}.png", timestamp),
+                );
             } else {
                 self.set_toast("❌", "Failed to save screenshot!");
             }
         }
+    }
+
+    pub fn create_shape_for_tool(&self, canvas_pt: Point2D) -> Shape {
+        match self.current_tool {
+            DrawTool::Highlighter => Shape::Stroke {
+                points: vec![canvas_pt],
+                color: self.current_color,
+                width: self.highlighter_settings.stroke_width,
+                is_highlighter: true,
+                pattern: StrokePattern::Solid,
+            },
+            DrawTool::Line => Shape::Line {
+                start: canvas_pt,
+                end: canvas_pt,
+                color: self.current_color,
+                width: self.line_settings.stroke_width,
+                pattern: self.line_settings.pattern,
+            },
+            DrawTool::Arrow => Shape::Arrow {
+                start: canvas_pt,
+                end: canvas_pt,
+                color: self.current_color,
+                width: self.arrow_settings.stroke_width,
+                style: self.arrow_settings.style,
+                pattern: self.arrow_settings.pattern,
+            },
+            DrawTool::Rectangle => Shape::Rectangle {
+                start: canvas_pt,
+                end: canvas_pt,
+                color: self.current_color,
+                width: self.rect_settings.stroke_width,
+                rounded: false,
+                fill: self.rect_settings.fill_mode,
+                pattern: self.rect_settings.pattern,
+            },
+            DrawTool::RoundedRectangle => Shape::Rectangle {
+                start: canvas_pt,
+                end: canvas_pt,
+                color: self.current_color,
+                width: self.rounded_rect_settings.stroke_width,
+                rounded: true,
+                fill: self.rounded_rect_settings.fill_mode,
+                pattern: self.rounded_rect_settings.pattern,
+            },
+            DrawTool::Ellipse => Shape::Ellipse {
+                start: canvas_pt,
+                end: canvas_pt,
+                color: self.current_color,
+                width: self.ellipse_settings.stroke_width,
+                fill: self.ellipse_settings.fill_mode,
+                pattern: self.ellipse_settings.pattern,
+            },
+            _ => Shape::Stroke {
+                points: vec![canvas_pt],
+                color: self.current_color,
+                width: self.pen_settings.stroke_width,
+                is_highlighter: false,
+                pattern: self.pen_settings.pattern,
+            },
+        }
+    }
+
+    pub fn handle_fluent_action(&mut self, action: FluentAction) -> LRESULT {
+        match action {
+            FluentAction::ModeZoom => {
+                self.mode = AppMode::StaticZoom;
+                self.toolbar.active_tool = None;
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("🔎", "Static Zoom (Wheel: Zoom | Drag: Pan)");
+            }
+            FluentAction::ModeDraw => {
+                self.mode = AppMode::Draw;
+                self.toolbar.active_tool = None;
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("✏️", "Draw Mode Active");
+            }
+            FluentAction::ModeSpotlight => {
+                self.toolbar.active_tool = None;
+                self.toggle_spotlight();
+            }
+            FluentAction::ModeTimer => {
+                self.enter_timer_mode(0);
+            }
+            FluentAction::ModeSnip => {
+                self.enter_snip_mode();
+            }
+            FluentAction::CycleDisplay => {
+                self.cycle_next_monitor();
+            }
+            FluentAction::Tool(t) => {
+                self.current_tool = t;
+                self.mode = AppMode::Draw;
+                if self.toolbar.active_tool == Some(t) {
+                    self.toolbar.active_tool = None;
+                } else {
+                    self.toolbar.active_tool = Some(t);
+                }
+                self.sync_tool_to_toolbar();
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("🛠️", format!("Tool: {}", t.name()));
+            }
+            FluentAction::Color(c) => {
+                self.current_color = c;
+                self.set_toast("🎨", format!("Color: {}", c.name()));
+            }
+            FluentAction::Undo => {
+                self.undo();
+            }
+            FluentAction::Clear => {
+                self.clear_all();
+            }
+            FluentAction::Copy => {
+                self.copy_screen_to_clipboard();
+            }
+            FluentAction::Save => {
+                self.save_snapshot();
+            }
+            FluentAction::Close => {
+                self.exit_overlay();
+                return LRESULT(0);
+            }
+            FluentAction::ToggleCollapse => {
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.collapsed = !self.toolbar.collapsed;
+                self.toolbar.update_layout(sw, sh);
+            }
+            FluentAction::SetStrokeWidth(w) => {
+                match self.current_tool {
+                    DrawTool::Pen => self.pen_settings.stroke_width = w,
+                    DrawTool::Highlighter => self.highlighter_settings.stroke_width = w,
+                    DrawTool::Line => self.line_settings.stroke_width = w,
+                    DrawTool::Arrow => self.arrow_settings.stroke_width = w,
+                    DrawTool::Rectangle => self.rect_settings.stroke_width = w,
+                    DrawTool::RoundedRectangle => self.rounded_rect_settings.stroke_width = w,
+                    DrawTool::Ellipse => self.ellipse_settings.stroke_width = w,
+                    DrawTool::StepBadge => self.badge_settings.stroke_width = w,
+                    _ => {}
+                }
+                self.stroke_width = w;
+                self.toolbar.stroke_width = w;
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.save_config();
+                self.set_toast("✏️", format!("Stroke Width: {:.0}px", w));
+            }
+            FluentAction::SetFillMode(fm) => {
+                match self.current_tool {
+                    DrawTool::Rectangle => self.rect_settings.fill_mode = fm,
+                    DrawTool::RoundedRectangle => self.rounded_rect_settings.fill_mode = fm,
+                    DrawTool::Ellipse => self.ellipse_settings.fill_mode = fm,
+                    DrawTool::StepBadge => self.badge_settings.fill = fm,
+                    _ => {}
+                }
+                self.fill_mode = fm;
+                self.toolbar.current_fill_mode = fm;
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("🎨", format!("Fill: {}", fm.name()));
+            }
+            FluentAction::SetStrokePattern(sp) => {
+                match self.current_tool {
+                    DrawTool::Pen => self.pen_settings.pattern = sp,
+                    DrawTool::Line => self.line_settings.pattern = sp,
+                    DrawTool::Arrow => self.arrow_settings.pattern = sp,
+                    DrawTool::Rectangle => self.rect_settings.pattern = sp,
+                    DrawTool::RoundedRectangle => self.rounded_rect_settings.pattern = sp,
+                    DrawTool::Ellipse => self.ellipse_settings.pattern = sp,
+                    _ => {}
+                }
+                self.stroke_pattern = sp;
+                self.toolbar.current_stroke_pattern = sp;
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("✏️", format!("Pattern: {}", sp.name()));
+            }
+            FluentAction::SetArrowStyle(as_) => {
+                self.arrow_settings.style = as_;
+                self.arrow_style = as_;
+                self.toolbar.current_arrow_style = as_;
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("🏹", format!("Arrow: {}", as_.name()));
+            }
+            FluentAction::SetBadgeSize(bs) => {
+                self.badge_settings.size = bs;
+                self.badge_size = bs;
+                self.toolbar.current_badge_size = bs;
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("🔢", format!("Badge Size: {}", bs.name()));
+            }
+            FluentAction::SetBadgeShape(bsh) => {
+                self.badge_settings.shape = bsh;
+                self.badge_shape = bsh;
+                self.toolbar.current_badge_shape = bsh;
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("🔢", format!("Badge Shape: {}", bsh.name()));
+            }
+            FluentAction::ResetBadgeCounter => {
+                self.step_counter = 1;
+                self.toolbar.badge_counter = 1;
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("↺", "Step badge reset to #1");
+            }
+            FluentAction::SetFontSize(sz) => {
+                self.text_settings.font_size = sz;
+                self.font_size = sz;
+                self.toolbar.current_font_size = sz;
+                if let Some(ed) = &mut self.text_editor {
+                    ed.font_size = sz;
+                }
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("🔤", format!("Font Size: {:.0}px", sz));
+            }
+            FluentAction::ToggleBold => {
+                self.text_settings.is_bold = !self.text_settings.is_bold;
+                self.text_is_bold = self.text_settings.is_bold;
+                let bold = self.text_is_bold;
+                self.toolbar.text_is_bold = bold;
+                if let Some(ed) = &mut self.text_editor {
+                    ed.is_bold = bold;
+                }
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("𝐁", if bold { "Bold: On" } else { "Bold: Off" });
+            }
+            FluentAction::ToggleItalic => {
+                self.text_settings.is_italic = !self.text_settings.is_italic;
+                self.text_is_italic = self.text_settings.is_italic;
+                let italic = self.text_is_italic;
+                self.toolbar.text_is_italic = italic;
+                if let Some(ed) = &mut self.text_editor {
+                    ed.is_italic = italic;
+                }
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("𝐼", if italic { "Italic: On" } else { "Italic: Off" });
+            }
+            FluentAction::SetTextCardStyle(cs) => {
+                self.text_settings.card_style = cs;
+                self.text_card_style = cs;
+                self.toolbar.text_card_style = cs;
+                if let Some(ed) = &mut self.text_editor {
+                    ed.card_style = cs;
+                }
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("🏷️", format!("Text Card: {}", cs.name()));
+            }
+            FluentAction::SetFontFamily(ff) => {
+                self.text_settings.font_family = ff;
+                self.text_font_family = ff;
+                self.toolbar.text_font_family = ff;
+                if let Some(ed) = &mut self.text_editor {
+                    ed.font_family = ff;
+                }
+                let sw = self.screen_width as f32;
+                let sh = self.screen_height as f32;
+                self.toolbar.update_layout(sw, sh);
+                self.set_toast("🔤", format!("Font: {}", ff.name()));
+            }
+        }
+        self.request_repaint();
+        LRESULT(0)
     }
 
     unsafe extern "system" fn wnd_proc(
@@ -884,12 +1267,20 @@ impl OverlayWindow {
                         let abs_rem = rem.abs() as f32;
                         let mins = (abs_rem / 60.0).floor() as u32;
                         let secs = (abs_rem % 60.0).floor() as u32;
-                        let progress = if is_overtime { 1.0 } else { 1.0 - (abs_rem / total).clamp(0.0, 1.0) };
+                        let progress = if is_overtime {
+                            1.0
+                        } else {
+                            1.0 - (abs_rem / total).clamp(0.0, 1.0)
+                        };
                         timer_info = Some((mins, secs, progress, this.timer_paused, is_overtime));
                     }
 
                     let text_input = this.text_editor.as_ref();
-                    let snip_ref = if this.snip.active { Some(&this.snip) } else { None };
+                    let snip_ref = if this.snip.active {
+                        Some(&this.snip)
+                    } else {
+                        None
+                    };
 
                     this.renderer.render_frame(
                         this.mode,
@@ -932,7 +1323,10 @@ impl OverlayWindow {
                             this.timer_last_tick = Instant::now();
                             let prev_rem = this.timer_remaining;
                             this.timer_remaining -= dt;
-                            if prev_rem > 0.0 && this.timer_remaining <= 0.0 && !this.timer_alarm_sounded {
+                            if prev_rem > 0.0
+                                && this.timer_remaining <= 0.0
+                                && !this.timer_alarm_sounded
+                            {
                                 this.timer_alarm_sounded = true;
                                 let _ = MessageBeep(0);
                             }
@@ -941,10 +1335,10 @@ impl OverlayWindow {
                             this.timer_last_tick = Instant::now();
                         }
 
-                        if let Some(t) = &this.toast {
-                            if !t.is_expired() {
-                                needs_paint = true;
-                            }
+                        if let Some(t) = &this.toast
+                            && !t.is_expired()
+                        {
+                            needs_paint = true;
                         }
 
                         if this.text_editor.is_some() {
@@ -955,26 +1349,30 @@ impl OverlayWindow {
                         if !this.laser_trail.is_empty() {
                             let now = Instant::now();
                             let prev_len = this.laser_trail.len();
-                            this.laser_trail.retain(|p| now.duration_since(p.timestamp).as_secs_f32() <= 1.2);
+                            this.laser_trail
+                                .retain(|p| now.duration_since(p.timestamp).as_secs_f32() <= 1.2);
                             if !this.laser_trail.is_empty() || prev_len > 0 {
                                 needs_paint = true;
                             }
                         }
 
                         // Hold-to-snap smart shape dwell detection (350ms dwell)
-                        if this.is_drawing && this.current_tool == DrawTool::Pen {
-                            if let Some(dwell_t) = this.last_mouse_dwell_time {
-                                if dwell_t.elapsed().as_millis() >= 350 {
-                                    if let Some(Shape::Stroke { points, width, color, .. }) = &this.active_shape {
-                                        if let Some(smart_shape) = recognize_smart_shape(points, *width, *color) {
-                                            this.active_shape = Some(smart_shape);
-                                            this.last_mouse_dwell_time = None;
-                                            this.set_toast("✨", "Auto-snapped Shape");
-                                            needs_paint = true;
-                                        }
-                                    }
-                                }
-                            }
+                        if this.is_drawing
+                            && this.current_tool == DrawTool::Pen
+                            && let Some(dwell_t) = this.last_mouse_dwell_time
+                            && dwell_t.elapsed().as_millis() >= 350
+                            && let Some(Shape::Stroke {
+                                points,
+                                width,
+                                color,
+                                ..
+                            }) = &this.active_shape
+                            && let Some(smart_shape) = recognize_smart_shape(points, *width, *color)
+                        {
+                            this.active_shape = Some(smart_shape);
+                            this.last_mouse_dwell_time = None;
+                            this.set_toast("✨", "Auto-snapped Shape");
+                            needs_paint = true;
                         }
 
                         if needs_paint {
@@ -987,11 +1385,14 @@ impl OverlayWindow {
                 WM_SETCURSOR => {
                     if this.mode == AppMode::Timer {
                         if this.timer_widget.hover_action.is_some() {
-                            let _ = SetCursor(Some(LoadCursorW(None, IDC_HAND).unwrap_or_default()));
+                            let _ =
+                                SetCursor(Some(LoadCursorW(None, IDC_HAND).unwrap_or_default()));
                         } else if this.timer_widget.is_dragging {
-                            let _ = SetCursor(Some(LoadCursorW(None, IDC_SIZEALL).unwrap_or_default()));
+                            let _ =
+                                SetCursor(Some(LoadCursorW(None, IDC_SIZEALL).unwrap_or_default()));
                         } else {
-                            let _ = SetCursor(Some(LoadCursorW(None, IDC_ARROW).unwrap_or_default()));
+                            let _ =
+                                SetCursor(Some(LoadCursorW(None, IDC_ARROW).unwrap_or_default()));
                         }
                         return LRESULT(1);
                     }
@@ -1024,7 +1425,8 @@ impl OverlayWindow {
                             return LRESULT(0);
                         }
                         let prev_hover = this.timer_widget.hover_action;
-                        this.timer_widget.hover_action = this.timer_widget.get_action_at(screen_pt, sw, sh);
+                        this.timer_widget.hover_action =
+                            this.timer_widget.get_action_at(screen_pt, sw, sh);
                         if this.timer_widget.hover_action != prev_hover {
                             this.request_repaint();
                         }
@@ -1085,7 +1487,10 @@ impl OverlayWindow {
                         }
                         if let Some(idx) = erased_idx {
                             let erased_shape = this.shapes.remove(idx);
-                            this.undo_history.push(HistoryAction::DeleteShape { index: idx, shape: erased_shape });
+                            this.undo_history.push(HistoryAction::DeleteShape {
+                                index: idx,
+                                shape: erased_shape,
+                            });
                             this.redo_history.clear();
                             this.set_toast("🧹", "Erased Shape");
                             this.request_repaint();
@@ -1111,7 +1516,11 @@ impl OverlayWindow {
                         return LRESULT(0);
                     }
 
-                    if (this.mode == AppMode::StaticZoom || (this.mode == AppMode::Draw && this.zoom.level > 1.001)) && !this.is_drawing && !this.zoom.is_dragging {
+                    if (this.mode == AppMode::StaticZoom
+                        || (this.mode == AppMode::Draw && this.zoom.level > 1.001))
+                        && !this.is_drawing
+                        && !this.zoom.is_dragging
+                    {
                         this.zoom.update_target_from_cursor(x, y, sw, sh);
                         this.request_repaint();
                         return LRESULT(0);
@@ -1131,11 +1540,11 @@ impl OverlayWindow {
                     }
 
                     if this.is_drawing {
-                        if this.current_tool == DrawTool::Pen {
-                            if screen_pt.distance(&this.last_mouse_pos) > 5.0 {
-                                this.last_mouse_pos = screen_pt;
-                                this.last_mouse_dwell_time = Some(Instant::now());
-                            }
+                        if this.current_tool == DrawTool::Pen
+                            && screen_pt.distance(&this.last_mouse_pos) > 5.0
+                        {
+                            this.last_mouse_pos = screen_pt;
+                            this.last_mouse_dwell_time = Some(Instant::now());
                         }
 
                         let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
@@ -1201,234 +1610,15 @@ impl OverlayWindow {
                     if this.toolbar.hit_test_grip(x, y) {
                         this.toolbar.is_dragging = true;
                         this.toolbar.drag_start_mouse = screen_pt;
-                        this.toolbar.drag_start_bar = Point2D::new(this.toolbar.bar_rect.left, this.toolbar.bar_rect.top);
+                        this.toolbar.drag_start_bar =
+                            Point2D::new(this.toolbar.bar_rect.left, this.toolbar.bar_rect.top);
                         return LRESULT(0);
                     }
 
                     // If clicked on Fluent toolbar items, execute action without drawing
                     if this.toolbar.is_point_inside(x, y) {
                         if let Some(action) = this.toolbar.hit_test(x, y) {
-                            match action {
-                                FluentAction::ModeZoom => {
-                                    this.mode = AppMode::StaticZoom;
-                                    this.toolbar.active_tool = None;
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("🔎", "Static Zoom (Wheel: Zoom | Drag: Pan)");
-                                }
-                                FluentAction::ModeDraw => {
-                                    this.mode = AppMode::Draw;
-                                    this.toolbar.active_tool = None;
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("✏️", "Draw Mode Active");
-                                }
-                                FluentAction::ModeSpotlight => {
-                                    this.toolbar.active_tool = None;
-                                    this.toggle_spotlight();
-                                }
-                                FluentAction::ModeTimer => {
-                                    this.enter_timer_mode(0);
-                                }
-                                FluentAction::ModeSnip => {
-                                    this.enter_snip_mode();
-                                }
-                                FluentAction::CycleDisplay => {
-                                    this.cycle_next_monitor();
-                                }
-                                FluentAction::Tool(t) => {
-                                    this.current_tool = t;
-                                    this.mode = AppMode::Draw;
-                                    if this.toolbar.active_tool == Some(t) {
-                                        this.toolbar.active_tool = None;
-                                    } else {
-                                        this.toolbar.active_tool = Some(t);
-                                    }
-                                    this.sync_tool_to_toolbar();
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("🛠️", format!("Tool: {}", t.name()));
-                                }
-                                FluentAction::Color(c) => {
-                                    this.current_color = c;
-                                    this.set_toast("🎨", format!("Color: {}", c.name()));
-                                }
-                                FluentAction::Undo => {
-                                    this.undo();
-                                }
-                                FluentAction::Clear => {
-                                    this.clear_all();
-                                }
-                                FluentAction::Copy => {
-                                    this.copy_screen_to_clipboard();
-                                }
-                                FluentAction::Save => {
-                                    this.save_snapshot();
-                                }
-                                FluentAction::Close => {
-                                    this.exit_overlay();
-                                    return LRESULT(0);
-                                }
-                                FluentAction::ToggleCollapse => {
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.collapsed = !this.toolbar.collapsed;
-                                    this.toolbar.update_layout(sw, sh);
-                                }
-                                FluentAction::SetStrokeWidth(w) => {
-                                    match this.current_tool {
-                                        DrawTool::Pen => this.pen_settings.stroke_width = w,
-                                        DrawTool::Highlighter => this.highlighter_settings.stroke_width = w,
-                                        DrawTool::Line => this.line_settings.stroke_width = w,
-                                        DrawTool::Arrow => this.arrow_settings.stroke_width = w,
-                                        DrawTool::Rectangle => this.rect_settings.stroke_width = w,
-                                        DrawTool::RoundedRectangle => this.rounded_rect_settings.stroke_width = w,
-                                        DrawTool::Ellipse => this.ellipse_settings.stroke_width = w,
-                                        DrawTool::StepBadge => this.badge_settings.stroke_width = w,
-                                        _ => {},
-                                    }
-                                    this.stroke_width = w;
-                                    this.toolbar.stroke_width = w;
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.save_config();
-                                    this.set_toast("✏️", format!("Stroke Width: {:.0}px", w));
-                                }
-                                FluentAction::SetFillMode(fm) => {
-                                    match this.current_tool {
-                                        DrawTool::Rectangle => this.rect_settings.fill_mode = fm,
-                                        DrawTool::RoundedRectangle => this.rounded_rect_settings.fill_mode = fm,
-                                        DrawTool::Ellipse => this.ellipse_settings.fill_mode = fm,
-                                        DrawTool::StepBadge => this.badge_settings.fill = fm,
-                                        _ => {},
-                                    }
-                                    this.fill_mode = fm;
-                                    this.toolbar.current_fill_mode = fm;
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("🎨", format!("Fill: {}", fm.name()));
-                                }
-                                FluentAction::SetStrokePattern(sp) => {
-                                    match this.current_tool {
-                                        DrawTool::Pen => this.pen_settings.pattern = sp,
-                                        DrawTool::Line => this.line_settings.pattern = sp,
-                                        DrawTool::Arrow => this.arrow_settings.pattern = sp,
-                                        DrawTool::Rectangle => this.rect_settings.pattern = sp,
-                                        DrawTool::RoundedRectangle => this.rounded_rect_settings.pattern = sp,
-                                        DrawTool::Ellipse => this.ellipse_settings.pattern = sp,
-                                        _ => {},
-                                    }
-                                    this.stroke_pattern = sp;
-                                    this.toolbar.current_stroke_pattern = sp;
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("✏️", format!("Pattern: {}", sp.name()));
-                                }
-                                FluentAction::SetArrowStyle(as_) => {
-                                    this.arrow_settings.style = as_;
-                                    this.arrow_style = as_;
-                                    this.toolbar.current_arrow_style = as_;
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("🏹", format!("Arrow: {}", as_.name()));
-                                }
-                                FluentAction::SetBadgeSize(bs) => {
-                                    this.badge_settings.size = bs;
-                                    this.badge_size = bs;
-                                    this.toolbar.current_badge_size = bs;
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("🔢", format!("Badge Size: {}", bs.name()));
-                                }
-                                FluentAction::SetBadgeShape(bsh) => {
-                                    this.badge_settings.shape = bsh;
-                                    this.badge_shape = bsh;
-                                    this.toolbar.current_badge_shape = bsh;
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("🔢", format!("Badge Shape: {}", bsh.name()));
-                                }
-                                FluentAction::ResetBadgeCounter => {
-                                    this.step_counter = 1;
-                                    this.toolbar.badge_counter = 1;
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("↺", "Step badge reset to #1");
-                                }
-                                FluentAction::SetFontSize(sz) => {
-                                    this.text_settings.font_size = sz;
-                                    this.font_size = sz;
-                                    this.toolbar.current_font_size = sz;
-                                    if let Some(ed) = &mut this.text_editor {
-                                        ed.font_size = sz;
-                                    }
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("🔤", format!("Font Size: {:.0}px", sz));
-                                }
-                                FluentAction::ToggleBold => {
-                                    this.text_settings.is_bold = !this.text_settings.is_bold;
-                                    this.text_is_bold = this.text_settings.is_bold;
-                                    let bold = this.text_is_bold;
-                                    this.toolbar.text_is_bold = bold;
-                                    if let Some(ed) = &mut this.text_editor {
-                                        ed.is_bold = bold;
-                                    }
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("𝐁", if bold { "Bold: On" } else { "Bold: Off" });
-                                }
-                                FluentAction::ToggleItalic => {
-                                    this.text_settings.is_italic = !this.text_settings.is_italic;
-                                    this.text_is_italic = this.text_settings.is_italic;
-                                    let italic = this.text_is_italic;
-                                    this.toolbar.text_is_italic = italic;
-                                    if let Some(ed) = &mut this.text_editor {
-                                        ed.is_italic = italic;
-                                    }
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("𝐼", if italic { "Italic: On" } else { "Italic: Off" });
-                                }
-                                FluentAction::SetTextCardStyle(cs) => {
-                                    this.text_settings.card_style = cs;
-                                    this.text_card_style = cs;
-                                    this.toolbar.text_card_style = cs;
-                                    if let Some(ed) = &mut this.text_editor {
-                                        ed.card_style = cs;
-                                    }
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("🏷️", format!("Text Card: {}", cs.name()));
-                                }
-                                FluentAction::SetFontFamily(ff) => {
-                                    this.text_settings.font_family = ff;
-                                    this.text_font_family = ff;
-                                    this.toolbar.text_font_family = ff;
-                                    if let Some(ed) = &mut this.text_editor {
-                                        ed.font_family = ff;
-                                    }
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
-                                    this.toolbar.update_layout(sw, sh);
-                                    this.set_toast("🔤", format!("Font: {}", ff.name()));
-                                }
-                            }
-                            this.request_repaint();
+                            return this.handle_fluent_action(action);
                         }
                         return LRESULT(0);
                     }
@@ -1447,19 +1637,27 @@ impl OverlayWindow {
                                     this.enter_timer_mode(mins);
                                 }
                                 TimerAction::CycleCorner => {
-                                    this.timer_widget.pill_corner = (this.timer_widget.pill_corner + 1) % 4;
+                                    this.timer_widget.pill_corner =
+                                        (this.timer_widget.pill_corner + 1) % 4;
                                     let corner_name = match this.timer_widget.pill_corner {
                                         1 => "Top-Left",
                                         2 => "Bottom-Left",
                                         3 => "Bottom-Right",
                                         _ => "Top-Right",
                                     };
-                                    this.set_toast("🔄", format!("Mini-pill docked to {}", corner_name));
+                                    this.set_toast(
+                                        "🔄",
+                                        format!("Mini-pill docked to {}", corner_name),
+                                    );
                                 }
                                 TimerAction::PlayPause => {
                                     let paused = !this.timer_paused;
                                     this.timer_paused = paused;
-                                    let label = if paused { "Timer Paused" } else { "Timer Resumed" };
+                                    let label = if paused {
+                                        "Timer Paused"
+                                    } else {
+                                        "Timer Resumed"
+                                    };
                                     this.set_toast("⏱️", label);
                                 }
                                 TimerAction::AddMinute => {
@@ -1482,7 +1680,11 @@ impl OverlayWindow {
                                 }
                                 TimerAction::ToggleMinimize => {
                                     this.timer_widget.minimized = !this.timer_widget.minimized;
-                                    let label = if this.timer_widget.minimized { "Timer Minimized to Corner Pill" } else { "Timer Expanded" };
+                                    let label = if this.timer_widget.minimized {
+                                        "Timer Minimized to Corner Pill"
+                                    } else {
+                                        "Timer Expanded"
+                                    };
                                     this.set_toast("⏱️", label);
                                 }
                                 TimerAction::Close => {
@@ -1492,8 +1694,13 @@ impl OverlayWindow {
                             }
                             this.request_repaint();
                         } else if !this.timer_widget.minimized {
-                            let (cl, ct, cr, cb, cx, cy) = this.timer_widget.get_card_bounds(sw, sh);
-                            if screen_pt.x >= cl && screen_pt.x <= cr && screen_pt.y >= ct && screen_pt.y <= cb {
+                            let (cl, ct, cr, cb, cx, cy) =
+                                this.timer_widget.get_card_bounds(sw, sh);
+                            if screen_pt.x >= cl
+                                && screen_pt.x <= cr
+                                && screen_pt.y >= ct
+                                && screen_pt.y <= cb
+                            {
                                 this.timer_widget.is_dragging = true;
                                 this.timer_widget.drag_start_mouse = screen_pt;
                                 this.timer_widget.drag_start_pos = Point2D::new(cx, cy);
@@ -1506,7 +1713,14 @@ impl OverlayWindow {
                     if this.mode == AppMode::Spotlight {
                         let pinned = !this.spotlight.pinned;
                         this.spotlight.pinned = pinned;
-                        this.set_toast("🔦", if pinned { "Spotlight Pinned (Click to unpin)" } else { "Spotlight Following Cursor" });
+                        this.set_toast(
+                            "🔦",
+                            if pinned {
+                                "Spotlight Pinned (Click to unpin)"
+                            } else {
+                                "Spotlight Following Cursor"
+                            },
+                        );
                         this.request_repaint();
                         return LRESULT(0);
                     }
@@ -1594,7 +1808,10 @@ impl OverlayWindow {
                         }
                         if let Some(idx) = erased_idx {
                             let erased_shape = this.shapes.remove(idx);
-                            this.undo_history.push(HistoryAction::DeleteShape { index: idx, shape: erased_shape });
+                            this.undo_history.push(HistoryAction::DeleteShape {
+                                index: idx,
+                                shape: erased_shape,
+                            });
                             this.redo_history.clear();
                             this.set_toast("🧹", "Erased Shape");
                         }
@@ -1660,64 +1877,7 @@ impl OverlayWindow {
                             }
                         }
                     } else {
-                        match this.current_tool {
-                            DrawTool::Pen => unreachable!(),
-                            DrawTool::Highlighter => Shape::Stroke {
-                                points: vec![canvas_pt],
-                                color: this.current_color,
-                                width: this.highlighter_settings.stroke_width,
-                                is_highlighter: true,
-                                pattern: StrokePattern::Solid,
-                            },
-                            DrawTool::Line => Shape::Line {
-                                start: canvas_pt,
-                                end: canvas_pt,
-                                color: this.current_color,
-                                width: this.line_settings.stroke_width,
-                                pattern: this.line_settings.pattern,
-                            },
-                            DrawTool::Arrow => Shape::Arrow {
-                                start: canvas_pt,
-                                end: canvas_pt,
-                                color: this.current_color,
-                                width: this.arrow_settings.stroke_width,
-                                style: this.arrow_settings.style,
-                                pattern: this.arrow_settings.pattern,
-                            },
-                            DrawTool::Rectangle => Shape::Rectangle {
-                                start: canvas_pt,
-                                end: canvas_pt,
-                                color: this.current_color,
-                                width: this.rect_settings.stroke_width,
-                                rounded: false,
-                                fill: this.rect_settings.fill_mode,
-                                pattern: this.rect_settings.pattern,
-                            },
-                            DrawTool::RoundedRectangle => Shape::Rectangle {
-                                start: canvas_pt,
-                                end: canvas_pt,
-                                color: this.current_color,
-                                width: this.rounded_rect_settings.stroke_width,
-                                rounded: true,
-                                fill: this.rounded_rect_settings.fill_mode,
-                                pattern: this.rounded_rect_settings.pattern,
-                            },
-                            DrawTool::Ellipse => Shape::Ellipse {
-                                start: canvas_pt,
-                                end: canvas_pt,
-                                color: this.current_color,
-                                width: this.ellipse_settings.stroke_width,
-                                fill: this.ellipse_settings.fill_mode,
-                                pattern: this.ellipse_settings.pattern,
-                            },
-                            _ => Shape::Stroke {
-                                points: vec![canvas_pt],
-                                color: this.current_color,
-                                width: this.pen_settings.stroke_width,
-                                is_highlighter: false,
-                                pattern: this.pen_settings.pattern,
-                            },
-                        }
+                        this.create_shape_for_tool(canvas_pt)
                     };
 
                     this.active_shape = Some(shape_to_create);
@@ -1755,34 +1915,50 @@ impl OverlayWindow {
                         let w = (r - l).round() as u32;
                         let h = (b - t).round() as u32;
 
-                        if w > 4 && h > 4 {
-                            if let Some(composite) = this.get_composite_capture(false) {
-                                if let Some(mut cropped) = composite.crop(l as i32 + this.screen_x, t as i32 + this.screen_y, w, h) {
-                                    if this.snip.shape == SnipShape::Ellipse {
-                                        let cx = w as f32 / 2.0;
-                                        let cy = h as f32 / 2.0;
-                                        let rx = cx;
-                                        let ry = cy;
-                                        for py in 0..h {
-                                            for px in 0..w {
-                                                let dx = px as f32 - cx;
-                                                let dy = py as f32 - cy;
-                                                if (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) > 1.0 {
-                                                    let idx = ((py * w + px) * 4 + 3) as usize;
-                                                    if idx < cropped.pixels.len() {
-                                                        cropped.pixels[idx] = 0;
-                                                    }
-                                                }
+                        if w > 4
+                            && h > 4
+                            && let Some(composite) = this.get_composite_capture(false)
+                            && let Some(mut cropped) = composite.crop(
+                                l as i32 + this.screen_x,
+                                t as i32 + this.screen_y,
+                                w,
+                                h,
+                            )
+                        {
+                            if this.snip.shape == SnipShape::Ellipse {
+                                let cx = w as f32 / 2.0;
+                                let cy = h as f32 / 2.0;
+                                let rx = cx;
+                                let ry = cy;
+                                for py in 0..h {
+                                    for px in 0..w {
+                                        let dx = px as f32 - cx;
+                                        let dy = py as f32 - cy;
+                                        if (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) > 1.0 {
+                                            let idx = ((py * w + px) * 4 + 3) as usize;
+                                            if idx < cropped.pixels.len() {
+                                                cropped.pixels[idx] = 0;
                                             }
                                         }
                                     }
-                                    if copy_bgra_to_clipboard(cropped.width, cropped.height, &cropped.pixels) {
-                                        let label = if this.snip.shape == SnipShape::Ellipse { "Circular Snip" } else { "Snip" };
-                                        this.set_toast("✂️", format!("{} {}×{} px copied to Clipboard!", label, w, h));
-                                        this.exit_overlay();
-                                        return LRESULT(0);
-                                    }
                                 }
+                            }
+                            if copy_bgra_to_clipboard(
+                                cropped.width,
+                                cropped.height,
+                                &cropped.pixels,
+                            ) {
+                                let label = if this.snip.shape == SnipShape::Ellipse {
+                                    "Circular Snip"
+                                } else {
+                                    "Snip"
+                                };
+                                this.set_toast(
+                                    "✂️",
+                                    format!("{} {}×{} px copied to Clipboard!", label, w, h),
+                                );
+                                this.exit_overlay();
+                                return LRESULT(0);
                             }
                         }
                         this.request_repaint();
@@ -1872,9 +2048,13 @@ impl OverlayWindow {
                     // 0. Presentation Timer mode controls (Wheel: ±1m, Ctrl+Wheel: Dimming)
                     if this.mode == AppMode::Timer {
                         if is_ctrl {
-                            let new_dim = (this.timer_widget.dim_opacity + delta * 0.05).clamp(0.15, 0.95);
+                            let new_dim =
+                                (this.timer_widget.dim_opacity + delta * 0.05).clamp(0.15, 0.95);
                             this.timer_widget.dim_opacity = new_dim;
-                            this.set_toast("🌓", format!("Background Dim: {:.0}%", new_dim * 100.0));
+                            this.set_toast(
+                                "🌓",
+                                format!("Background Dim: {:.0}%", new_dim * 100.0),
+                            );
                         } else {
                             let change = if delta > 0.0 { 60.0 } else { -60.0 };
                             this.timer_remaining += change;
@@ -1909,7 +2089,10 @@ impl OverlayWindow {
                     }
 
                     // 3. Normal Wheel: ALWAYS ZOOMS in Freeze modes (StaticZoom, Draw, Spotlight)!
-                    if this.mode == AppMode::StaticZoom || this.mode == AppMode::Draw || this.mode == AppMode::Spotlight {
+                    if this.mode == AppMode::StaticZoom
+                        || this.mode == AppMode::Draw
+                        || this.mode == AppMode::Spotlight
+                    {
                         let mut pt = POINT::default();
                         let sx = this.screen_x;
                         let sy = this.screen_y;
@@ -1921,7 +2104,12 @@ impl OverlayWindow {
                             (sw / 2.0, sh / 2.0)
                         };
                         let new_lvl = (this.zoom.level + delta * 0.25).clamp(1.0, 10.0);
-                        this.zoom.set_zoom_centered(new_lvl, Point2D::new(cursor_x, cursor_y), sw, sh);
+                        this.zoom.set_zoom_centered(
+                            new_lvl,
+                            Point2D::new(cursor_x, cursor_y),
+                            sw,
+                            sh,
+                        );
                         this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                         this.request_repaint();
                         return LRESULT(0);
@@ -2004,7 +2192,9 @@ impl OverlayWindow {
                             let new_sz = if let Some(ed) = &mut this.text_editor {
                                 ed.font_size = (ed.font_size + 4.0).min(96.0);
                                 ed.font_size
-                            } else { 22.0 };
+                            } else {
+                                22.0
+                            };
                             this.font_size = new_sz;
                             this.toolbar.current_font_size = new_sz;
                             let sw = this.screen_width as f32;
@@ -2016,7 +2206,9 @@ impl OverlayWindow {
                             let new_sz = if let Some(ed) = &mut this.text_editor {
                                 ed.font_size = (ed.font_size - 4.0).max(12.0);
                                 ed.font_size
-                            } else { 22.0 };
+                            } else {
+                                22.0
+                            };
                             this.font_size = new_sz;
                             this.toolbar.current_font_size = new_sz;
                             let sw = this.screen_width as f32;
@@ -2037,10 +2229,11 @@ impl OverlayWindow {
                                 editor.cursor = 0;
                             } else if key == VK_END.0 as i32 {
                                 editor.cursor = editor.text.len();
-                            } else if is_ctrl && key == 'V' as i32 {
-                                if let Some(clip_text) = get_clipboard_text() {
-                                    editor.insert_str(&clip_text);
-                                }
+                            } else if is_ctrl
+                                && key == 'V' as i32
+                                && let Some(clip_text) = get_clipboard_text()
+                            {
+                                editor.insert_str(&clip_text);
                             }
                             this.request_repaint();
                             return LRESULT(0);
@@ -2083,13 +2276,27 @@ impl OverlayWindow {
                                     this.enter_timer_mode(0);
                                 }
                             }
-                            k if k == 'Z' as i32 && !is_shift => { this.undo(); }
-                            k if k == 'Z' as i32 && is_shift => { this.redo(); }
-                            k if k == 'Y' as i32 => { this.redo(); }
-                            k if k == 'C' as i32 => { this.copy_screen_to_clipboard(); }
-                            k if k == 'S' as i32 && !is_shift => { this.save_snapshot(); }
-                            k if k == 'S' as i32 && is_shift => { this.enter_snip_mode(); }
-                            k if k == VK_TAB.0 as i32 => { this.cycle_next_monitor(); }
+                            k if k == 'Z' as i32 && !is_shift => {
+                                this.undo();
+                            }
+                            k if k == 'Z' as i32 && is_shift => {
+                                this.redo();
+                            }
+                            k if k == 'Y' as i32 => {
+                                this.redo();
+                            }
+                            k if k == 'C' as i32 => {
+                                this.copy_screen_to_clipboard();
+                            }
+                            k if k == 'S' as i32 && !is_shift => {
+                                this.save_snapshot();
+                            }
+                            k if k == 'S' as i32 && is_shift => {
+                                this.enter_snip_mode();
+                            }
+                            k if k == VK_TAB.0 as i32 => {
+                                this.cycle_next_monitor();
+                            }
                             _ => {}
                         }
                         return LRESULT(0);
@@ -2124,7 +2331,14 @@ impl OverlayWindow {
                             let show = !this.toolbar.visible;
                             this.toolbar.visible = show;
                             this.show_hud = show;
-                            this.set_toast("🖥️", if show { "Toolbar Visible" } else { "Toolbar Hidden" });
+                            this.set_toast(
+                                "🖥️",
+                                if show {
+                                    "Toolbar Visible"
+                                } else {
+                                    "Toolbar Hidden"
+                                },
+                            );
                             this.request_repaint();
                         }
 
@@ -2139,7 +2353,11 @@ impl OverlayWindow {
                         k if k == VK_TAB.0 as i32 => {
                             if this.mode == AppMode::Timer {
                                 this.timer_widget.minimized = !this.timer_widget.minimized;
-                                let label = if this.timer_widget.minimized { "Timer Minimized to Corner Pill" } else { "Timer Expanded" };
+                                let label = if this.timer_widget.minimized {
+                                    "Timer Minimized to Corner Pill"
+                                } else {
+                                    "Timer Expanded"
+                                };
                                 this.set_toast("⏱️", label);
                                 this.request_repaint();
                                 return LRESULT(0);
@@ -2149,7 +2367,11 @@ impl OverlayWindow {
                                 } else {
                                     SnipShape::Rectangle
                                 };
-                                let label = if this.snip.shape == SnipShape::Ellipse { "Circular Snip" } else { "Rectangular Snip" };
+                                let label = if this.snip.shape == SnipShape::Ellipse {
+                                    "Circular Snip"
+                                } else {
+                                    "Rectangular Snip"
+                                };
                                 this.set_toast("✂️", label);
                                 this.request_repaint();
                                 return LRESULT(0);
@@ -2166,13 +2388,27 @@ impl OverlayWindow {
                                 } else {
                                     let paused = !this.timer_paused;
                                     this.timer_paused = paused;
-                                    this.set_toast("⏱️", if paused { "Timer Paused" } else { "Timer Resumed" });
+                                    this.set_toast(
+                                        "⏱️",
+                                        if paused {
+                                            "Timer Paused"
+                                        } else {
+                                            "Timer Resumed"
+                                        },
+                                    );
                                 }
                                 this.request_repaint();
                             } else if this.mode == AppMode::Spotlight {
                                 let pinned = !this.spotlight.pinned;
                                 this.spotlight.pinned = pinned;
-                                this.set_toast("🔦", if pinned { "Spotlight Pinned" } else { "Spotlight Following" });
+                                this.set_toast(
+                                    "🔦",
+                                    if pinned {
+                                        "Spotlight Pinned"
+                                    } else {
+                                        "Spotlight Following"
+                                    },
+                                );
                                 this.request_repaint();
                             } else {
                                 if this.mode == AppMode::Draw {
@@ -2256,11 +2492,12 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'W' as i32 && !is_shift => {
-                            this.background_type = if this.background_type == CanvasBackground::Whiteboard {
-                                CanvasBackground::Transparent
-                            } else {
-                                CanvasBackground::Whiteboard
-                            };
+                            this.background_type =
+                                if this.background_type == CanvasBackground::Whiteboard {
+                                    CanvasBackground::Transparent
+                                } else {
+                                    CanvasBackground::Whiteboard
+                                };
                             this.current_color = ColorPreset::Red;
                             this.set_toast("⚪", "Whiteboard");
                             this.request_repaint();
@@ -2271,11 +2508,12 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'K' as i32 && is_shift => {
-                            this.background_type = if this.background_type == CanvasBackground::Blackboard {
-                                CanvasBackground::Transparent
-                            } else {
-                                CanvasBackground::Blackboard
-                            };
+                            this.background_type =
+                                if this.background_type == CanvasBackground::Blackboard {
+                                    CanvasBackground::Transparent
+                                } else {
+                                    CanvasBackground::Blackboard
+                                };
                             this.current_color = ColorPreset::White;
                             this.set_toast("⚫", "Blackboard");
                             this.request_repaint();
@@ -2365,10 +2603,12 @@ impl OverlayWindow {
                             };
                             match this.current_tool {
                                 DrawTool::Rectangle => this.rect_settings.fill_mode = new_fm,
-                                DrawTool::RoundedRectangle => this.rounded_rect_settings.fill_mode = new_fm,
+                                DrawTool::RoundedRectangle => {
+                                    this.rounded_rect_settings.fill_mode = new_fm
+                                }
                                 DrawTool::Ellipse => this.ellipse_settings.fill_mode = new_fm,
                                 DrawTool::StepBadge => this.badge_settings.fill = new_fm,
-                                _ => {},
+                                _ => {}
                             }
                             this.fill_mode = new_fm;
                             this.toolbar.current_fill_mode = new_fm;
@@ -2390,9 +2630,11 @@ impl OverlayWindow {
                                 DrawTool::Line => this.line_settings.pattern = new_sp,
                                 DrawTool::Arrow => this.arrow_settings.pattern = new_sp,
                                 DrawTool::Rectangle => this.rect_settings.pattern = new_sp,
-                                DrawTool::RoundedRectangle => this.rounded_rect_settings.pattern = new_sp,
+                                DrawTool::RoundedRectangle => {
+                                    this.rounded_rect_settings.pattern = new_sp
+                                }
                                 DrawTool::Ellipse => this.ellipse_settings.pattern = new_sp,
-                                _ => {},
+                                _ => {}
                             }
                             this.stroke_pattern = new_sp;
                             this.toolbar.current_stroke_pattern = new_sp;
@@ -2471,10 +2713,12 @@ impl OverlayWindow {
                                 DrawTool::Line => this.line_settings.stroke_width = w,
                                 DrawTool::Arrow => this.arrow_settings.stroke_width = w,
                                 DrawTool::Rectangle => this.rect_settings.stroke_width = w,
-                                DrawTool::RoundedRectangle => this.rounded_rect_settings.stroke_width = w,
+                                DrawTool::RoundedRectangle => {
+                                    this.rounded_rect_settings.stroke_width = w
+                                }
                                 DrawTool::Ellipse => this.ellipse_settings.stroke_width = w,
                                 DrawTool::StepBadge => this.badge_settings.stroke_width = w,
-                                _ => {},
+                                _ => {}
                             }
                             this.stroke_width = w;
                             this.toolbar.stroke_width = w;
@@ -2486,11 +2730,15 @@ impl OverlayWindow {
                         }
 
                         // ─── [ ] Bracket Sizing ───
-                        k if k == 219 => { // [
+                        219 => {
+                            // [
                             if this.spotlight.active {
                                 let new_rad = (this.spotlight.radius - 20.0).max(30.0);
                                 this.spotlight.radius = new_rad;
-                                this.set_toast("🔦", format!("⌀{} px", (new_rad * 2.0).round() as u32));
+                                this.set_toast(
+                                    "🔦",
+                                    format!("⌀{} px", (new_rad * 2.0).round() as u32),
+                                );
                             } else if this.current_tool == DrawTool::StepBadge {
                                 let new_bs = match this.badge_settings.size {
                                     BadgeSize::ExtraLarge => BadgeSize::Large,
@@ -2509,13 +2757,17 @@ impl OverlayWindow {
                                 let new_w = (this.stroke_width - 2.0).max(1.0);
                                 match this.current_tool {
                                     DrawTool::Pen => this.pen_settings.stroke_width = new_w,
-                                    DrawTool::Highlighter => this.highlighter_settings.stroke_width = new_w,
+                                    DrawTool::Highlighter => {
+                                        this.highlighter_settings.stroke_width = new_w
+                                    }
                                     DrawTool::Line => this.line_settings.stroke_width = new_w,
                                     DrawTool::Arrow => this.arrow_settings.stroke_width = new_w,
                                     DrawTool::Rectangle => this.rect_settings.stroke_width = new_w,
-                                    DrawTool::RoundedRectangle => this.rounded_rect_settings.stroke_width = new_w,
+                                    DrawTool::RoundedRectangle => {
+                                        this.rounded_rect_settings.stroke_width = new_w
+                                    }
                                     DrawTool::Ellipse => this.ellipse_settings.stroke_width = new_w,
-                                    _ => {},
+                                    _ => {}
                                 }
                                 this.stroke_width = new_w;
                                 this.toolbar.stroke_width = new_w;
@@ -2526,11 +2778,15 @@ impl OverlayWindow {
                             }
                             this.request_repaint();
                         }
-                        k if k == 221 => { // ]
+                        221 => {
+                            // ]
                             if this.spotlight.active {
                                 let new_rad = (this.spotlight.radius + 20.0).min(700.0);
                                 this.spotlight.radius = new_rad;
-                                this.set_toast("🔦", format!("⌀{} px", (new_rad * 2.0).round() as u32));
+                                this.set_toast(
+                                    "🔦",
+                                    format!("⌀{} px", (new_rad * 2.0).round() as u32),
+                                );
                             } else if this.current_tool == DrawTool::StepBadge {
                                 let new_bs = match this.badge_settings.size {
                                     BadgeSize::Small => BadgeSize::Medium,
@@ -2549,13 +2805,17 @@ impl OverlayWindow {
                                 let new_w = (this.stroke_width + 2.0).min(40.0);
                                 match this.current_tool {
                                     DrawTool::Pen => this.pen_settings.stroke_width = new_w,
-                                    DrawTool::Highlighter => this.highlighter_settings.stroke_width = new_w,
+                                    DrawTool::Highlighter => {
+                                        this.highlighter_settings.stroke_width = new_w
+                                    }
                                     DrawTool::Line => this.line_settings.stroke_width = new_w,
                                     DrawTool::Arrow => this.arrow_settings.stroke_width = new_w,
                                     DrawTool::Rectangle => this.rect_settings.stroke_width = new_w,
-                                    DrawTool::RoundedRectangle => this.rounded_rect_settings.stroke_width = new_w,
+                                    DrawTool::RoundedRectangle => {
+                                        this.rounded_rect_settings.stroke_width = new_w
+                                    }
                                     DrawTool::Ellipse => this.ellipse_settings.stroke_width = new_w,
-                                    _ => {},
+                                    _ => {}
                                 }
                                 this.stroke_width = new_w;
                                 this.toolbar.stroke_width = new_w;
@@ -2568,7 +2828,8 @@ impl OverlayWindow {
                         }
 
                         // ─── Arrow Keys & Zoom/Timer Controls ───
-                        k if k == VK_UP.0 as i32 || k == 187 => { // Up or '+'
+                        k if k == VK_UP.0 as i32 || k == 187 => {
+                            // Up or '+'
                             if this.mode == AppMode::Timer {
                                 this.timer_remaining += 60.0;
                                 this.timer_seconds = this.timer_remaining.round() as u32;
@@ -2586,7 +2847,12 @@ impl OverlayWindow {
                                     (sw / 2.0, sh / 2.0)
                                 };
                                 let new_lvl = (this.zoom.level + 0.25).clamp(1.0, 10.0);
-                                this.zoom.set_zoom_centered(new_lvl, Point2D::new(cursor_x, cursor_y), sw, sh);
+                                this.zoom.set_zoom_centered(
+                                    new_lvl,
+                                    Point2D::new(cursor_x, cursor_y),
+                                    sw,
+                                    sh,
+                                );
                                 this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                             } else {
                                 let new_w = (this.stroke_width + 2.0).min(40.0);
@@ -2595,7 +2861,8 @@ impl OverlayWindow {
                             }
                             this.request_repaint();
                         }
-                        k if k == VK_DOWN.0 as i32 || k == 189 => { // Down or '-'
+                        k if k == VK_DOWN.0 as i32 || k == 189 => {
+                            // Down or '-'
                             if this.mode == AppMode::Timer {
                                 this.timer_remaining = (this.timer_remaining - 60.0).max(10.0);
                                 this.timer_seconds = this.timer_remaining.round() as u32;
@@ -2613,7 +2880,12 @@ impl OverlayWindow {
                                     (sw / 2.0, sh / 2.0)
                                 };
                                 let new_lvl = (this.zoom.level - 0.25).clamp(1.0, 10.0);
-                                this.zoom.set_zoom_centered(new_lvl, Point2D::new(cursor_x, cursor_y), sw, sh);
+                                this.zoom.set_zoom_centered(
+                                    new_lvl,
+                                    Point2D::new(cursor_x, cursor_y),
+                                    sw,
+                                    sh,
+                                );
                                 this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                             } else {
                                 let new_w = (this.stroke_width - 2.0).max(1.0);
