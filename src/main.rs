@@ -283,7 +283,7 @@ unsafe extern "system" fn tray_wnd_proc(
                             • Ctrl+Shift+S / Snip: Snip Region to Clipboard\n\
                             • F1: Shortcut Cheat Sheet Overlay | F2: Toggle HUD\n\
                             • Mouse Modifiers: Shift=Line, Ctrl=Rect, Tab=Ellipse, Shift+Ctrl=Arrow\n\
-                            • Colors: r, g, b, y, o, p, c | Shift+W: White | Shift+K: Black");
+                            • Colors: r, g, b, y, o, c | Shift+P: Pink | Shift+W: White | Shift+B: Black");
                         let _ = MessageBoxW(
                             None,
                             text,
@@ -301,7 +301,20 @@ unsafe extern "system" fn tray_wnd_proc(
             }
 
             WM_DESTROY => {
+                ctx.overlay.borrow_mut().exit_overlay();
                 PostQuitMessage(0);
+                LRESULT(0)
+            }
+
+            windows::Win32::UI::WindowsAndMessaging::WM_QUERYENDSESSION => {
+                ctx.overlay.borrow_mut().exit_overlay();
+                LRESULT(1)
+            }
+
+            windows::Win32::UI::WindowsAndMessaging::WM_ENDSESSION => {
+                if wparam.0 != 0 {
+                    ctx.overlay.borrow_mut().exit_overlay();
+                }
                 LRESULT(0)
             }
 

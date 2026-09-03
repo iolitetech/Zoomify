@@ -1348,6 +1348,14 @@ impl OverlayWindow {
                             needs_paint = true;
                         }
 
+                        if this.mode == AppMode::StaticZoom || this.mode == AppMode::Draw {
+                            let sw = this.screen_width as f32;
+                            let sh = this.screen_height as f32;
+                            if this.zoom.tick_smooth_pan(0.35, sw, sh) {
+                                needs_paint = true;
+                            }
+                        }
+
                         // Laser pointer trail decay
                         if !this.laser_trail.is_empty() {
                             let now = Instant::now();
@@ -1616,6 +1624,7 @@ impl OverlayWindow {
                         this.toolbar.drag_start_mouse = screen_pt;
                         this.toolbar.drag_start_bar =
                             Point2D::new(this.toolbar.bar_rect.left, this.toolbar.bar_rect.top);
+                        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(this.hwnd);
                         return LRESULT(0);
                     }
 
@@ -1708,6 +1717,9 @@ impl OverlayWindow {
                                 this.timer_widget.is_dragging = true;
                                 this.timer_widget.drag_start_mouse = screen_pt;
                                 this.timer_widget.drag_start_pos = Point2D::new(cx, cy);
+                                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(
+                                    this.hwnd,
+                                );
                             }
                         }
                         return LRESULT(0);
@@ -1890,6 +1902,7 @@ impl OverlayWindow {
                 }
 
                 WM_LBUTTONUP => {
+                    let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
                     if this.toolbar.is_dragging {
                         this.toolbar.is_dragging = false;
                         return LRESULT(0);
@@ -2085,7 +2098,25 @@ impl OverlayWindow {
                     // 2. Shift + Wheel: Adjusts brush stroke width in Draw / Snip mode
                     if is_shift && (this.mode == AppMode::Draw || this.mode == AppMode::Snip) {
                         let new_width = (this.stroke_width + delta * 1.5).clamp(1.0, 40.0);
+                        match this.current_tool {
+                            DrawTool::Pen => this.pen_settings.stroke_width = new_width,
+                            DrawTool::Highlighter => {
+                                this.highlighter_settings.stroke_width = new_width
+                            }
+                            DrawTool::Line => this.line_settings.stroke_width = new_width,
+                            DrawTool::Arrow => this.arrow_settings.stroke_width = new_width,
+                            DrawTool::Rectangle => this.rect_settings.stroke_width = new_width,
+                            DrawTool::RoundedRectangle => {
+                                this.rounded_rect_settings.stroke_width = new_width
+                            }
+                            DrawTool::Ellipse => this.ellipse_settings.stroke_width = new_width,
+                            _ => {}
+                        }
                         this.stroke_width = new_width;
+                        this.toolbar.stroke_width = new_width;
+                        let sw = this.screen_width as f32;
+                        let sh = this.screen_height as f32;
+                        this.toolbar.update_layout(sw, sh);
                         let w_val = new_width.round() as u32;
                         this.set_toast("🖌️", format!("Stroke Width {} px", w_val));
                         this.request_repaint();
@@ -2490,9 +2521,14 @@ impl OverlayWindow {
                             this.set_toast("🟢", "Green");
                             this.request_repaint();
                         }
-                        k if k == 'B' as i32 => {
+                        k if k == 'B' as i32 && !is_shift => {
                             this.current_color = ColorPreset::Blue;
                             this.set_toast("🔵", "Blue");
+                            this.request_repaint();
+                        }
+                        k if k == 'B' as i32 && is_shift => {
+                            this.current_color = ColorPreset::Black;
+                            this.set_toast("⚫", "Black Pen");
                             this.request_repaint();
                         }
                         k if k == 'Y' as i32 => {
@@ -2505,7 +2541,7 @@ impl OverlayWindow {
                             this.set_toast("🟠", "Orange");
                             this.request_repaint();
                         }
-                        k if k == 'P' as i32 => {
+                        k if k == 'P' as i32 && is_shift => {
                             this.current_color = ColorPreset::Pink;
                             this.set_toast("🌸", "Pink");
                             this.request_repaint();
@@ -2516,7 +2552,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
 
-                        // ─── Canvas Slate & Color Modes (Shift+W: White pen, Shift+K: Black pen) ───
+                        // ─── Canvas Slate & Color Modes ───
                         k if k == 'W' as i32 && is_shift => {
                             this.current_color = ColorPreset::White;
                             this.set_toast("⚪", "White Pen");
@@ -2531,11 +2567,6 @@ impl OverlayWindow {
                                 };
                             this.current_color = ColorPreset::Red;
                             this.set_toast("⚪", "Whiteboard");
-                            this.request_repaint();
-                        }
-                        k if k == 'K' as i32 && is_shift => {
-                            this.current_color = ColorPreset::Black;
-                            this.set_toast("⚫", "Black Pen");
                             this.request_repaint();
                         }
                         k if k == 'K' as i32 && is_shift => {
@@ -2697,7 +2728,7 @@ impl OverlayWindow {
                             this.set_toast("🔢", format!("Step Badge (next: #{})", next_num));
                             this.request_repaint();
                         }
-                        k if k == 'P' as i32 => {
+                        k if k == 'P' as i32 && !is_shift => {
                             this.current_tool = DrawTool::Pen;
                             this.toolbar.active_tool = Some(DrawTool::Pen);
                             this.sync_tool_to_toolbar();

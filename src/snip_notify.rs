@@ -11,11 +11,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
-    GetSystemMetrics, GetWindowLongPtrW, KillTimer, RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN,
-    SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONUP, WM_PAINT, WM_TIMER,
-    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GetWindowLongPtrW, KillTimer, RegisterClassExW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DESTROY,
+    WM_ERASEBKGND, WM_LBUTTONUP, WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -23,6 +22,8 @@ static REGISTER_CLASS: Once = Once::new();
 static CURRENT_NOTIFY_HWND: AtomicIsize = AtomicIsize::new(0);
 
 struct SnipNotificationData {
+    orig_width: u32,
+    orig_height: u32,
     width: u32,
     height: u32,
     pixels: Vec<u8>,
@@ -69,29 +70,14 @@ pub fn show_snip_notification(width: u32, height: u32, pixels: &[u8]) {
             let _ = RegisterClassExW(&wc);
         });
 
-        let mut work_area = RECT::default();
-        let _ = SystemParametersInfoW(
-            SPI_GETWORKAREA,
-            0,
-            Some(&mut work_area as *mut _ as *mut _),
-            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-        );
-
-        let max_x = if work_area.right > 0 {
-            work_area.right
-        } else {
-            GetSystemMetrics(SM_CXSCREEN)
-        };
-        let max_y = if work_area.bottom > 0 {
-            work_area.bottom
-        } else {
-            GetSystemMetrics(SM_CYSCREEN)
-        };
-
+        // Query active monitor where the cursor is located to properly position on multi-monitor setups
+        let mon = crate::monitor::MonitorManager::get_monitor_from_cursor();
         let card_w = 300;
         let card_h = 220;
-        let pos_x = (max_x - card_w - 24).max(0);
-        let pos_y = (max_y - card_h - 24).max(0);
+        let right_bound = mon.work_x + mon.work_width as i32;
+        let bottom_bound = mon.work_y + mon.work_height as i32;
+        let pos_x = (right_bound - card_w - 24).max(mon.work_x);
+        let pos_y = (bottom_bound - card_h - 24).max(mon.work_y);
 
         let hinst: HINSTANCE =
             windows::Win32::System::LibraryLoader::GetModuleHandleW(PCWSTR::null())
@@ -116,10 +102,35 @@ pub fn show_snip_notification(width: u32, height: u32, pixels: &[u8]) {
             Err(_) => return,
         };
 
+        // Downscale thumbnail to max container dimensions (268x152) to avoid cloning tens of megabytes on UI thread
+        let max_w = 268u32;
+        let max_h = 152u32;
+        let scale = (max_w as f32 / width as f32)
+            .min(max_h as f32 / height as f32)
+            .min(1.0);
+        let thumb_w = ((width as f32 * scale).round() as u32).max(1);
+        let thumb_h = ((height as f32 * scale).round() as u32).max(1);
+
+        let mut thumb_pixels = vec![0u8; (thumb_w * thumb_h * 4) as usize];
+        for ty in 0..thumb_h {
+            let sy = (((ty as f32 / thumb_h as f32) * height as f32) as u32).min(height - 1);
+            let src_row_offset = (sy * width * 4) as usize;
+            let dst_row_offset = (ty * thumb_w * 4) as usize;
+            for tx in 0..thumb_w {
+                let sx = (((tx as f32 / thumb_w as f32) * width as f32) as u32).min(width - 1);
+                let src_pixel_offset = src_row_offset + (sx * 4) as usize;
+                let dst_pixel_offset = dst_row_offset + (tx * 4) as usize;
+                thumb_pixels[dst_pixel_offset..dst_pixel_offset + 4]
+                    .copy_from_slice(&pixels[src_pixel_offset..src_pixel_offset + 4]);
+            }
+        }
+
         let data = Box::new(SnipNotificationData {
-            width,
-            height,
-            pixels: pixels.to_vec(),
+            orig_width: width,
+            orig_height: height,
+            width: thumb_w,
+            height: thumb_h,
+            pixels: thumb_pixels,
         });
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(data) as isize);
 
@@ -239,7 +250,10 @@ unsafe extern "system" fn snip_notify_wndproc(
                 let _ = SelectObject(mem_dc, sub_font.into());
                 let _ = SetTextColor(mem_dc, rgb(150, 156, 170));
 
-                let sub_str = format!("{} × {} px • Ready to paste", data.width, data.height);
+                let sub_str = format!(
+                    "{} × {} px • Ready to paste",
+                    data.orig_width, data.orig_height
+                );
                 let mut sub_utf16: Vec<u16> = sub_str.encode_utf16().collect();
                 let mut sub_rect = RECT {
                     left: 16,

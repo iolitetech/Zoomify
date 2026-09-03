@@ -3,9 +3,11 @@
 use windows::Win32::Foundation::{HANDLE, HGLOBAL};
 use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFOHEADER};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
+    CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
+    SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::core::w;
 
 const CF_DIB: u32 = 8;
 const CF_UNICODETEXT: u32 = 13;
@@ -78,11 +80,47 @@ pub fn copy_bgra_to_clipboard(width: u32, height: u32, top_down_bgra: &[u8]) -> 
         }
 
         let _ = GlobalUnlock(h_global);
+        let dib_success = SetClipboardData(CF_DIB, Some(HANDLE(h_global.0))).is_ok();
 
-        let success = SetClipboardData(CF_DIB, Some(HANDLE(h_global.0))).is_ok();
+        // Also place PNG format on clipboard for modern apps (Discord, Slack, Telegram, browsers)
+        // so alpha transparency (e.g. Circular Snip) is preserved perfectly without black borders
+        let mut rgba = top_down_bgra.to_vec();
+        for chunk in rgba.chunks_exact_mut(4) {
+            chunk.swap(0, 2);
+        }
+
+        let mut png_bytes = Vec::new();
+        let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
+        if image::ImageEncoder::write_image(
+            encoder,
+            &rgba,
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .is_ok()
+        {
+            let cf_png = RegisterClipboardFormatW(w!("PNG"));
+            if cf_png != 0
+                && !png_bytes.is_empty()
+                && let Ok(h_png) = GlobalAlloc(GMEM_MOVEABLE, png_bytes.len())
+                && !h_png.is_invalid()
+            {
+                let png_ptr = GlobalLock(h_png);
+                if !png_ptr.is_null() {
+                    std::ptr::copy_nonoverlapping(
+                        png_bytes.as_ptr(),
+                        png_ptr as *mut u8,
+                        png_bytes.len(),
+                    );
+                    let _ = GlobalUnlock(h_png);
+                    let _ = SetClipboardData(cf_png, Some(HANDLE(h_png.0)));
+                }
+            }
+        }
+
         let _ = CloseClipboard();
-
-        success
+        dib_success
     }
 }
 

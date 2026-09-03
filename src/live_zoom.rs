@@ -263,10 +263,13 @@ impl LiveZoomEngine {
         }
 
         self.update_target_from_cursor();
-        self.current_x_offset = self.target_x_offset;
-        self.current_y_offset = self.target_y_offset;
-
-        self.apply_transform();
+        let dx = (self.target_x_offset - self.current_x_offset).abs();
+        let dy = (self.target_y_offset - self.current_y_offset).abs();
+        if dx > 0.5 || dy > 0.5 {
+            self.current_x_offset = self.target_x_offset;
+            self.current_y_offset = self.target_y_offset;
+            self.apply_transform();
+        }
     }
 
     fn apply_transform(&self) {
