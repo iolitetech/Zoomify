@@ -204,7 +204,6 @@ impl D2DRenderer {
                     FluentAction::ModeDraw => mode == AppMode::Draw,
                     FluentAction::ModeSpotlight => spotlight.active,
                     FluentAction::ModeTimer => mode == AppMode::Timer,
-                    FluentAction::ModeSnip => mode == AppMode::Snip,
                     FluentAction::Tool(t) => tool == t && mode == AppMode::Draw,
                     FluentAction::Color(c) => color == c,
                     _ => false,
@@ -310,7 +309,6 @@ impl D2DRenderer {
                             FluentAction::ModeDraw => ("\u{E70F}", "Draw (Ctrl+2)"),
                             FluentAction::ModeSpotlight => ("\u{E706}", "Spotlight (F3)"),
                             FluentAction::ModeTimer => ("\u{E916}", "Timer (Ctrl+5)"),
-                            FluentAction::ModeSnip => ("\u{F406}", "Snip (Ctrl+Shift+S)"),
                             FluentAction::CycleDisplay => ("\u{E7F4}", "Switch Display (Ctrl+Tab)"),
                             FluentAction::Tool(DrawTool::Pen) => ("\u{ED63}", "Pen (P)"),
                             FluentAction::Tool(DrawTool::LaserPointer) => {
@@ -330,6 +328,9 @@ impl D2DRenderer {
                                 ("\u{E8EC}", "Step Badge (N)")
                             }
                             FluentAction::Tool(DrawTool::Text) => ("\u{E8D2}", "Text (T)"),
+                            FluentAction::Tool(DrawTool::Blur) => {
+                                ("\u{E80A}", "Redact / Blur (Shift+X)")
+                            }
                             FluentAction::Tool(_) => ("", ""),
                             FluentAction::Undo => ("\u{E7A7}", "Undo (Ctrl+Z)"),
                             FluentAction::Clear => ("\u{E74D}", "Clear All (E)"),
@@ -470,7 +471,17 @@ impl D2DRenderer {
 
                     let (label, tip): (&str, &'static str) = match s_item.action {
                         FluentAction::SetStrokeWidth(w) => {
-                            if (w - 2.0).abs() < 0.1 {
+                            if toolbar.active_tool == Some(DrawTool::Blur) {
+                                if (w - 8.0).abs() < 0.1 {
+                                    ("8px", "Fine mosaic: 8px")
+                                } else if (w - 14.0).abs() < 0.1 {
+                                    ("14px", "Medium mosaic: 14px")
+                                } else if (w - 22.0).abs() < 0.1 {
+                                    ("22px", "Coarse mosaic: 22px")
+                                } else {
+                                    ("32px", "Heavy mosaic: 32px")
+                                }
+                            } else if (w - 2.0).abs() < 0.1 {
                                 ("2px", "Fine stroke: 2px")
                             } else if (w - 4.0).abs() < 0.1 {
                                 ("4px", "Medium stroke: 4px")

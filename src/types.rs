@@ -11,7 +11,6 @@ pub enum AppMode {
     Spotlight,
     LiveZoom,
     Timer,
-    Snip,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,7 +26,7 @@ pub enum DrawTool {
     Ellipse,
     Text,
     StepBadge,
-    Snip,
+    Blur,
 }
 
 impl DrawTool {
@@ -44,7 +43,7 @@ impl DrawTool {
             Self::Ellipse => "Ellipse",
             Self::Text => "Text",
             Self::StepBadge => "Step Badge",
-            Self::Snip => "Snip",
+            Self::Blur => "Redact (Blur)",
         }
     }
 }
@@ -309,6 +308,11 @@ pub enum Shape {
         stroke_width: f32,
         pattern: StrokePattern,
     },
+    Blur {
+        start: Point2D,
+        end: Point2D,
+        block_size: f32,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -421,6 +425,13 @@ pub enum HistoryAction {
 pub struct LaserTrailPoint {
     pub pt: Point2D,
     pub timestamp: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub struct LaserRipple {
+    pub center: Point2D,
+    pub timestamp: Instant,
+    pub color: ColorPreset,
 }
 
 #[derive(Debug, Clone)]
@@ -626,39 +637,9 @@ pub struct TextToolSettings {
     pub font_family: TextFontFamily,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SnipShape {
-    Rectangle,
-    Ellipse,
-}
-
-#[derive(Debug, Clone)]
-pub struct SnipSelection {
-    pub active: bool,
-    pub start: Point2D,
-    pub current: Point2D,
-    pub shape: SnipShape,
-}
-
-impl Default for SnipSelection {
-    fn default() -> Self {
-        Self {
-            active: false,
-            start: Point2D::default(),
-            current: Point2D::default(),
-            shape: SnipShape::Rectangle,
-        }
-    }
-}
-
-impl SnipSelection {
-    pub fn rect(&self) -> (f32, f32, f32, f32) {
-        let left = self.start.x.min(self.current.x);
-        let top = self.start.y.min(self.current.y);
-        let right = self.start.x.max(self.current.x);
-        let bottom = self.start.y.max(self.current.y);
-        (left, top, right, bottom)
-    }
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlurToolSettings {
+    pub block_size: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -908,7 +889,6 @@ pub enum FluentAction {
     ModeDraw,
     ModeSpotlight,
     ModeTimer,
-    ModeSnip,
     CycleDisplay,
     Tool(DrawTool),
     Color(ColorPreset),
@@ -1233,6 +1213,14 @@ pub fn compute_subbar_layout(
                 ),
             ]);
         }
+        DrawTool::Blur => {
+            groups.push(vec![
+                (FluentAction::SetStrokeWidth(8.0), 38.0),
+                (FluentAction::SetStrokeWidth(14.0), 44.0),
+                (FluentAction::SetStrokeWidth(22.0), 44.0),
+                (FluentAction::SetStrokeWidth(32.0), 44.0),
+            ]);
+        }
         _ => return (None, Vec::new(), Vec::new()),
     }
 
@@ -1351,19 +1339,18 @@ pub fn compute_toolbar_layout(
     // Define items and their widths:
     let mut item_specs: Vec<(FluentAction, f32)> = Vec::with_capacity(32);
 
-    // Modes (5 items, or 6 items if multi-monitor)
+    // Modes (4 items, or 5 items if multi-monitor)
     item_specs.push((FluentAction::ModeZoom, 34.0));
     item_specs.push((FluentAction::ModeDraw, 34.0));
     item_specs.push((FluentAction::ModeSpotlight, 34.0));
     item_specs.push((FluentAction::ModeTimer, 34.0));
-    item_specs.push((FluentAction::ModeSnip, 34.0));
     if monitor_count > 1 {
         item_specs.push((FluentAction::CycleDisplay, 34.0));
     }
 
-    let mode_end_idx = if monitor_count > 1 { 5 } else { 4 };
+    let mode_end_idx = if monitor_count > 1 { 4 } else { 3 };
 
-    // Tools (10 items)
+    // Tools (11 items)
     let tools = [
         DrawTool::Pen,
         DrawTool::LaserPointer,
@@ -1375,11 +1362,12 @@ pub fn compute_toolbar_layout(
         DrawTool::Ellipse,
         DrawTool::StepBadge,
         DrawTool::Text,
+        DrawTool::Blur,
     ];
     for t in tools {
         item_specs.push((FluentAction::Tool(t), 32.0));
     }
-    let tools_end_idx = mode_end_idx + 10;
+    let tools_end_idx = mode_end_idx + 11;
 
     // Colors (8 items)
     let colors = [
@@ -1486,21 +1474,6 @@ mod tests {
         let p1 = Point2D::new(0.0, 0.0);
         let p2 = Point2D::new(3.0, 4.0);
         assert_eq!(p1.distance(&p2), 5.0);
-    }
-
-    #[test]
-    fn test_snip_rect_normalization() {
-        let snip = SnipSelection {
-            active: true,
-            start: Point2D::new(200.0, 300.0),
-            current: Point2D::new(100.0, 150.0),
-            shape: SnipShape::Rectangle,
-        };
-        let (l, t, r, b) = snip.rect();
-        assert_eq!(l, 100.0);
-        assert_eq!(t, 150.0);
-        assert_eq!(r, 200.0);
-        assert_eq!(b, 300.0);
     }
 
     #[test]
@@ -1812,36 +1785,6 @@ mod tests {
     }
 
     #[test]
-    fn test_snip_shape_and_circle_mask() {
-        let snip = SnipSelection {
-            active: true,
-            start: Point2D::new(100.0, 100.0),
-            current: Point2D::new(300.0, 300.0),
-            shape: SnipShape::Ellipse,
-        };
-        assert_eq!(snip.shape, SnipShape::Ellipse);
-        let (l, t, r, b) = snip.rect();
-        assert_eq!((l, t, r, b), (100.0, 100.0, 300.0, 300.0));
-
-        let w = (r - l) as u32;
-        let h = (b - t) as u32;
-        let cx = w as f32 / 2.0;
-        let cy = h as f32 / 2.0;
-        let rx = cx;
-        let ry = cy;
-
-        // Center pixel is inside ellipse
-        let d_center = ((0.0) / (rx * rx)) + ((0.0) / (ry * ry));
-        assert!(d_center <= 1.0);
-
-        // Corner pixel (0, 0) is strictly outside circle
-        let dx_corner = 0.0 - cx;
-        let dy_corner = 0.0 - cy;
-        let d_corner = (dx_corner * dx_corner) / (rx * rx) + (dy_corner * dy_corner) / (ry * ry);
-        assert!(d_corner > 1.0);
-    }
-
-    #[test]
     fn test_drawing_attributes_and_enums() {
         assert_eq!(FillMode::None.name(), "Outline Only");
         assert_eq!(FillMode::Tinted.name(), "Tinted Fill");
@@ -1950,7 +1893,23 @@ mod tests {
                 .any(|i| i.action == FluentAction::SetFontFamily(TextFontFamily::CascadiaCode))
         );
 
-        // 5. Deselect tool (None) -> subbar disappears completely
+        // 5. Blur tool selected -> subbar contains block size options
+        tb.active_tool = Some(DrawTool::Blur);
+        tb.update_layout(1920.0, 1080.0);
+        assert!(tb.subbar_rect.is_some());
+        assert_eq!(tb.subbar_items.len(), 4);
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::SetStrokeWidth(8.0))
+        );
+        assert!(
+            tb.subbar_items
+                .iter()
+                .any(|i| i.action == FluentAction::SetStrokeWidth(14.0))
+        );
+
+        // 6. Deselect tool (None) -> subbar disappears completely
         tb.active_tool = None;
         tb.update_layout(1920.0, 1080.0);
         assert!(tb.subbar_rect.is_none());
@@ -2065,15 +2024,14 @@ mod tests {
     }
 
     #[test]
-    fn test_snip_selection_defaults() {
-        let mut snip = SnipSelection::default();
-        assert!(!snip.active);
-
-        snip.active = true;
-        snip.start = Point2D::new(100.0, 100.0);
-        snip.current = Point2D::new(300.0, 200.0);
-
-        let (l, t, r, b) = snip.rect();
-        assert_eq!((l, t, r, b), (100.0, 100.0, 300.0, 200.0));
+    fn test_laser_ripple_initialization() {
+        let ripple = LaserRipple {
+            center: Point2D::new(250.0, 350.0),
+            timestamp: Instant::now(),
+            color: ColorPreset::Red,
+        };
+        assert_eq!(ripple.center.x, 250.0);
+        assert_eq!(ripple.center.y, 350.0);
+        assert_eq!(ripple.color, ColorPreset::Red);
     }
 }

@@ -194,7 +194,6 @@ impl D2DRenderer {
                 AppMode::Draw => "✏️ Draw Mode",
                 AppMode::Spotlight => "🔦 Spotlight",
                 AppMode::Timer => "⏱️ Timer",
-                AppMode::Snip => "✂️ Snip",
             };
 
             let spot_info = if spotlight.active {
@@ -559,7 +558,6 @@ impl D2DRenderer {
                     ("Ctrl+3", "Spotlight Mode (Wheel: resize)"),
                     ("Ctrl+4", "Live Zoom (Hardware magnifier)"),
                     ("Ctrl+5", "Presentation Countdown Timer"),
-                    ("Ctrl+Shift+S", "Snip Region to Clipboard"),
                     ("", ""),
                     ("DRAW TOOLS & KEYS", ""),
                     ("P", "Pen (freehand with Bezier smoothing)"),
@@ -573,7 +571,7 @@ impl D2DRenderer {
                     ("Q", "Ellipse / Circle tool"),
                     ("T", "Text (click, type, Enter/Esc)"),
                     ("N", "Step Badge (Shift+N: reset #)"),
-                    ("S", "Snip tool (drag rectangle)"),
+                    ("Shift+X", "Redact / Blur mosaic box"),
                     ("", ""),
                     ("GESTURES & MODIFIERS", ""),
                     ("Hold Pen", "Hold 350ms to auto-snap shape"),

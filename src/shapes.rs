@@ -211,6 +211,21 @@ pub fn shape_intersects_circle(shape: &Shape, center: Point2D, radius: f32) -> b
             radius: r,
             ..
         } => center.distance(c) <= (r + radius),
+        Shape::Blur { start, end, .. } => {
+            let (l, t, r, b) = normalize_rect(*start, *end);
+            let threshold = radius + 2.0;
+            if center.x >= l && center.x <= r && center.y >= t && center.y <= b {
+                return true;
+            }
+            let p1 = Point2D::new(l, t);
+            let p2 = Point2D::new(r, t);
+            let p3 = Point2D::new(r, b);
+            let p4 = Point2D::new(l, b);
+            point_to_segment_distance(center, p1, p2) <= threshold
+                || point_to_segment_distance(center, p2, p3) <= threshold
+                || point_to_segment_distance(center, p3, p4) <= threshold
+                || point_to_segment_distance(center, p4, p1) <= threshold
+        }
     }
 }
 
@@ -506,5 +521,26 @@ mod tests {
         let recognized_jitter = recognize_smart_shape(&jitter_circle, 4.0, ColorPreset::Cyan);
         assert!(matches!(recognized_jitter, Some(Shape::Ellipse { .. })));
         assert!(!matches!(recognized_jitter, Some(Shape::Rectangle { .. })));
+    }
+
+    #[test]
+    fn test_shape_eraser_blur_intersection() {
+        let blur = Shape::Blur {
+            start: Point2D::new(100.0, 100.0),
+            end: Point2D::new(200.0, 200.0),
+            block_size: 14.0,
+        };
+        // Center of blur rect
+        assert!(shape_intersects_circle(
+            &blur,
+            Point2D::new(150.0, 150.0),
+            10.0
+        ));
+        // Outside blur rect
+        assert!(!shape_intersects_circle(
+            &blur,
+            Point2D::new(300.0, 300.0),
+            10.0
+        ));
     }
 }

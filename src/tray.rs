@@ -23,7 +23,6 @@ pub const ID_TRAY_STATIC_ZOOM: usize = 2001;
 pub const ID_TRAY_DRAW: usize = 2002;
 pub const ID_TRAY_SPOTLIGHT: usize = 2003;
 pub const ID_TRAY_LIVE_ZOOM: usize = 2004;
-pub const ID_TRAY_SNIP: usize = 2005;
 pub const ID_TRAY_TIMER: usize = 2006;
 pub const ID_TRAY_CHEATSHEET: usize = 2007;
 pub const ID_TRAY_ABOUT: usize = 2008;
@@ -34,6 +33,7 @@ pub const ID_TRAY_WHITEBOARD: usize = 2012;
 pub const ID_TRAY_BLACKBOARD: usize = 2013;
 pub const ID_TRAY_OPEN_CONFIG: usize = 2014;
 pub const ID_TRAY_RESET_TOOLBAR: usize = 2015;
+pub const ID_TRAY_BLUR: usize = 2016;
 
 /// Enable authentic Windows 11 / Windows 10 Dark Mode for Win32 popup menus
 pub fn enable_windows_dark_mode_for_menus() {
@@ -133,12 +133,6 @@ impl TrayIcon {
             let _ = AppendMenuW(
                 menu,
                 MF_STRING,
-                ID_TRAY_SNIP,
-                w!("Snip Selection\tCtrl+Shift+S"),
-            );
-            let _ = AppendMenuW(
-                menu,
-                MF_STRING,
                 ID_TRAY_TIMER,
                 w!("Countdown Timer\tCtrl+5"),
             );
@@ -152,6 +146,12 @@ impl TrayIcon {
                     MF_STRING,
                     ID_TRAY_ERASER,
                     w!("Stroke Eraser\tX"),
+                );
+                let _ = AppendMenuW(
+                    tools_menu,
+                    MF_STRING,
+                    ID_TRAY_BLUR,
+                    w!("Redact / Blur\tShift+X"),
                 );
                 let _ = AppendMenuW(
                     tools_menu,

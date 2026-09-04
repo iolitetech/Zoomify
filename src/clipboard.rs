@@ -83,7 +83,7 @@ pub fn copy_bgra_to_clipboard(width: u32, height: u32, top_down_bgra: &[u8]) -> 
         let dib_success = SetClipboardData(CF_DIB, Some(HANDLE(h_global.0))).is_ok();
 
         // Also place PNG format on clipboard for modern apps (Discord, Slack, Telegram, browsers)
-        // so alpha transparency (e.g. Circular Snip) is preserved perfectly without black borders
+        // so alpha transparency is preserved perfectly without black borders
         let mut rgba = top_down_bgra.to_vec();
         for chunk in rgba.chunks_exact_mut(4) {
             chunk.swap(0, 2);

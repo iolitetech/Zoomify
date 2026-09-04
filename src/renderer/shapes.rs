@@ -1,22 +1,28 @@
 use super::{D2DRenderer, v2};
 use crate::shapes::{calculate_arrow_head, normalize_rect, points_to_bezier_segments};
 use crate::types::{
-    ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserTrailPoint, Point2D, Shape, StrokePattern,
-    TextCardStyle, TextEditorState,
+    ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserRipple, LaserTrailPoint, Point2D, Shape,
+    StrokePattern, TextCardStyle, TextEditorState,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
     D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1RenderTarget,
+    D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1RenderTarget,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
 };
 
 impl D2DRenderer {
-    pub(super) unsafe fn render_single_shape(&self, rt: &ID2D1RenderTarget, shape: &Shape) {
+    pub(super) unsafe fn render_single_shape(
+        &self,
+        rt: &ID2D1RenderTarget,
+        shape: &Shape,
+        bg_bitmap: Option<&ID2D1Bitmap>,
+    ) {
         unsafe {
             match shape {
                 Shape::Stroke {
@@ -539,6 +545,92 @@ impl D2DRenderer {
                         }
                     }
                 }
+                Shape::Blur {
+                    start,
+                    end,
+                    block_size,
+                } => {
+                    let (l, t, r, b) = crate::shapes::normalize_rect(*start, *end);
+                    let w = r - l;
+                    let h = b - t;
+                    if w < 1.0 || h < 1.0 {
+                        return;
+                    }
+
+                    let b_size = block_size.clamp(4.0, 64.0);
+
+                    if let Some(bmp) = bg_bitmap {
+                        let mut by = t;
+                        while by < b {
+                            let bh = (b - by).min(b_size);
+                            let sample_y = (by + bh * 0.5).min(b - 1.0);
+                            let mut bx = l;
+                            while bx < r {
+                                let bw = (r - bx).min(b_size);
+                                let sample_x = (bx + bw * 0.5).min(r - 1.0);
+
+                                let dst_block = D2D_RECT_F {
+                                    left: bx,
+                                    top: by,
+                                    right: bx + bw,
+                                    bottom: by + bh,
+                                };
+                                let src_pixel = D2D_RECT_F {
+                                    left: sample_x,
+                                    top: sample_y,
+                                    right: sample_x + 1.0,
+                                    bottom: sample_y + 1.0,
+                                };
+
+                                rt.DrawBitmap(
+                                    bmp,
+                                    Some(&dst_block),
+                                    1.0,
+                                    D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                                    Some(&src_pixel),
+                                );
+
+                                bx += b_size;
+                            }
+                            by += b_size;
+                        }
+                    } else if let Ok(brush) = rt.CreateSolidColorBrush(
+                        &D2D1_COLOR_F {
+                            r: 0.1,
+                            g: 0.1,
+                            b: 0.1,
+                            a: 0.85,
+                        },
+                        None,
+                    ) {
+                        let rect = D2D_RECT_F {
+                            left: l,
+                            top: t,
+                            right: r,
+                            bottom: b,
+                        };
+                        rt.FillRectangle(&rect, &brush);
+                    }
+
+                    // Subtle glass outline around the redacted region
+                    if let Ok(border_brush) = rt.CreateSolidColorBrush(
+                        &D2D1_COLOR_F {
+                            r: 0.4,
+                            g: 0.7,
+                            b: 1.0,
+                            a: 0.45,
+                        },
+                        None,
+                    ) {
+                        let border_rect = D2D_RECT_F {
+                            left: l,
+                            top: t,
+                            right: r,
+                            bottom: b,
+                        };
+                        rt.DrawRectangle(&border_rect, &border_brush, 1.0, None);
+                    }
+                }
             }
         }
     }
@@ -678,6 +770,7 @@ impl D2DRenderer {
         &self,
         rt: &ID2D1RenderTarget,
         trail: &[LaserTrailPoint],
+        ripples: &[LaserRipple],
         current_pos: Option<Point2D>,
         color: ColorPreset,
     ) {
@@ -685,7 +778,84 @@ impl D2DRenderer {
             let now = std::time::Instant::now();
             let base_col = color.to_d2d_color(1.0);
 
-            // Draw decaying trail segments
+            // 1. Draw animated shockwave pulse ripples
+            for ripple in ripples {
+                let age = now.duration_since(ripple.timestamp).as_secs_f32();
+                let duration = 0.85;
+                let t = (age / duration).clamp(0.0, 1.0);
+                if t >= 1.0 {
+                    continue;
+                }
+                let rip_col = ripple.color.to_d2d_color(1.0);
+
+                // Main expanding shockwave ring
+                let ease_out = 1.0 - (1.0 - t).powi(3);
+                let radius = 8.0 + ease_out * 56.0;
+                let alpha = ((1.0 - t).powi(2) * 0.85).max(0.0);
+                let stroke_w = (4.0 - ease_out * 2.5).max(1.0);
+
+                let ring_col = D2D1_COLOR_F {
+                    r: rip_col.r,
+                    g: rip_col.g,
+                    b: rip_col.b,
+                    a: alpha,
+                };
+                if let Ok(brush) = rt.CreateSolidColorBrush(&ring_col, None) {
+                    let el = D2D1_ELLIPSE {
+                        point: v2(ripple.center.x, ripple.center.y),
+                        radiusX: radius,
+                        radiusY: radius,
+                    };
+                    rt.DrawEllipse(&el, &brush, stroke_w, None);
+                }
+
+                // Secondary trailing echo ring
+                if t > 0.12 {
+                    let t2 = ((t - 0.12) / 0.88).clamp(0.0, 1.0);
+                    let ease_out2 = 1.0 - (1.0 - t2).powi(3);
+                    let radius2 = 6.0 + ease_out2 * 40.0;
+                    let alpha2 = ((1.0 - t2).powi(2) * 0.55).max(0.0);
+                    let stroke_w2 = (2.5 - ease_out2 * 1.5).max(1.0);
+
+                    let echo_col = D2D1_COLOR_F {
+                        r: rip_col.r,
+                        g: rip_col.g,
+                        b: rip_col.b,
+                        a: alpha2,
+                    };
+                    if let Ok(brush2) = rt.CreateSolidColorBrush(&echo_col, None) {
+                        let el2 = D2D1_ELLIPSE {
+                            point: v2(ripple.center.x, ripple.center.y),
+                            radiusX: radius2,
+                            radiusY: radius2,
+                        };
+                        rt.DrawEllipse(&el2, &brush2, stroke_w2, None);
+                    }
+                }
+
+                // Initial impact center flash
+                if t < 0.22 {
+                    let flash_t = t / 0.22;
+                    let flash_alpha = (1.0 - flash_t) * 0.55;
+                    let flash_radius = 5.0 + flash_t * 16.0;
+                    let flash_col = D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: flash_alpha,
+                    };
+                    if let Ok(fbrush) = rt.CreateSolidColorBrush(&flash_col, None) {
+                        let fel = D2D1_ELLIPSE {
+                            point: v2(ripple.center.x, ripple.center.y),
+                            radiusX: flash_radius,
+                            radiusY: flash_radius,
+                        };
+                        rt.FillEllipse(&fel, &fbrush);
+                    }
+                }
+            }
+
+            // 2. Draw decaying trail segments
             if trail.len() >= 2 {
                 for i in 0..(trail.len() - 1) {
                     let age = now.duration_since(trail[i].timestamp).as_secs_f32();

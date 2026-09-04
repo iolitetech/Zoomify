@@ -9,7 +9,6 @@ mod monitor;
 mod overlay;
 mod renderer;
 mod shapes;
-mod snip_notify;
 mod tray;
 mod types;
 
@@ -19,7 +18,6 @@ use std::rc::Rc;
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
 };
-use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
@@ -131,10 +129,6 @@ unsafe extern "system" fn tray_wnd_proc(
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_timer_mode(0);
                     }
-                    HOTKEY_SNIP => {
-                        ensure_live_zoom_stopped(&mut overlay);
-                        overlay.enter_snip_mode();
-                    }
                     _ => {}
                 }
                 LRESULT(0)
@@ -204,11 +198,6 @@ unsafe extern "system" fn tray_wnd_proc(
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_spotlight_mode();
                     }
-                    ID_TRAY_SNIP => {
-                        let mut overlay = ctx.overlay.borrow_mut();
-                        ensure_live_zoom_stopped(&mut overlay);
-                        overlay.enter_snip_mode();
-                    }
                     ID_TRAY_TIMER => {
                         let mut overlay = ctx.overlay.borrow_mut();
                         ensure_live_zoom_stopped(&mut overlay);
@@ -228,6 +217,14 @@ unsafe extern "system" fn tray_wnd_proc(
                         overlay.enter_draw_mode();
                         overlay.current_tool = DrawTool::Eraser;
                         overlay.set_toast("🧹", "Stroke Eraser Active (X)");
+                        overlay.request_repaint();
+                    }
+                    ID_TRAY_BLUR => {
+                        let mut overlay = ctx.overlay.borrow_mut();
+                        ensure_live_zoom_stopped(&mut overlay);
+                        overlay.enter_draw_mode();
+                        overlay.current_tool = DrawTool::Blur;
+                        overlay.set_toast("░", "Redact / Blur Tool Active (Shift+X)");
                         overlay.request_repaint();
                     }
                     ID_TRAY_WHITEBOARD => {
@@ -280,7 +277,6 @@ unsafe extern "system" fn tray_wnd_proc(
                             • Ctrl+3 / F3: Spotlight Mode (Ctrl+Wheel to resize, Click / Space to pin)\n\
                             • Ctrl+4: Live Zoom (Ctrl+Wheel or Ctrl+Up/Down to zoom)\n\
                             • Ctrl+5: Presentation Countdown Timer\n\
-                            • Ctrl+Shift+S / Snip: Snip Region to Clipboard\n\
                             • F1: Shortcut Cheat Sheet Overlay | F2: Toggle HUD\n\
                             • Mouse Modifiers: Shift=Line, Ctrl=Rect, Tab=Ellipse, Shift+Ctrl=Arrow\n\
                             • Colors: r, g, b, y, o, c | Shift+P: Pink | Shift+W: White | Shift+B: Black");
@@ -326,7 +322,7 @@ unsafe extern "system" fn tray_wnd_proc(
 fn main() -> Result<()> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let _ = windows::Win32::System::Ole::OleInitialize(None);
 
         // Named mutex scoped to local session so duplicate instances are prevented
         let mutex_handle = CreateMutexW(None, true, w!("Local\\Zoomify_App_Session_Mutex"));
@@ -334,7 +330,7 @@ fn main() -> Result<()> {
             let _ = MessageBoxW(
                 None,
                 w!(
-                    "Zoomify is already running in your System Tray!\n\nHotkeys ready:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+5: Timer\n• Ctrl+Shift+S: Snip"
+                    "Zoomify is already running in your System Tray!\n\nHotkeys ready:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+5: Timer"
                 ),
                 w!("Zoomify Running"),
                 MB_OK | MB_ICONINFORMATION | MB_SYSTEMMODAL,
@@ -379,7 +375,7 @@ fn main() -> Result<()> {
         // Show non-intrusive Windows tray notification balloon
         tray.show_balloon(
             "Zoomify is Ready!",
-            "Hotkeys:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+Shift+S: Snip",
+            "Hotkeys:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+5: Timer",
         );
 
         let app_ctx = Box::new(AppContext {
@@ -401,7 +397,7 @@ fn main() -> Result<()> {
         app_ctx.hotkeys.unregister_all();
         app_ctx.overlay.borrow_mut().exit_overlay();
 
-        CoUninitialize();
+        windows::Win32::System::Ole::OleUninitialize();
         if let Ok(h) = mutex_handle {
             let _ = windows::Win32::Foundation::CloseHandle(h);
         }

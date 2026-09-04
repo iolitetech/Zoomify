@@ -33,11 +33,11 @@ use crate::shapes::{
     recognize_smart_shape, shape_intersects_circle, snap_to_angle, snap_to_square,
 };
 use crate::types::{
-    AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, CanvasBackground, ColorPreset,
-    DrawTool, FillMode, FluentAction, FluentToolbarState, HistoryAction, LaserTrailPoint, Point2D,
-    Shape, ShapeToolSettings, SnipSelection, SnipShape, SpotlightState, StepBadgeToolSettings,
-    StrokePattern, StrokeToolSettings, TextCardStyle, TextEditorState, TextFontFamily,
-    TextToolSettings, TimerAction, TimerWidgetState, ToastNotification, ZoomState,
+    AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, BlurToolSettings,
+    CanvasBackground, ColorPreset, DrawTool, FillMode, FluentAction, FluentToolbarState,
+    HistoryAction, LaserRipple, LaserTrailPoint, Point2D, Shape, ShapeToolSettings, SpotlightState,
+    StepBadgeToolSettings, StrokePattern, StrokeToolSettings, TextCardStyle, TextEditorState,
+    TextFontFamily, TextToolSettings, TimerAction, TimerWidgetState, ToastNotification, ZoomState,
 };
 
 const OVERLAY_CLASS_NAME: PCWSTR = w!("ZoomifyFullscreenOverlay");
@@ -56,7 +56,7 @@ pub struct OverlayWindow {
     pub background_type: CanvasBackground,
     pub zoom: ZoomState,
     pub spotlight: SpotlightState,
-    pub snip: SnipSelection,
+    pub was_shifted_during_draw: bool,
     pub shapes: Vec<Shape>,
     pub undo_history: Vec<HistoryAction>,
     pub redo_history: Vec<HistoryAction>,
@@ -88,11 +88,13 @@ pub struct OverlayWindow {
     pub ellipse_settings: ShapeToolSettings,
     pub badge_settings: StepBadgeToolSettings,
     pub text_settings: TextToolSettings,
+    pub blur_settings: BlurToolSettings,
     pub toast: Option<ToastNotification>,
     pub show_cheat_sheet: bool,
     pub show_hud: bool,
     pub toolbar: FluentToolbarState,
     pub laser_trail: Vec<LaserTrailPoint>,
+    pub laser_ripples: Vec<LaserRipple>,
     pub laser_pos: Option<Point2D>,
     pub eraser_pos: Option<Point2D>,
     pub stroke_start_time: Option<Instant>,
@@ -222,12 +224,7 @@ impl OverlayWindow {
                 background_type: CanvasBackground::Transparent,
                 zoom: ZoomState::default(),
                 spotlight,
-                snip: SnipSelection {
-                    active: false,
-                    start: Point2D::default(),
-                    current: Point2D::default(),
-                    shape: SnipShape::Rectangle,
-                },
+                was_shifted_during_draw: false,
                 shapes: Vec::new(),
                 undo_history: Vec::new(),
                 redo_history: Vec::new(),
@@ -285,6 +282,7 @@ impl OverlayWindow {
                     card_style: TextCardStyle::Transparent,
                     font_family: TextFontFamily::SegoeUI,
                 },
+                blur_settings: BlurToolSettings { block_size: 14.0 },
                 live_zoom: LiveZoomEngine::new(),
                 is_drawing: false,
                 draw_start_pt: Point2D::default(),
@@ -300,6 +298,7 @@ impl OverlayWindow {
                 show_hud: true,
                 toolbar,
                 laser_trail: Vec::new(),
+                laser_ripples: Vec::new(),
                 laser_pos: None,
                 eraser_pos: None,
                 stroke_start_time: None,
@@ -450,6 +449,10 @@ impl OverlayWindow {
                 self.toolbar.text_card_style = self.text_settings.card_style;
                 self.toolbar.text_font_family = self.text_settings.font_family;
             }
+            DrawTool::Blur => {
+                self.stroke_width = self.blur_settings.block_size;
+                self.toolbar.stroke_width = self.blur_settings.block_size;
+            }
             _ => {}
         }
     }
@@ -526,30 +529,6 @@ impl OverlayWindow {
         );
     }
 
-    pub fn enter_snip_mode(&mut self) {
-        if self.live_zoom.is_active() {
-            self.live_zoom.stop();
-        }
-        let previous_tool = self.current_tool;
-        self.target_monitor_under_cursor();
-        self.capture_current_screen();
-        self.mode = AppMode::Snip;
-        self.toolbar.active_tool = None;
-        self.current_tool = DrawTool::Snip;
-        self.snip.shape = if previous_tool == DrawTool::Ellipse {
-            SnipShape::Ellipse
-        } else {
-            SnipShape::Rectangle
-        };
-        self.show_window();
-        let shape_name = if self.snip.shape == SnipShape::Ellipse {
-            "Circular Snip"
-        } else {
-            "Rectangular Snip"
-        };
-        self.set_toast("✂️", format!("{} (Tab: Switch | Drag: Snip)", shape_name));
-    }
-
     pub fn toggle_spotlight(&mut self) {
         self.spotlight.active = !self.spotlight.active;
         if self.spotlight.active {
@@ -608,7 +587,6 @@ impl OverlayWindow {
         }
         self.mode = AppMode::Idle;
         self.spotlight.active = false;
-        self.snip.active = false;
         self.is_drawing = false;
         self.active_shape = None;
         self.text_editor = None;
@@ -691,7 +669,6 @@ impl OverlayWindow {
             || self.mode == AppMode::Draw
             || self.mode == AppMode::Spotlight
             || self.mode == AppMode::Timer
-            || self.mode == AppMode::Snip
         {
             self.capture_current_screen();
         }
@@ -1001,6 +978,11 @@ impl OverlayWindow {
                 fill: self.ellipse_settings.fill_mode,
                 pattern: self.ellipse_settings.pattern,
             },
+            DrawTool::Blur => Shape::Blur {
+                start: canvas_pt,
+                end: canvas_pt,
+                block_size: self.blur_settings.block_size,
+            },
             _ => Shape::Stroke {
                 points: vec![canvas_pt],
                 color: self.current_color,
@@ -1035,9 +1017,6 @@ impl OverlayWindow {
             }
             FluentAction::ModeTimer => {
                 self.enter_timer_mode(0);
-            }
-            FluentAction::ModeSnip => {
-                self.enter_snip_mode();
             }
             FluentAction::CycleDisplay => {
                 self.cycle_next_monitor();
@@ -1092,6 +1071,7 @@ impl OverlayWindow {
                     DrawTool::RoundedRectangle => self.rounded_rect_settings.stroke_width = w,
                     DrawTool::Ellipse => self.ellipse_settings.stroke_width = w,
                     DrawTool::StepBadge => self.badge_settings.stroke_width = w,
+                    DrawTool::Blur => self.blur_settings.block_size = w,
                     _ => {}
                 }
                 self.stroke_width = w;
@@ -1100,7 +1080,11 @@ impl OverlayWindow {
                 let sh = self.screen_height as f32;
                 self.toolbar.update_layout(sw, sh);
                 self.save_config();
-                self.set_toast("✏️", format!("Stroke Width: {:.0}px", w));
+                if self.current_tool == DrawTool::Blur {
+                    self.set_toast("░", format!("Mosaic Block Size: {:.0}px", w));
+                } else {
+                    self.set_toast("✏️", format!("Stroke Width: {:.0}px", w));
+                }
             }
             FluentAction::SetFillMode(fm) => {
                 match self.current_tool {
@@ -1275,14 +1259,9 @@ impl OverlayWindow {
                     }
 
                     let text_input = this.text_editor.as_ref();
-                    let snip_ref = if this.snip.active {
-                        Some(&this.snip)
-                    } else {
-                        None
-                    };
 
                     let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
-                    let snap_guides = this.is_drawing && is_shift;
+                    let snap_guides = this.is_drawing && (is_shift || this.was_shifted_during_draw);
 
                     this.renderer.render_frame(
                         this.mode,
@@ -1295,7 +1274,6 @@ impl OverlayWindow {
                         &this.shapes,
                         this.active_shape.as_ref(),
                         text_input,
-                        snip_ref,
                         this.current_tool,
                         this.current_color,
                         this.stroke_width,
@@ -1306,6 +1284,7 @@ impl OverlayWindow {
                         &this.timer_widget,
                         &this.toolbar,
                         &this.laser_trail,
+                        &this.laser_ripples,
                         this.laser_pos,
                         this.eraser_pos,
                         snap_guides,
@@ -1363,6 +1342,17 @@ impl OverlayWindow {
                             this.laser_trail
                                 .retain(|p| now.duration_since(p.timestamp).as_secs_f32() <= 1.2);
                             if !this.laser_trail.is_empty() || prev_len > 0 {
+                                needs_paint = true;
+                            }
+                        }
+
+                        // Laser ripple pulse shockwaves animation & decay
+                        if !this.laser_ripples.is_empty() {
+                            let now = Instant::now();
+                            let prev_len = this.laser_ripples.len();
+                            this.laser_ripples
+                                .retain(|r| now.duration_since(r.timestamp).as_secs_f32() <= 0.85);
+                            if !this.laser_ripples.is_empty() || prev_len > 0 {
                                 needs_paint = true;
                             }
                         }
@@ -1515,17 +1505,6 @@ impl OverlayWindow {
                         this.request_repaint();
                     }
 
-                    if this.snip.active {
-                        let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
-                        this.snip.current = if is_shift {
-                            snap_to_square(this.snip.start, screen_pt)
-                        } else {
-                            screen_pt
-                        };
-                        this.request_repaint();
-                        return LRESULT(0);
-                    }
-
                     if (this.mode == AppMode::StaticZoom
                         || (this.mode == AppMode::Draw && this.zoom.level > 1.001))
                         && !this.is_drawing
@@ -1560,6 +1539,7 @@ impl OverlayWindow {
                         }
 
                         let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                        this.was_shifted_during_draw = is_shift;
                         let start_pt = this.draw_start_pt;
 
                         match &mut this.active_shape {
@@ -1598,6 +1578,14 @@ impl OverlayWindow {
                                 this.request_repaint();
                             }
                             Some(Shape::Ellipse { end, .. }) => {
+                                *end = if is_shift {
+                                    snap_to_square(start_pt, canvas_pt)
+                                } else {
+                                    canvas_pt
+                                };
+                                this.request_repaint();
+                            }
+                            Some(Shape::Blur { end, .. }) => {
                                 *end = if is_shift {
                                     snap_to_square(start_pt, canvas_pt)
                                 } else {
@@ -1747,14 +1735,6 @@ impl OverlayWindow {
                         this.set_toast("✏️", "Draw Mode (Drag to draw | Esc to exit)");
                     }
 
-                    if this.current_tool == DrawTool::Snip {
-                        this.snip.active = true;
-                        this.snip.start = screen_pt;
-                        this.snip.current = screen_pt;
-                        this.request_repaint();
-                        return LRESULT(0);
-                    }
-
                     if this.current_tool == DrawTool::Text {
                         this.commit_text_editor();
                         let cur_col = this.current_color;
@@ -1805,10 +1785,19 @@ impl OverlayWindow {
 
                     if this.current_tool == DrawTool::LaserPointer {
                         this.laser_pos = Some(canvas_pt);
+                        let laser_color = this.current_color;
                         this.laser_trail.push(LaserTrailPoint {
                             pt: canvas_pt,
                             timestamp: Instant::now(),
                         });
+                        this.laser_ripples.push(LaserRipple {
+                            center: canvas_pt,
+                            timestamp: Instant::now(),
+                            color: laser_color,
+                        });
+                        if this.laser_ripples.len() > 10 {
+                            this.laser_ripples.remove(0);
+                        }
                         this.request_repaint();
                         return LRESULT(0);
                     }
@@ -1841,6 +1830,7 @@ impl OverlayWindow {
 
                     this.is_drawing = true;
                     this.draw_start_pt = canvas_pt;
+                    this.was_shifted_during_draw = is_shift;
 
                     // ZoomIt Standard Modifiers:
                     // Dedicated tool vs Pen quick-draw modifiers
@@ -1925,67 +1915,35 @@ impl OverlayWindow {
                     this.stroke_start_time = None;
                     this.last_mouse_dwell_time = None;
 
-                    if this.snip.active {
-                        this.snip.active = false;
-                        let (l, t, r, b) = this.snip.rect();
-                        let w = (r - l).round() as u32;
-                        let h = (b - t).round() as u32;
-
-                        if w > 4
-                            && h > 4
-                            && let Some(composite) = this.get_composite_capture(false)
-                            && let Some(mut cropped) = composite.crop(
-                                l as i32 + this.screen_x,
-                                t as i32 + this.screen_y,
-                                w,
-                                h,
-                            )
-                        {
-                            if this.snip.shape == SnipShape::Ellipse {
-                                let cx = w as f32 / 2.0;
-                                let cy = h as f32 / 2.0;
-                                let rx = cx;
-                                let ry = cy;
-                                for py in 0..h {
-                                    for px in 0..w {
-                                        let dx = px as f32 - cx;
-                                        let dy = py as f32 - cy;
-                                        if (dx * dx) / (rx * rx) + (dy * dy) / (ry * ry) > 1.0 {
-                                            let idx = ((py * w + px) * 4 + 3) as usize;
-                                            if idx < cropped.pixels.len() {
-                                                cropped.pixels[idx] = 0;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if copy_bgra_to_clipboard(
-                                cropped.width,
-                                cropped.height,
-                                &cropped.pixels,
-                            ) {
-                                crate::snip_notify::show_snip_notification(
-                                    cropped.width,
-                                    cropped.height,
-                                    &cropped.pixels,
-                                );
-                                this.exit_overlay();
-                                return LRESULT(0);
-                            }
-                        }
-                        this.request_repaint();
-                        return LRESULT(0);
-                    }
-
                     if this.is_drawing {
                         this.is_drawing = false;
-                        if let Some(shape) = this.active_shape.take() {
+                        let was_shift = this.was_shifted_during_draw
+                            || (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                        this.was_shifted_during_draw = false;
+
+                        if let Some(mut shape) = this.active_shape.take() {
+                            let start_pt = this.draw_start_pt;
+                            if was_shift {
+                                match &mut shape {
+                                    Shape::Line { end, .. } | Shape::Arrow { end, .. } => {
+                                        *end = snap_to_angle(start_pt, *end);
+                                    }
+                                    Shape::Rectangle { end, .. }
+                                    | Shape::Ellipse { end, .. }
+                                    | Shape::Blur { end, .. } => {
+                                        *end = snap_to_square(start_pt, *end);
+                                    }
+                                    _ => {}
+                                }
+                            }
+
                             let should_keep = match &shape {
                                 Shape::Stroke { points, .. } => points.len() > 1,
                                 Shape::Line { start, end, .. } => start.distance(end) > 2.0,
                                 Shape::Arrow { start, end, .. } => start.distance(end) > 2.0,
                                 Shape::Rectangle { start, end, .. } => start.distance(end) > 2.0,
                                 Shape::Ellipse { start, end, .. } => start.distance(end) > 2.0,
+                                Shape::Blur { start, end, .. } => start.distance(end) > 2.0,
                                 _ => true,
                             };
                             if should_keep {
@@ -2008,12 +1966,6 @@ impl OverlayWindow {
                     if this.is_drawing {
                         this.is_drawing = false;
                         this.active_shape = None;
-                        this.request_repaint();
-                        return LRESULT(0);
-                    }
-                    // If snip in progress, cancel snip
-                    if this.snip.active {
-                        this.snip.active = false;
                         this.request_repaint();
                         return LRESULT(0);
                     }
@@ -2095,8 +2047,8 @@ impl OverlayWindow {
                         return LRESULT(0);
                     }
 
-                    // 2. Shift + Wheel: Adjusts brush stroke width in Draw / Snip mode
-                    if is_shift && (this.mode == AppMode::Draw || this.mode == AppMode::Snip) {
+                    // 2. Shift + Wheel: Adjusts brush stroke width in Draw mode
+                    if is_shift && this.mode == AppMode::Draw {
                         let new_width = (this.stroke_width + delta * 1.5).clamp(1.0, 40.0);
                         match this.current_tool {
                             DrawTool::Pen => this.pen_settings.stroke_width = new_width,
@@ -2110,6 +2062,7 @@ impl OverlayWindow {
                                 this.rounded_rect_settings.stroke_width = new_width
                             }
                             DrawTool::Ellipse => this.ellipse_settings.stroke_width = new_width,
+                            DrawTool::Blur => this.blur_settings.block_size = new_width,
                             _ => {}
                         }
                         this.stroke_width = new_width;
@@ -2118,7 +2071,11 @@ impl OverlayWindow {
                         let sh = this.screen_height as f32;
                         this.toolbar.update_layout(sw, sh);
                         let w_val = new_width.round() as u32;
-                        this.set_toast("🖌️", format!("Stroke Width {} px", w_val));
+                        if this.current_tool == DrawTool::Blur {
+                            this.set_toast("░", format!("Mosaic Block Size {} px", w_val));
+                        } else {
+                            this.set_toast("🖌️", format!("Stroke Width {} px", w_val));
+                        }
                         this.request_repaint();
                         return LRESULT(0);
                     }
@@ -2194,10 +2151,8 @@ impl OverlayWindow {
                         };
                         this.last_mouse_pos = current_screen_pt;
 
-                        if this.snip.active {
-                            this.snip.current = snap_to_square(this.snip.start, current_screen_pt);
-                            this.request_repaint();
-                        } else if this.is_drawing {
+                        if this.is_drawing {
+                            this.was_shifted_during_draw = true;
                             let canvas_pt = this.zoom.screen_to_canvas(current_screen_pt);
                             let start_pt = this.draw_start_pt;
                             match &mut this.active_shape {
@@ -2206,7 +2161,8 @@ impl OverlayWindow {
                                     this.request_repaint();
                                 }
                                 Some(Shape::Rectangle { end, .. })
-                                | Some(Shape::Ellipse { end, .. }) => {
+                                | Some(Shape::Ellipse { end, .. })
+                                | Some(Shape::Blur { end, .. }) => {
                                     *end = snap_to_square(start_pt, canvas_pt);
                                     this.request_repaint();
                                 }
@@ -2351,11 +2307,8 @@ impl OverlayWindow {
                             k if k == 'C' as i32 => {
                                 this.copy_screen_to_clipboard();
                             }
-                            k if k == 'S' as i32 && !is_shift => {
+                            k if k == 'S' as i32 => {
                                 this.save_snapshot();
-                            }
-                            k if k == 'S' as i32 && is_shift => {
-                                this.enter_snip_mode();
                             }
                             k if k == VK_TAB.0 as i32 => {
                                 this.cycle_next_monitor();
@@ -2375,9 +2328,6 @@ impl OverlayWindow {
                             } else if this.active_shape.is_some() {
                                 this.active_shape = None;
                                 this.is_drawing = false;
-                                this.request_repaint();
-                            } else if this.snip.active {
-                                this.snip.active = false;
                                 this.request_repaint();
                             } else {
                                 this.exit_overlay();
@@ -2421,20 +2371,6 @@ impl OverlayWindow {
                                     "Timer Expanded"
                                 };
                                 this.set_toast("⏱️", label);
-                                this.request_repaint();
-                                return LRESULT(0);
-                            } else if this.mode == AppMode::Snip || this.snip.active {
-                                this.snip.shape = if this.snip.shape == SnipShape::Rectangle {
-                                    SnipShape::Ellipse
-                                } else {
-                                    SnipShape::Rectangle
-                                };
-                                let label = if this.snip.shape == SnipShape::Ellipse {
-                                    "Circular Snip"
-                                } else {
-                                    "Rectangular Snip"
-                                };
-                                this.set_toast("✂️", label);
                                 this.request_repaint();
                                 return LRESULT(0);
                             }
@@ -2738,17 +2674,17 @@ impl OverlayWindow {
                             this.set_toast("✏️", "Pen");
                             this.request_repaint();
                         }
-                        k if k == 'S' as i32 => {
-                            this.current_tool = DrawTool::Snip;
-                            this.toolbar.active_tool = Some(DrawTool::Snip);
+                        k if k == 'X' as i32 && is_shift => {
+                            this.current_tool = DrawTool::Blur;
+                            this.toolbar.active_tool = Some(DrawTool::Blur);
                             this.sync_tool_to_toolbar();
                             let sw = this.screen_width as f32;
                             let sh = this.screen_height as f32;
                             this.toolbar.update_layout(sw, sh);
-                            this.set_toast("✂️", "Snip — drag to copy");
+                            this.set_toast("░", "Redact / Blur (drag to hide)");
                             this.request_repaint();
                         }
-                        k if k == 'X' as i32 => {
+                        k if k == 'X' as i32 && !is_shift => {
                             this.current_tool = DrawTool::Eraser;
                             this.toolbar.active_tool = Some(DrawTool::Eraser);
                             this.sync_tool_to_toolbar();
@@ -2780,6 +2716,7 @@ impl OverlayWindow {
                                 }
                                 DrawTool::Ellipse => this.ellipse_settings.stroke_width = w,
                                 DrawTool::StepBadge => this.badge_settings.stroke_width = w,
+                                DrawTool::Blur => this.blur_settings.block_size = w,
                                 _ => {}
                             }
                             this.stroke_width = w;
@@ -2829,6 +2766,7 @@ impl OverlayWindow {
                                         this.rounded_rect_settings.stroke_width = new_w
                                     }
                                     DrawTool::Ellipse => this.ellipse_settings.stroke_width = new_w,
+                                    DrawTool::Blur => this.blur_settings.block_size = new_w,
                                     _ => {}
                                 }
                                 this.stroke_width = new_w;
@@ -2877,6 +2815,7 @@ impl OverlayWindow {
                                         this.rounded_rect_settings.stroke_width = new_w
                                     }
                                     DrawTool::Ellipse => this.ellipse_settings.stroke_width = new_w,
+                                    DrawTool::Blur => this.blur_settings.block_size = new_w,
                                     _ => {}
                                 }
                                 this.stroke_width = new_w;
@@ -2977,22 +2916,7 @@ impl OverlayWindow {
                         };
                         this.last_mouse_pos = current_screen_pt;
 
-                        if this.snip.active {
-                            this.snip.current = current_screen_pt;
-                            this.request_repaint();
-                        } else if this.is_drawing {
-                            let canvas_pt = this.zoom.screen_to_canvas(current_screen_pt);
-                            match &mut this.active_shape {
-                                Some(Shape::Line { end, .. })
-                                | Some(Shape::Arrow { end, .. })
-                                | Some(Shape::Rectangle { end, .. })
-                                | Some(Shape::Ellipse { end, .. }) => {
-                                    *end = canvas_pt;
-                                    this.request_repaint();
-                                }
-                                _ => {}
-                            }
-                        }
+                        this.request_repaint();
                         return LRESULT(0);
                     }
                     LRESULT(0)

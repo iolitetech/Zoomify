@@ -1,6 +1,5 @@
 mod shapes;
 mod ui_hud;
-mod ui_snip;
 mod ui_timer;
 mod ui_toolbar;
 
@@ -36,9 +35,9 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::capture::ScreenCapture;
 use crate::types::{
-    AppMode, CanvasBackground, ColorPreset, DrawTool, FluentToolbarState, LaserTrailPoint, Point2D,
-    Shape, SnipSelection, SpotlightState, StrokePattern, TextEditorState, TextFontFamily,
-    TimerWidgetState, ToastNotification, ZoomState,
+    AppMode, CanvasBackground, ColorPreset, DrawTool, FluentToolbarState, LaserRipple,
+    LaserTrailPoint, Point2D, Shape, SpotlightState, StrokePattern, TextEditorState,
+    TextFontFamily, TimerWidgetState, ToastNotification, ZoomState,
 };
 
 #[inline]
@@ -399,7 +398,6 @@ impl D2DRenderer {
         shapes: &[Shape],
         active_shape: Option<&Shape>,
         text_input: Option<&TextEditorState>,
-        snip: Option<&SnipSelection>,
         current_tool: DrawTool,
         current_color: ColorPreset,
         current_stroke_width: f32,
@@ -410,6 +408,7 @@ impl D2DRenderer {
         timer_widget: &TimerWidgetState,
         toolbar: &FluentToolbarState,
         laser_trail: &[LaserTrailPoint],
+        laser_ripples: &[LaserRipple],
         laser_pos: Option<Point2D>,
         eraser_pos: Option<Point2D>,
         snap_guides: bool,
@@ -494,11 +493,11 @@ impl D2DRenderer {
 
             // ── Shapes Layer (Zoomed with canvas) ──
             for shape in shapes {
-                self.render_single_shape(rt, shape);
+                self.render_single_shape(rt, shape, bg_bitmap);
             }
 
             if let Some(shape) = active_shape {
-                self.render_single_shape(rt, shape);
+                self.render_single_shape(rt, shape, bg_bitmap);
                 if snap_guides {
                     self.render_drawing_snap_guides(rt, shape);
                 }
@@ -531,11 +530,11 @@ impl D2DRenderer {
             }
 
             // ── Laser Pointer (Zoomed with canvas) ──
-            if !laser_trail.is_empty() || laser_pos.is_some() {
-                self.render_laser_pointer(rt, laser_trail, laser_pos, current_color);
+            if !laser_trail.is_empty() || !laser_ripples.is_empty() || laser_pos.is_some() {
+                self.render_laser_pointer(rt, laser_trail, laser_ripples, laser_pos, current_color);
             }
 
-            // ── Screen Space Layer (Snip Overlay + Timer + Eraser + HUD + Toast + Modal) ──
+            // ── Screen Space Layer (Timer + Eraser + HUD + Toast + Modal) ──
             rt.SetTransform(&identity);
 
             // ── Eraser Cursor Indicator ──
@@ -563,12 +562,6 @@ impl D2DRenderer {
                     };
                     rt.FillRectangle(&full_rect, &dim_brush);
                 }
-            }
-
-            if let Some(snip_sel) = snip
-                && snip_sel.active
-            {
-                self.render_snip_overlay(rt, width, height, snip_sel);
             }
 
             if let Some((mins, secs, progress, paused, is_overtime)) = timer_info {
@@ -766,7 +759,7 @@ impl D2DRenderer {
 
                         dc_rt.SetTransform(&canvas_matrix);
 
-                        if bg_type == CanvasBackground::Transparent
+                        let bg_bmp = if bg_type == CanvasBackground::Transparent
                             && let Some(pixels) = bg_pixels
                         {
                             let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
@@ -774,41 +767,47 @@ impl D2DRenderer {
                                 height,
                             };
                             let props = windows::Win32::Graphics::Direct2D::D2D1_BITMAP_PROPERTIES {
-                                        pixelFormat: D2D1_PIXEL_FORMAT {
-                                            format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                                            alphaMode: windows::Win32::Graphics::Direct2D::Common::D2D1_ALPHA_MODE_IGNORE,
-                                        },
-                                        dpiX: 96.0,
-                                        dpiY: 96.0,
-                                    };
-                            if let Ok(bmp) = dc_rt.CreateBitmap(
-                                size,
-                                Some(pixels.as_ptr() as *const std::ffi::c_void),
-                                width * 4,
-                                &props,
-                            ) {
-                                let dst_rect = D2D_RECT_F {
-                                    left: 0.0,
-                                    top: 0.0,
-                                    right: width as f32,
-                                    bottom: height as f32,
-                                };
-                                dc_rt.DrawBitmap(
-                                    &bmp,
-                                    Some(&dst_rect),
-                                    1.0,
-                                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                                    None,
-                                );
-                            }
+                                pixelFormat: D2D1_PIXEL_FORMAT {
+                                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                                    alphaMode: windows::Win32::Graphics::Direct2D::Common::D2D1_ALPHA_MODE_IGNORE,
+                                },
+                                dpiX: 96.0,
+                                dpiY: 96.0,
+                            };
+                            dc_rt
+                                .CreateBitmap(
+                                    size,
+                                    Some(pixels.as_ptr() as *const std::ffi::c_void),
+                                    width * 4,
+                                    &props,
+                                )
+                                .ok()
+                        } else {
+                            None
+                        };
+
+                        if let Some(bmp) = &bg_bmp {
+                            let dst_rect = D2D_RECT_F {
+                                left: 0.0,
+                                top: 0.0,
+                                right: width as f32,
+                                bottom: height as f32,
+                            };
+                            dc_rt.DrawBitmap(
+                                bmp,
+                                Some(&dst_rect),
+                                1.0,
+                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                                None,
+                            );
                         }
 
                         for shape in shapes {
-                            self.render_single_shape(&dc_rt, shape);
+                            self.render_single_shape(&dc_rt, shape, bg_bmp.as_ref());
                         }
 
                         if let Some(shape) = active_shape {
-                            self.render_single_shape(&dc_rt, shape);
+                            self.render_single_shape(&dc_rt, shape, bg_bmp.as_ref());
                         }
 
                         if let Some(editor) = text_input {

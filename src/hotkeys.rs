@@ -2,7 +2,7 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, UnregisterHotKey, VK_DOWN, VK_OEM_MINUS,
+    MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_DOWN, VK_OEM_MINUS,
     VK_OEM_PLUS, VK_UP,
 };
 
@@ -11,7 +11,6 @@ pub const HOTKEY_DRAW: i32 = 102; // Ctrl+2
 pub const HOTKEY_SPOTLIGHT: i32 = 103; // Ctrl+3
 pub const HOTKEY_LIVE_ZOOM: i32 = 104; // Ctrl+4
 pub const HOTKEY_TIMER: i32 = 105; // Ctrl+5
-pub const HOTKEY_SNIP: i32 = 106; // Ctrl+Shift+S
 pub const HOTKEY_LIVE_ZOOM_IN: i32 = 107; // Ctrl+Up
 pub const HOTKEY_LIVE_ZOOM_OUT: i32 = 108; // Ctrl+Down
 pub const HOTKEY_LIVE_ZOOM_IN_PLUS: i32 = 109; // Ctrl+= / Ctrl++
@@ -33,7 +32,6 @@ impl HotkeyManager {
     pub fn register_all(&mut self) {
         unsafe {
             let ctrl_norepeat = MOD_CONTROL | MOD_NOREPEAT;
-            let ctrl_shift_norepeat = MOD_CONTROL | MOD_SHIFT | MOD_NOREPEAT;
 
             // Ctrl+1: Static Zoom
             if RegisterHotKey(
@@ -67,18 +65,6 @@ impl HotkeyManager {
             // Ctrl+5: Timer
             if RegisterHotKey(Some(self.hwnd), HOTKEY_TIMER, ctrl_norepeat, '5' as u32).is_ok() {
                 self.registered.push(HOTKEY_TIMER);
-            }
-
-            // Ctrl+Shift+S: Snip
-            if RegisterHotKey(
-                Some(self.hwnd),
-                HOTKEY_SNIP,
-                ctrl_shift_norepeat,
-                'S' as u32,
-            )
-            .is_ok()
-            {
-                self.registered.push(HOTKEY_SNIP);
             }
 
             // Ctrl+Up: Live Zoom In
