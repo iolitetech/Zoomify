@@ -23,6 +23,7 @@ pub const ID_TRAY_STATIC_ZOOM: usize = 2001;
 pub const ID_TRAY_DRAW: usize = 2002;
 pub const ID_TRAY_SPOTLIGHT: usize = 2003;
 pub const ID_TRAY_LIVE_ZOOM: usize = 2004;
+pub const ID_TRAY_LOUPE: usize = 2005;
 pub const ID_TRAY_TIMER: usize = 2006;
 pub const ID_TRAY_CHEATSHEET: usize = 2007;
 pub const ID_TRAY_ABOUT: usize = 2008;
@@ -135,6 +136,12 @@ impl TrayIcon {
                 MF_STRING,
                 ID_TRAY_TIMER,
                 w!("Countdown Timer\tCtrl+5"),
+            );
+            let _ = AppendMenuW(
+                menu,
+                MF_STRING,
+                ID_TRAY_LOUPE,
+                w!("Magnifier Loupe\tCtrl+6"),
             );
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
 

@@ -127,7 +127,19 @@ unsafe extern "system" fn tray_wnd_proc(
                     }
                     HOTKEY_TIMER => {
                         ensure_live_zoom_stopped(&mut overlay);
-                        overlay.enter_timer_mode(0);
+                        if overlay.mode == AppMode::Timer {
+                            overlay.exit_overlay();
+                        } else {
+                            overlay.enter_timer_mode(0);
+                        }
+                    }
+                    HOTKEY_LOUPE => {
+                        ensure_live_zoom_stopped(&mut overlay);
+                        if overlay.mode == AppMode::Loupe {
+                            overlay.exit_overlay();
+                        } else {
+                            overlay.enter_loupe_mode();
+                        }
                     }
                     _ => {}
                 }
@@ -203,6 +215,11 @@ unsafe extern "system" fn tray_wnd_proc(
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_timer_mode(0);
                     }
+                    ID_TRAY_LOUPE => {
+                        let mut overlay = ctx.overlay.borrow_mut();
+                        ensure_live_zoom_stopped(&mut overlay);
+                        overlay.enter_loupe_mode();
+                    }
                     ID_TRAY_LASER => {
                         let mut overlay = ctx.overlay.borrow_mut();
                         ensure_live_zoom_stopped(&mut overlay);
@@ -277,6 +294,7 @@ unsafe extern "system" fn tray_wnd_proc(
                             • Ctrl+3 / F3: Spotlight Mode (Ctrl+Wheel to resize, Click / Space to pin)\n\
                             • Ctrl+4: Live Zoom (Ctrl+Wheel or Ctrl+Up/Down to zoom)\n\
                             • Ctrl+5: Presentation Countdown Timer\n\
+                            • Ctrl+6: Magnifier Loupe Lens (Tab=Shape, Space=Pin, R=Reticle, Wheel=Zoom)\n\
                             • F1: Shortcut Cheat Sheet Overlay | F2: Toggle HUD\n\
                             • Mouse Modifiers: Shift=Line, Ctrl=Rect, Tab=Ellipse, Shift+Ctrl=Arrow\n\
                             • Colors: r, g, b, y, o, c | Shift+P: Pink | Shift+W: White | Shift+B: Black");
@@ -330,7 +348,7 @@ fn main() -> Result<()> {
             let _ = MessageBoxW(
                 None,
                 w!(
-                    "Zoomify is already running in your System Tray!\n\nHotkeys ready:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+5: Timer"
+                    "Zoomify is already running in your System Tray!\n\nHotkeys ready:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+5: Timer\n• Ctrl+6: Loupe"
                 ),
                 w!("Zoomify Running"),
                 MB_OK | MB_ICONINFORMATION | MB_SYSTEMMODAL,
@@ -375,7 +393,7 @@ fn main() -> Result<()> {
         // Show non-intrusive Windows tray notification balloon
         tray.show_balloon(
             "Zoomify is Ready!",
-            "Hotkeys:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+5: Timer",
+            "Hotkeys:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+5: Timer\n• Ctrl+6: Loupe",
         );
 
         let app_ctx = Box::new(AppContext {

@@ -204,6 +204,7 @@ impl D2DRenderer {
                     FluentAction::ModeDraw => mode == AppMode::Draw,
                     FluentAction::ModeSpotlight => spotlight.active,
                     FluentAction::ModeTimer => mode == AppMode::Timer,
+                    FluentAction::ModeLoupe => mode == AppMode::Loupe,
                     FluentAction::Tool(t) => tool == t && mode == AppMode::Draw,
                     FluentAction::Color(c) => color == c,
                     _ => false,
@@ -309,6 +310,7 @@ impl D2DRenderer {
                             FluentAction::ModeDraw => ("\u{E70F}", "Draw (Ctrl+2)"),
                             FluentAction::ModeSpotlight => ("\u{E706}", "Spotlight (F3)"),
                             FluentAction::ModeTimer => ("\u{E916}", "Timer (Ctrl+5)"),
+                            FluentAction::ModeLoupe => ("\u{E1A3}", "Magnifier Loupe (Ctrl+6)"),
                             FluentAction::CycleDisplay => ("\u{E7F4}", "Switch Display (Ctrl+Tab)"),
                             FluentAction::Tool(DrawTool::Pen) => ("\u{ED63}", "Pen (P)"),
                             FluentAction::Tool(DrawTool::LaserPointer) => {

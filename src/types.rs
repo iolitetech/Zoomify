@@ -11,6 +11,7 @@ pub enum AppMode {
     Spotlight,
     LiveZoom,
     Timer,
+    Loupe,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -458,6 +459,40 @@ impl Default for SpotlightState {
 }
 
 #[derive(Debug, Clone)]
+pub struct LoupeState {
+    pub active: bool,
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+    pub magnification: f32,
+    pub pinned: bool,
+    pub is_rect: bool,
+    pub show_reticle: bool,
+}
+
+impl Default for LoupeState {
+    fn default() -> Self {
+        Self {
+            active: false,
+            x: 0.0,
+            y: 0.0,
+            radius: 160.0,
+            magnification: 2.5,
+            pinned: false,
+            is_rect: false,
+            show_reticle: true,
+        }
+    }
+}
+
+impl LoupeState {
+    pub fn clamp_values(&mut self) {
+        self.radius = self.radius.clamp(60.0, 500.0);
+        self.magnification = self.magnification.clamp(1.25, 12.0);
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ZoomState {
     pub level: f32,
     pub target_level: f32,
@@ -889,6 +924,7 @@ pub enum FluentAction {
     ModeDraw,
     ModeSpotlight,
     ModeTimer,
+    ModeLoupe,
     CycleDisplay,
     Tool(DrawTool),
     Color(ColorPreset),
@@ -1339,16 +1375,17 @@ pub fn compute_toolbar_layout(
     // Define items and their widths:
     let mut item_specs: Vec<(FluentAction, f32)> = Vec::with_capacity(32);
 
-    // Modes (4 items, or 5 items if multi-monitor)
+    // Modes (5 items, or 6 items if multi-monitor)
     item_specs.push((FluentAction::ModeZoom, 34.0));
     item_specs.push((FluentAction::ModeDraw, 34.0));
     item_specs.push((FluentAction::ModeSpotlight, 34.0));
     item_specs.push((FluentAction::ModeTimer, 34.0));
+    item_specs.push((FluentAction::ModeLoupe, 34.0));
     if monitor_count > 1 {
         item_specs.push((FluentAction::CycleDisplay, 34.0));
     }
 
-    let mode_end_idx = if monitor_count > 1 { 4 } else { 3 };
+    let mode_end_idx = if monitor_count > 1 { 5 } else { 4 };
 
     // Tools (11 items)
     let tools = [
@@ -2033,5 +2070,47 @@ mod tests {
         assert_eq!(ripple.center.x, 250.0);
         assert_eq!(ripple.center.y, 350.0);
         assert_eq!(ripple.color, ColorPreset::Red);
+    }
+
+    #[test]
+    fn test_loupe_state_defaults_and_clamping() {
+        let mut loupe = LoupeState::default();
+        assert!(!loupe.active);
+        assert_eq!(loupe.radius, 160.0);
+        assert_eq!(loupe.magnification, 2.5);
+        assert!(!loupe.pinned);
+        assert!(!loupe.is_rect);
+        assert!(loupe.show_reticle);
+
+        // Test clamping
+        loupe.radius = 10.0;
+        loupe.magnification = 0.5;
+        loupe.clamp_values();
+        assert_eq!(loupe.radius, 60.0);
+        assert_eq!(loupe.magnification, 1.25);
+
+        loupe.radius = 1000.0;
+        loupe.magnification = 50.0;
+        loupe.clamp_values();
+        assert_eq!(loupe.radius, 500.0);
+        assert_eq!(loupe.magnification, 12.0);
+    }
+
+    #[test]
+    fn test_fluent_toolbar_loupe_action() {
+        let screen_w = 1920.0;
+        let screen_h = 1080.0;
+        let mut tb = FluentToolbarState::default();
+        tb.update_layout(screen_w, screen_h);
+
+        let loupe_item = tb
+            .items
+            .iter()
+            .find(|it| it.action == FluentAction::ModeLoupe);
+        assert!(loupe_item.is_some());
+        let item = loupe_item.unwrap();
+        let mid_x = (item.rect.left + item.rect.right) / 2.0;
+        let mid_y = (item.rect.top + item.rect.bottom) / 2.0;
+        assert_eq!(tb.hit_test(mid_x, mid_y), Some(FluentAction::ModeLoupe));
     }
 }

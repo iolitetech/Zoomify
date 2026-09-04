@@ -194,6 +194,7 @@ impl D2DRenderer {
                 AppMode::Draw => "✏️ Draw Mode",
                 AppMode::Spotlight => "🔦 Spotlight",
                 AppMode::Timer => "⏱️ Timer",
+                AppMode::Loupe => "🔍 Loupe Magnifier",
             };
 
             let spot_info = if spotlight.active {
@@ -558,6 +559,7 @@ impl D2DRenderer {
                     ("Ctrl+3", "Spotlight Mode (Wheel: resize)"),
                     ("Ctrl+4", "Live Zoom (Hardware magnifier)"),
                     ("Ctrl+5", "Presentation Countdown Timer"),
+                    ("Ctrl+6", "Magnifier Loupe Lens (Wheel: zoom | Space: pin)"),
                     ("", ""),
                     ("DRAW TOOLS & KEYS", ""),
                     ("P", "Pen (freehand with Bezier smoothing)"),

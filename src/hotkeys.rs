@@ -11,6 +11,7 @@ pub const HOTKEY_DRAW: i32 = 102; // Ctrl+2
 pub const HOTKEY_SPOTLIGHT: i32 = 103; // Ctrl+3
 pub const HOTKEY_LIVE_ZOOM: i32 = 104; // Ctrl+4
 pub const HOTKEY_TIMER: i32 = 105; // Ctrl+5
+pub const HOTKEY_LOUPE: i32 = 106; // Ctrl+6
 pub const HOTKEY_LIVE_ZOOM_IN: i32 = 107; // Ctrl+Up
 pub const HOTKEY_LIVE_ZOOM_OUT: i32 = 108; // Ctrl+Down
 pub const HOTKEY_LIVE_ZOOM_IN_PLUS: i32 = 109; // Ctrl+= / Ctrl++
@@ -65,6 +66,11 @@ impl HotkeyManager {
             // Ctrl+5: Timer
             if RegisterHotKey(Some(self.hwnd), HOTKEY_TIMER, ctrl_norepeat, '5' as u32).is_ok() {
                 self.registered.push(HOTKEY_TIMER);
+            }
+
+            // Ctrl+6: Loupe Magnifier
+            if RegisterHotKey(Some(self.hwnd), HOTKEY_LOUPE, ctrl_norepeat, '6' as u32).is_ok() {
+                self.registered.push(HOTKEY_LOUPE);
             }
 
             // Ctrl+Up: Live Zoom In

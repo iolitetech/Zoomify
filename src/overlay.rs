@@ -35,9 +35,10 @@ use crate::shapes::{
 use crate::types::{
     AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, BlurToolSettings,
     CanvasBackground, ColorPreset, DrawTool, FillMode, FluentAction, FluentToolbarState,
-    HistoryAction, LaserRipple, LaserTrailPoint, Point2D, Shape, ShapeToolSettings, SpotlightState,
-    StepBadgeToolSettings, StrokePattern, StrokeToolSettings, TextCardStyle, TextEditorState,
-    TextFontFamily, TextToolSettings, TimerAction, TimerWidgetState, ToastNotification, ZoomState,
+    HistoryAction, LaserRipple, LaserTrailPoint, LoupeState, Point2D, Shape, ShapeToolSettings,
+    SpotlightState, StepBadgeToolSettings, StrokePattern, StrokeToolSettings, TextCardStyle,
+    TextEditorState, TextFontFamily, TextToolSettings, TimerAction, TimerWidgetState,
+    ToastNotification, ZoomState,
 };
 
 const OVERLAY_CLASS_NAME: PCWSTR = w!("ZoomifyFullscreenOverlay");
@@ -56,6 +57,7 @@ pub struct OverlayWindow {
     pub background_type: CanvasBackground,
     pub zoom: ZoomState,
     pub spotlight: SpotlightState,
+    pub loupe: LoupeState,
     pub was_shifted_during_draw: bool,
     pub shapes: Vec<Shape>,
     pub undo_history: Vec<HistoryAction>,
@@ -224,6 +226,7 @@ impl OverlayWindow {
                 background_type: CanvasBackground::Transparent,
                 zoom: ZoomState::default(),
                 spotlight,
+                loupe: LoupeState::default(),
                 was_shifted_during_draw: false,
                 shapes: Vec::new(),
                 undo_history: Vec::new(),
@@ -334,6 +337,14 @@ impl OverlayWindow {
     }
 
     pub fn enter_live_zoom(&mut self) {
+        self.loupe.active = false;
+        self.loupe.pinned = false;
+        self.spotlight.active = false;
+        self.spotlight.pinned = false;
+        self.zoom = ZoomState::default();
+        self.is_drawing = false;
+        self.active_shape = None;
+        self.commit_text_editor();
         self.target_monitor_under_cursor();
         self.toolbar.active_tool = None;
         self.mode = AppMode::LiveZoom;
@@ -349,7 +360,9 @@ impl OverlayWindow {
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         self.target_monitor_under_cursor();
-        self.capture_current_screen();
+        if self.background_bitmap.is_none() {
+            self.capture_current_screen();
+        }
         let mut cursor_screen = Point2D::new(
             self.screen_width as f32 / 2.0,
             self.screen_height as f32 / 2.0,
@@ -368,9 +381,20 @@ impl OverlayWindow {
             self.screen_height as f32,
         );
         self.mode = AppMode::StaticZoom;
+        self.loupe.active = false;
+        self.loupe.pinned = false;
+        self.spotlight.active = false;
+        self.spotlight.pinned = false;
+        self.is_drawing = false;
+        self.active_shape = None;
+        self.commit_text_editor();
         self.toolbar.active_tool = None;
+        let sw = self.screen_width as f32;
+        let sh = self.screen_height as f32;
+        self.toolbar.update_layout(sw, sh);
         self.show_window();
-        self.set_toast("🔎", "Static Zoom (F1: Help)");
+        self.set_toast("🔎", "Static Zoom (Wheel: Zoom | Pan)");
+        self.request_repaint();
     }
 
     pub fn sync_tool_to_toolbar(&mut self) {
@@ -457,33 +481,75 @@ impl OverlayWindow {
         }
     }
 
+    pub fn ensure_draw_mode(&mut self) {
+        if self.mode != AppMode::Draw && self.mode != AppMode::StaticZoom {
+            self.mode = AppMode::Draw;
+            self.loupe.active = false;
+            self.loupe.pinned = false;
+            self.spotlight.active = false;
+            self.spotlight.pinned = false;
+            self.zoom = ZoomState::default();
+            self.is_drawing = false;
+            self.active_shape = None;
+            self.commit_text_editor();
+            self.toolbar.active_tool = Some(self.current_tool);
+            let sw = self.screen_width as f32;
+            let sh = self.screen_height as f32;
+            self.toolbar.update_layout(sw, sh);
+        }
+    }
+
     pub fn enter_draw_mode(&mut self) {
         if self.live_zoom.is_active() || self.mode == AppMode::LiveZoom {
             self.live_zoom.stop();
             std::thread::sleep(std::time::Duration::from_millis(25));
             self.zoom = ZoomState::default();
-        } else if self.mode == AppMode::Idle || self.background_bitmap.is_none() {
+        } else if self.mode == AppMode::Idle
+            || self.mode == AppMode::Loupe
+            || self.mode == AppMode::Timer
+            || self.mode == AppMode::Spotlight
+            || self.background_bitmap.is_none()
+        {
             self.zoom = ZoomState::default();
         }
         self.target_monitor_under_cursor();
-        self.capture_current_screen();
+        if self.background_bitmap.is_none() {
+            self.capture_current_screen();
+        }
         self.mode = AppMode::Draw;
-        self.toolbar.active_tool = None;
+        self.loupe.active = false;
+        self.loupe.pinned = false;
+        self.spotlight.active = false;
+        self.spotlight.pinned = false;
+        self.is_drawing = false;
+        self.active_shape = None;
+        self.commit_text_editor();
+        self.toolbar.active_tool = Some(self.current_tool);
+        let sw = self.screen_width as f32;
+        let sh = self.screen_height as f32;
+        self.toolbar.update_layout(sw, sh);
         self.show_window();
-        self.set_toast("✏️", "Draw Mode (F1: Help)");
+        self.set_toast("✏️", "Draw Mode Active");
+        self.request_repaint();
     }
 
     pub fn enter_spotlight_mode(&mut self) {
         if self.live_zoom.is_active() || self.mode == AppMode::LiveZoom {
             self.live_zoom.stop();
             std::thread::sleep(std::time::Duration::from_millis(25));
-            self.zoom = ZoomState::default();
-        } else if self.mode == AppMode::Idle || self.background_bitmap.is_none() {
-            self.zoom = ZoomState::default();
         }
+        self.zoom = ZoomState::default();
+        self.background_type = CanvasBackground::Transparent;
         self.target_monitor_under_cursor();
-        self.capture_current_screen();
+        if self.background_bitmap.is_none() {
+            self.capture_current_screen();
+        }
         self.mode = AppMode::Spotlight;
+        self.loupe.active = false;
+        self.loupe.pinned = false;
+        self.is_drawing = false;
+        self.active_shape = None;
+        self.commit_text_editor();
         self.toolbar.active_tool = None;
         self.spotlight.active = true;
         self.spotlight.pinned = false;
@@ -497,17 +563,33 @@ impl OverlayWindow {
                 self.spotlight.y = screen_pt.y;
             }
         }
+        let sw = self.screen_width as f32;
+        let sh = self.screen_height as f32;
+        self.toolbar.update_layout(sw, sh);
         self.show_window();
         self.set_toast("🔦", "Spotlight Active (Ctrl+Wheel: Resize | Space: Pin)");
+        self.request_repaint();
     }
 
     pub fn enter_timer_mode(&mut self, minutes: u32) {
-        if self.live_zoom.is_active() {
+        if self.live_zoom.is_active() || self.mode == AppMode::LiveZoom {
             self.live_zoom.stop();
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
+        self.zoom = ZoomState::default();
+        self.background_type = CanvasBackground::Transparent;
         self.target_monitor_under_cursor();
-        self.capture_current_screen();
+        if self.background_bitmap.is_none() {
+            self.capture_current_screen();
+        }
         self.mode = AppMode::Timer;
+        self.loupe.active = false;
+        self.loupe.pinned = false;
+        self.spotlight.active = false;
+        self.spotlight.pinned = false;
+        self.is_drawing = false;
+        self.active_shape = None;
+        self.commit_text_editor();
         self.toolbar.active_tool = None;
         let mins = if minutes > 0 {
             minutes
@@ -519,6 +601,9 @@ impl OverlayWindow {
         self.timer_paused = false;
         self.timer_alarm_sounded = false;
         self.timer_last_tick = Instant::now();
+        let sw = self.screen_width as f32;
+        let sh = self.screen_height as f32;
+        self.toolbar.update_layout(sw, sh);
         self.show_window();
         self.set_toast(
             "⏱️",
@@ -527,11 +612,14 @@ impl OverlayWindow {
                 mins
             ),
         );
+        self.request_repaint();
     }
 
     pub fn toggle_spotlight(&mut self) {
         self.spotlight.active = !self.spotlight.active;
         if self.spotlight.active {
+            self.loupe.active = false;
+            self.loupe.pinned = false;
             unsafe {
                 let mut pt = POINT::default();
                 if GetCursorPos(&mut pt).is_ok() {
@@ -548,34 +636,78 @@ impl OverlayWindow {
         self.request_repaint();
     }
 
+    pub fn enter_loupe_mode(&mut self) {
+        if self.live_zoom.is_active() || self.mode == AppMode::LiveZoom {
+            self.live_zoom.stop();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        self.zoom = ZoomState::default();
+        self.background_type = CanvasBackground::Transparent;
+        self.target_monitor_under_cursor();
+        if self.background_bitmap.is_none() {
+            self.capture_current_screen();
+        }
+        self.mode = AppMode::Loupe;
+        self.loupe.active = true;
+        self.loupe.pinned = false;
+        self.spotlight.active = false;
+        self.spotlight.pinned = false;
+        self.is_drawing = false;
+        self.active_shape = None;
+        self.commit_text_editor();
+        self.toolbar.active_tool = None;
+
+        let mut pt = POINT::default();
+        let (cx, cy) = if unsafe { GetCursorPos(&mut pt).is_ok() } {
+            ((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32)
+        } else {
+            (
+                self.screen_width as f32 / 2.0,
+                self.screen_height as f32 / 2.0,
+            )
+        };
+        self.loupe.x = cx;
+        self.loupe.y = cy;
+
+        let sw = self.screen_width as f32;
+        let sh = self.screen_height as f32;
+        self.toolbar.update_layout(sw, sh);
+        self.show_window();
+        self.set_toast(
+            "🔍",
+            format!(
+                "Loupe {:.1}x (Wheel: Zoom | Shift+Wheel: Size | Space: Pin)",
+                self.loupe.magnification
+            ),
+        );
+        self.request_repaint();
+    }
+
     pub fn save_config(&self) {
-        let existing = crate::config::AppConfig::load();
-        let cfg = crate::config::AppConfig {
-            default_zoom_level: 2.0,
-            spotlight_radius: self.spotlight.radius,
-            default_stroke_width: self.stroke_width,
-            default_color: self.current_color.name().to_string(),
-            timer_duration_mins: (self.timer_seconds / 60).max(1),
-            toolbar_collapsed: self.toolbar.collapsed,
-            toolbar_custom_position: self.toolbar.custom_position.map(|p| (p.x, p.y)),
-            monitor_target: existing.monitor_target,
-            allow_monitor_cycling: existing.allow_monitor_cycling,
-            default_fill_mode: match self.fill_mode {
-                FillMode::Tinted => "Tinted".to_string(),
-                FillMode::Solid => "Solid".to_string(),
-                FillMode::None => "None".to_string(),
-            },
-            default_stroke_pattern: match self.stroke_pattern {
-                StrokePattern::Dashed => "Dashed".to_string(),
-                StrokePattern::Dotted => "Dotted".to_string(),
-                StrokePattern::Solid => "Solid".to_string(),
-            },
-            default_badge_size: match self.badge_size {
-                BadgeSize::Small => "Small".to_string(),
-                BadgeSize::Large => "Large".to_string(),
-                BadgeSize::ExtraLarge => "ExtraLarge".to_string(),
-                BadgeSize::Medium => "Medium".to_string(),
-            },
+        let mut cfg = crate::config::AppConfig::load();
+        cfg.default_stroke_width = self.stroke_width;
+        cfg.spotlight_radius = self.spotlight.radius;
+        cfg.timer_duration_mins = (self.timer_seconds / 60).max(1);
+        cfg.toolbar_collapsed = self.toolbar.collapsed;
+        if let Some(pos) = self.toolbar.custom_position {
+            cfg.toolbar_custom_position = Some((pos.x, pos.y));
+        }
+        cfg.default_color = self.current_color.name().to_string();
+        cfg.default_fill_mode = match self.fill_mode {
+            FillMode::None => "None".to_string(),
+            FillMode::Tinted => "Tinted".to_string(),
+            FillMode::Solid => "Solid".to_string(),
+        };
+        cfg.default_stroke_pattern = match self.stroke_pattern {
+            StrokePattern::Dashed => "Dashed".to_string(),
+            StrokePattern::Dotted => "Dotted".to_string(),
+            StrokePattern::Solid => "Solid".to_string(),
+        };
+        cfg.default_badge_size = match self.badge_size {
+            BadgeSize::Small => "Small".to_string(),
+            BadgeSize::Large => "Large".to_string(),
+            BadgeSize::ExtraLarge => "ExtraLarge".to_string(),
+            BadgeSize::Medium => "Medium".to_string(),
         };
         cfg.save();
     }
@@ -587,6 +719,9 @@ impl OverlayWindow {
         }
         self.mode = AppMode::Idle;
         self.spotlight.active = false;
+        self.spotlight.pinned = false;
+        self.loupe.active = false;
+        self.loupe.pinned = false;
         self.is_drawing = false;
         self.active_shape = None;
         self.text_editor = None;
@@ -594,6 +729,15 @@ impl OverlayWindow {
         self.background_bitmap = None;
         self.background_capture = None;
         self.zoom = ZoomState::default();
+        self.shapes.clear();
+        self.undo_history.clear();
+        self.redo_history.clear();
+        self.background_type = CanvasBackground::Transparent;
+        self.laser_trail.clear();
+        self.laser_ripples.clear();
+        self.laser_pos = None;
+        self.eraser_pos = None;
+        self.toolbar.active_tool = None;
         self.hide_window();
     }
 
@@ -669,6 +813,7 @@ impl OverlayWindow {
             || self.mode == AppMode::Draw
             || self.mode == AppMode::Spotlight
             || self.mode == AppMode::Timer
+            || self.mode == AppMode::Loupe
         {
             self.capture_current_screen();
         }
@@ -996,39 +1141,33 @@ impl OverlayWindow {
     pub fn handle_fluent_action(&mut self, action: FluentAction) -> LRESULT {
         match action {
             FluentAction::ModeZoom => {
-                self.mode = AppMode::StaticZoom;
-                self.toolbar.active_tool = None;
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
-                self.toolbar.update_layout(sw, sh);
-                self.set_toast("🔎", "Static Zoom (Wheel: Zoom | Drag: Pan)");
+                self.enter_static_zoom();
             }
             FluentAction::ModeDraw => {
-                self.mode = AppMode::Draw;
-                self.toolbar.active_tool = None;
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
-                self.toolbar.update_layout(sw, sh);
-                self.set_toast("✏️", "Draw Mode Active");
+                self.enter_draw_mode();
             }
             FluentAction::ModeSpotlight => {
-                self.toolbar.active_tool = None;
-                self.toggle_spotlight();
+                if self.mode == AppMode::Spotlight {
+                    self.exit_overlay();
+                } else if self.mode == AppMode::StaticZoom || self.mode == AppMode::Draw {
+                    self.toggle_spotlight();
+                } else {
+                    self.enter_spotlight_mode();
+                }
             }
             FluentAction::ModeTimer => {
                 self.enter_timer_mode(0);
+            }
+            FluentAction::ModeLoupe => {
+                self.enter_loupe_mode();
             }
             FluentAction::CycleDisplay => {
                 self.cycle_next_monitor();
             }
             FluentAction::Tool(t) => {
+                self.ensure_draw_mode();
                 self.current_tool = t;
-                self.mode = AppMode::Draw;
-                if self.toolbar.active_tool == Some(t) {
-                    self.toolbar.active_tool = None;
-                } else {
-                    self.toolbar.active_tool = Some(t);
-                }
+                self.toolbar.active_tool = Some(t);
                 self.sync_tool_to_toolbar();
                 let sw = self.screen_width as f32;
                 let sh = self.screen_height as f32;
@@ -1036,6 +1175,7 @@ impl OverlayWindow {
                 self.set_toast("🛠️", format!("Tool: {}", t.name()));
             }
             FluentAction::Color(c) => {
+                self.ensure_draw_mode();
                 self.current_color = c;
                 self.set_toast("🎨", format!("Color: {}", c.name()));
             }
@@ -1271,6 +1411,7 @@ impl OverlayWindow {
                         this.background_type,
                         &this.zoom,
                         &this.spotlight,
+                        &this.loupe,
                         &this.shapes,
                         this.active_shape.as_ref(),
                         text_input,
@@ -1384,6 +1525,16 @@ impl OverlayWindow {
                 }
 
                 WM_SETCURSOR => {
+                    let mut pt = POINT::default();
+                    if GetCursorPos(&mut pt).is_ok() {
+                        let cx = (pt.x - this.screen_x) as f32;
+                        let cy = (pt.y - this.screen_y) as f32;
+                        if this.toolbar.is_point_inside(cx, cy) {
+                            let _ =
+                                SetCursor(Some(LoadCursorW(None, IDC_HAND).unwrap_or_default()));
+                            return LRESULT(1);
+                        }
+                    }
                     if this.mode == AppMode::Timer {
                         if this.timer_widget.hover_action.is_some() {
                             let _ =
@@ -1395,6 +1546,10 @@ impl OverlayWindow {
                             let _ =
                                 SetCursor(Some(LoadCursorW(None, IDC_ARROW).unwrap_or_default()));
                         }
+                        return LRESULT(1);
+                    }
+                    if this.mode == AppMode::Loupe {
+                        let _ = SetCursor(Some(LoadCursorW(None, IDC_ARROW).unwrap_or_default()));
                         return LRESULT(1);
                     }
                     if this.current_tool == DrawTool::Text {
@@ -1502,6 +1657,12 @@ impl OverlayWindow {
                     if this.spotlight.active && !this.spotlight.pinned {
                         this.spotlight.x = x;
                         this.spotlight.y = y;
+                        this.request_repaint();
+                    }
+
+                    if this.mode == AppMode::Loupe && !this.loupe.pinned {
+                        this.loupe.x = x;
+                        this.loupe.y = y;
                         this.request_repaint();
                     }
 
@@ -1732,7 +1893,24 @@ impl OverlayWindow {
                     // If in Static Zoom mode, clicking transitions into Draw mode
                     if this.mode == AppMode::StaticZoom {
                         this.mode = AppMode::Draw;
+                        this.toolbar.active_tool = Some(this.current_tool);
+                        let sw = this.screen_width as f32;
+                        let sh = this.screen_height as f32;
+                        this.toolbar.update_layout(sw, sh);
                         this.set_toast("✏️", "Draw Mode (Drag to draw | Esc to exit)");
+                    }
+
+                    // If in Loupe mode, clicking pins or unpins the lens
+                    if this.mode == AppMode::Loupe {
+                        this.loupe.pinned = !this.loupe.pinned;
+                        let label = if this.loupe.pinned {
+                            "📌 Loupe Pinned (Click or Space to unpin)"
+                        } else {
+                            "🔍 Loupe Following Cursor"
+                        };
+                        this.set_toast("🔍", label);
+                        this.request_repaint();
+                        return LRESULT(0);
                     }
 
                     if this.current_tool == DrawTool::Text {
@@ -1975,18 +2153,34 @@ impl OverlayWindow {
                         this.request_repaint();
                         return LRESULT(0);
                     }
-                    // Two-stage exit: If in Draw mode, return to StaticZoom (Pan & Zoom) mode!
-                    if this.mode == AppMode::Draw {
-                        this.mode = AppMode::StaticZoom;
-                        let w = this.screen_width as f32;
-                        let h = this.screen_height as f32;
-                        this.toolbar.update_layout(w, h);
-                        this.set_toast(
-                            "🔎",
-                            "Switched to Pan & Zoom Mode (Press Esc again to Exit)",
-                        );
-                        this.request_repaint();
+                    // If in Loupe mode, right click unpins if pinned, or exits overlay
+                    if this.mode == AppMode::Loupe {
+                        if this.loupe.pinned {
+                            this.loupe.pinned = false;
+                            this.set_toast("🔍", "Loupe Unpinned");
+                            this.request_repaint();
+                            return LRESULT(0);
+                        }
+                        this.exit_overlay();
                         return LRESULT(0);
+                    }
+                    // In Draw mode: if zoomed in, return to StaticZoom; if not zoomed in, exit overlay!
+                    if this.mode == AppMode::Draw {
+                        if this.zoom.level > 1.001 {
+                            this.mode = AppMode::StaticZoom;
+                            let w = this.screen_width as f32;
+                            let h = this.screen_height as f32;
+                            this.toolbar.update_layout(w, h);
+                            this.set_toast(
+                                "🔎",
+                                "Switched to Pan & Zoom Mode (Right-click again to Exit)",
+                            );
+                            this.request_repaint();
+                            return LRESULT(0);
+                        } else {
+                            this.exit_overlay();
+                            return LRESULT(0);
+                        }
                     }
                     // Otherwise exit overlay completely
                     this.exit_overlay();
@@ -2031,6 +2225,23 @@ impl OverlayWindow {
                             let abs_m = (this.timer_remaining.abs() / 60.0).floor() as u32;
                             let sign = if this.timer_remaining < 0.0 { "-" } else { "" };
                             this.set_toast("⏱️", format!("Timer: {}{}m", sign, abs_m));
+                        }
+                        this.request_repaint();
+                        return LRESULT(0);
+                    }
+
+                    // Loupe Magnifier mode controls (Wheel: zoom, Shift+Wheel: resize diameter)
+                    if this.mode == AppMode::Loupe {
+                        if is_shift {
+                            let new_rad = (this.loupe.radius + delta * 15.0).clamp(60.0, 500.0);
+                            this.loupe.radius = new_rad;
+                            let diam = (new_rad * 2.0).round() as u32;
+                            this.set_toast("🔍", format!("Loupe Size ⌀{} px", diam));
+                        } else {
+                            let new_mag =
+                                (this.loupe.magnification + (delta * 0.25)).clamp(1.25, 12.0);
+                            this.loupe.magnification = new_mag;
+                            this.set_toast("🔍", format!("Loupe Zoom {:.1}x", new_mag));
                         }
                         this.request_repaint();
                         return LRESULT(0);
@@ -2280,8 +2491,12 @@ impl OverlayWindow {
                             k if k == '3' as i32 => {
                                 if this.mode == AppMode::Spotlight {
                                     this.exit_overlay();
-                                } else {
+                                } else if this.mode == AppMode::StaticZoom
+                                    || this.mode == AppMode::Draw
+                                {
                                     this.toggle_spotlight();
+                                } else {
+                                    this.enter_spotlight_mode();
                                 }
                             }
                             k if k == '4' as i32 => {
@@ -2293,6 +2508,13 @@ impl OverlayWindow {
                                     this.exit_overlay();
                                 } else {
                                     this.enter_timer_mode(0);
+                                }
+                            }
+                            k if k == '6' as i32 => {
+                                if this.mode == AppMode::Loupe {
+                                    this.exit_overlay();
+                                } else {
+                                    this.enter_loupe_mode();
                                 }
                             }
                             k if k == 'Z' as i32 && !is_shift => {
@@ -2329,6 +2551,10 @@ impl OverlayWindow {
                                 this.active_shape = None;
                                 this.is_drawing = false;
                                 this.request_repaint();
+                            } else if this.mode == AppMode::Loupe && this.loupe.pinned {
+                                this.loupe.pinned = false;
+                                this.set_toast("🔍", "Loupe Unpinned (Tracking Cursor)");
+                                this.request_repaint();
                             } else {
                                 this.exit_overlay();
                             }
@@ -2355,7 +2581,14 @@ impl OverlayWindow {
                         }
 
                         k if k == windows::Win32::UI::Input::KeyboardAndMouse::VK_F3.0 as i32 => {
-                            this.toggle_spotlight();
+                            if this.mode == AppMode::Spotlight {
+                                this.exit_overlay();
+                            } else if this.mode == AppMode::StaticZoom || this.mode == AppMode::Draw
+                            {
+                                this.toggle_spotlight();
+                            } else {
+                                this.enter_spotlight_mode();
+                            }
                         }
 
                         k if k == windows::Win32::UI::Input::KeyboardAndMouse::VK_F4.0 as i32 => {
@@ -2363,6 +2596,17 @@ impl OverlayWindow {
                         }
 
                         k if k == VK_TAB.0 as i32 => {
+                            if this.mode == AppMode::Loupe {
+                                this.loupe.is_rect = !this.loupe.is_rect;
+                                let shape_name = if this.loupe.is_rect {
+                                    "Rounded Rectangle"
+                                } else {
+                                    "Circle"
+                                };
+                                this.set_toast("🔍", format!("Loupe Shape: {}", shape_name));
+                                this.request_repaint();
+                                return LRESULT(0);
+                            }
                             if this.mode == AppMode::Timer {
                                 this.timer_widget.minimized = !this.timer_widget.minimized;
                                 let label = if this.timer_widget.minimized {
@@ -2377,7 +2621,17 @@ impl OverlayWindow {
                         }
 
                         k if k == VK_SPACE.0 as i32 => {
-                            if this.mode == AppMode::Timer {
+                            if this.mode == AppMode::Loupe {
+                                this.loupe.pinned = !this.loupe.pinned;
+                                let label = if this.loupe.pinned {
+                                    "📌 Loupe Pinned (Click or Space to unpin)"
+                                } else {
+                                    "🔍 Loupe Following Cursor"
+                                };
+                                this.set_toast("🔍", label);
+                                this.request_repaint();
+                                return LRESULT(0);
+                            } else if this.mode == AppMode::Timer {
                                 if this.timer_remaining <= 0.0 {
                                     this.timer_remaining = this.timer_seconds as f64;
                                     this.timer_paused = false;
@@ -2430,6 +2684,17 @@ impl OverlayWindow {
 
                         // ─── Colors (single key, no modifier = color) ───
                         k if k == 'R' as i32 && !is_shift => {
+                            if this.mode == AppMode::Loupe {
+                                this.loupe.show_reticle = !this.loupe.show_reticle;
+                                let status = if this.loupe.show_reticle {
+                                    "Reticle Enabled"
+                                } else {
+                                    "Reticle Disabled"
+                                };
+                                this.set_toast("🔍", format!("Loupe: {}", status));
+                                this.request_repaint();
+                                return LRESULT(0);
+                            }
                             if this.mode == AppMode::Timer {
                                 this.timer_remaining = this.timer_seconds as f64;
                                 this.timer_paused = false;
@@ -2448,41 +2713,49 @@ impl OverlayWindow {
                                 this.request_repaint();
                                 return LRESULT(0);
                             }
+                            this.ensure_draw_mode();
                             this.current_color = ColorPreset::Red;
                             this.set_toast("🔴", "Red");
                             this.request_repaint();
                         }
                         k if k == 'G' as i32 => {
+                            this.ensure_draw_mode();
                             this.current_color = ColorPreset::Green;
                             this.set_toast("🟢", "Green");
                             this.request_repaint();
                         }
                         k if k == 'B' as i32 && !is_shift => {
+                            this.ensure_draw_mode();
                             this.current_color = ColorPreset::Blue;
                             this.set_toast("🔵", "Blue");
                             this.request_repaint();
                         }
                         k if k == 'B' as i32 && is_shift => {
+                            this.ensure_draw_mode();
                             this.current_color = ColorPreset::Black;
                             this.set_toast("⚫", "Black Pen");
                             this.request_repaint();
                         }
                         k if k == 'Y' as i32 => {
+                            this.ensure_draw_mode();
                             this.current_color = ColorPreset::Yellow;
                             this.set_toast("🟡", "Yellow");
                             this.request_repaint();
                         }
                         k if k == 'O' as i32 => {
+                            this.ensure_draw_mode();
                             this.current_color = ColorPreset::Orange;
                             this.set_toast("🟠", "Orange");
                             this.request_repaint();
                         }
                         k if k == 'P' as i32 && is_shift => {
+                            this.ensure_draw_mode();
                             this.current_color = ColorPreset::Pink;
                             this.set_toast("🌸", "Pink");
                             this.request_repaint();
                         }
                         k if k == 'C' as i32 || k == 'I' as i32 => {
+                            this.ensure_draw_mode();
                             this.current_color = ColorPreset::Cyan;
                             this.set_toast("🩵", "Cyan");
                             this.request_repaint();
@@ -2490,11 +2763,13 @@ impl OverlayWindow {
 
                         // ─── Canvas Slate & Color Modes ───
                         k if k == 'W' as i32 && is_shift => {
+                            this.ensure_draw_mode();
                             this.current_color = ColorPreset::White;
                             this.set_toast("⚪", "White Pen");
                             this.request_repaint();
                         }
                         k if k == 'W' as i32 && !is_shift => {
+                            this.ensure_draw_mode();
                             this.background_type =
                                 if this.background_type == CanvasBackground::Whiteboard {
                                     CanvasBackground::Transparent
@@ -2506,6 +2781,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'K' as i32 && is_shift => {
+                            this.ensure_draw_mode();
                             this.background_type =
                                 if this.background_type == CanvasBackground::Blackboard {
                                     CanvasBackground::Transparent
@@ -2517,6 +2793,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'K' as i32 && !is_shift => {
+                            this.ensure_draw_mode();
                             this.current_tool = DrawTool::LaserPointer;
                             this.set_toast("🔴", "Laser Pointer");
                             this.request_repaint();
@@ -2524,6 +2801,7 @@ impl OverlayWindow {
 
                         // ─── Drawing Tools & Attributes ───
                         k if k == 'T' as i32 => {
+                            this.ensure_draw_mode();
                             this.current_tool = DrawTool::Text;
                             this.toolbar.active_tool = Some(DrawTool::Text);
                             this.sync_tool_to_toolbar();
@@ -2534,6 +2812,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'H' as i32 => {
+                            this.ensure_draw_mode();
                             this.current_tool = DrawTool::Highlighter;
                             this.toolbar.active_tool = Some(DrawTool::Highlighter);
                             this.sync_tool_to_toolbar();
@@ -2544,6 +2823,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'L' as i32 => {
+                            this.ensure_draw_mode();
                             this.current_tool = DrawTool::Line;
                             this.toolbar.active_tool = Some(DrawTool::Line);
                             this.sync_tool_to_toolbar();
@@ -2554,6 +2834,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'A' as i32 => {
+                            this.ensure_draw_mode();
                             this.current_tool = DrawTool::Arrow;
                             this.toolbar.active_tool = Some(DrawTool::Arrow);
                             this.sync_tool_to_toolbar();
@@ -2564,6 +2845,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'R' as i32 && is_shift => {
+                            this.ensure_draw_mode();
                             this.current_tool = DrawTool::Rectangle;
                             this.toolbar.active_tool = Some(DrawTool::Rectangle);
                             this.sync_tool_to_toolbar();
@@ -2574,6 +2856,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'U' as i32 => {
+                            this.ensure_draw_mode();
                             this.current_tool = DrawTool::RoundedRectangle;
                             this.toolbar.active_tool = Some(DrawTool::RoundedRectangle);
                             this.sync_tool_to_toolbar();
@@ -2584,6 +2867,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'Q' as i32 => {
+                            this.ensure_draw_mode();
                             this.current_tool = DrawTool::Ellipse;
                             this.toolbar.active_tool = Some(DrawTool::Ellipse);
                             this.sync_tool_to_toolbar();
@@ -2644,6 +2928,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if (k == 'N' as i32 && is_shift) || k == '0' as i32 => {
+                            this.ensure_draw_mode();
                             this.step_counter = 1;
                             this.toolbar.badge_counter = 1;
                             let sw = this.screen_width as f32;
@@ -2653,6 +2938,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'N' as i32 => {
+                            this.ensure_draw_mode();
                             let next_num = this.step_counter;
                             this.current_tool = DrawTool::StepBadge;
                             this.toolbar.active_tool = Some(DrawTool::StepBadge);
@@ -2665,6 +2951,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'P' as i32 && !is_shift => {
+                            this.ensure_draw_mode();
                             this.current_tool = DrawTool::Pen;
                             this.toolbar.active_tool = Some(DrawTool::Pen);
                             this.sync_tool_to_toolbar();
@@ -2675,6 +2962,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'X' as i32 && is_shift => {
+                            this.ensure_draw_mode();
                             this.current_tool = DrawTool::Blur;
                             this.toolbar.active_tool = Some(DrawTool::Blur);
                             this.sync_tool_to_toolbar();
@@ -2685,6 +2973,7 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
                         k if k == 'X' as i32 && !is_shift => {
+                            this.ensure_draw_mode();
                             this.current_tool = DrawTool::Eraser;
                             this.toolbar.active_tool = Some(DrawTool::Eraser);
                             this.sync_tool_to_toolbar();
@@ -2731,7 +3020,14 @@ impl OverlayWindow {
                         // ─── [ ] Bracket Sizing ───
                         219 => {
                             // [
-                            if this.spotlight.active {
+                            if this.mode == AppMode::Loupe {
+                                let new_rad = (this.loupe.radius - 20.0).clamp(60.0, 500.0);
+                                this.loupe.radius = new_rad;
+                                this.set_toast(
+                                    "🔍",
+                                    format!("Loupe ⌀{} px", (new_rad * 2.0).round() as u32),
+                                );
+                            } else if this.spotlight.active {
                                 let new_rad = (this.spotlight.radius - 20.0).max(30.0);
                                 this.spotlight.radius = new_rad;
                                 this.set_toast(
@@ -2780,7 +3076,14 @@ impl OverlayWindow {
                         }
                         221 => {
                             // ]
-                            if this.spotlight.active {
+                            if this.mode == AppMode::Loupe {
+                                let new_rad = (this.loupe.radius + 20.0).clamp(60.0, 500.0);
+                                this.loupe.radius = new_rad;
+                                this.set_toast(
+                                    "🔍",
+                                    format!("Loupe ⌀{} px", (new_rad * 2.0).round() as u32),
+                                );
+                            } else if this.spotlight.active {
                                 let new_rad = (this.spotlight.radius + 20.0).min(700.0);
                                 this.spotlight.radius = new_rad;
                                 this.set_toast(
@@ -2831,7 +3134,11 @@ impl OverlayWindow {
                         // ─── Arrow Keys & Zoom/Timer Controls ───
                         k if k == VK_UP.0 as i32 || k == 187 => {
                             // Up or '+'
-                            if this.mode == AppMode::Timer {
+                            if this.mode == AppMode::Loupe {
+                                let new_lvl = (this.loupe.magnification + 0.25).clamp(1.25, 12.0);
+                                this.loupe.magnification = new_lvl;
+                                this.set_toast("🔍", format!("Loupe Zoom {:.2}x", new_lvl));
+                            } else if this.mode == AppMode::Timer {
                                 this.timer_remaining += 60.0;
                                 this.timer_seconds = this.timer_remaining.round() as u32;
                                 let m = (this.timer_remaining / 60.0).floor() as u32;
@@ -2864,7 +3171,11 @@ impl OverlayWindow {
                         }
                         k if k == VK_DOWN.0 as i32 || k == 189 => {
                             // Down or '-'
-                            if this.mode == AppMode::Timer {
+                            if this.mode == AppMode::Loupe {
+                                let new_lvl = (this.loupe.magnification - 0.25).clamp(1.25, 12.0);
+                                this.loupe.magnification = new_lvl;
+                                this.set_toast("🔍", format!("Loupe Zoom {:.2}x", new_lvl));
+                            } else if this.mode == AppMode::Timer {
                                 this.timer_remaining = (this.timer_remaining - 60.0).max(10.0);
                                 this.timer_seconds = this.timer_remaining.round() as u32;
                                 let m = (this.timer_remaining / 60.0).floor() as u32;

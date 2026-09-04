@@ -1,5 +1,6 @@
 mod shapes;
 mod ui_hud;
+mod ui_loupe;
 mod ui_timer;
 mod ui_toolbar;
 
@@ -36,7 +37,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 use crate::capture::ScreenCapture;
 use crate::types::{
     AppMode, CanvasBackground, ColorPreset, DrawTool, FluentToolbarState, LaserRipple,
-    LaserTrailPoint, Point2D, Shape, SpotlightState, StrokePattern, TextEditorState,
+    LaserTrailPoint, LoupeState, Point2D, Shape, SpotlightState, StrokePattern, TextEditorState,
     TextFontFamily, TimerWidgetState, ToastNotification, ZoomState,
 };
 
@@ -395,6 +396,7 @@ impl D2DRenderer {
         bg_type: CanvasBackground,
         zoom_state: &ZoomState,
         spotlight: &SpotlightState,
+        loupe: &LoupeState,
         shapes: &[Shape],
         active_shape: Option<&Shape>,
         text_input: Option<&TextEditorState>,
@@ -425,7 +427,14 @@ impl D2DRenderer {
         unsafe {
             rt.BeginDraw();
 
-            let clear_color = match bg_type {
+            let effective_bg_type =
+                if mode == AppMode::Loupe || mode == AppMode::Spotlight || mode == AppMode::Timer {
+                    CanvasBackground::Transparent
+                } else {
+                    bg_type
+                };
+
+            let clear_color = match effective_bg_type {
                 CanvasBackground::Transparent => D2D1_COLOR_F {
                     r: 0.0,
                     g: 0.0,
@@ -456,7 +465,13 @@ impl D2DRenderer {
                 M32: 0.0,
             };
 
-            let z = zoom_state.level.max(1.0);
+            let z = if mode == AppMode::StaticZoom
+                || (mode == AppMode::Draw && zoom_state.level > 1.001)
+            {
+                zoom_state.level.max(1.0)
+            } else {
+                1.0
+            };
             let canvas_matrix = if z > 1.001 {
                 Matrix3x2 {
                     M11: z,
@@ -473,7 +488,7 @@ impl D2DRenderer {
             // ── Background Layer (Zoomed with canvas) ──
             rt.SetTransform(&canvas_matrix);
 
-            if bg_type == CanvasBackground::Transparent
+            if effective_bg_type == CanvasBackground::Transparent
                 && let Some(bitmap) = bg_bitmap
             {
                 let dst_rect = D2D_RECT_F {
@@ -491,30 +506,34 @@ impl D2DRenderer {
                 );
             }
 
-            // ── Shapes Layer (Zoomed with canvas) ──
-            for shape in shapes {
-                self.render_single_shape(rt, shape, bg_bitmap);
-            }
+            // ── Shapes Layer (Zoomed with canvas; Draw & StaticZoom only) ──
+            if mode == AppMode::Draw || mode == AppMode::StaticZoom {
+                for shape in shapes {
+                    self.render_single_shape(rt, shape, bg_bitmap);
+                }
 
-            if let Some(shape) = active_shape {
-                self.render_single_shape(rt, shape, bg_bitmap);
-                if snap_guides {
-                    self.render_drawing_snap_guides(rt, shape);
+                if let Some(shape) = active_shape {
+                    self.render_single_shape(rt, shape, bg_bitmap);
+                    if snap_guides {
+                        self.render_drawing_snap_guides(rt, shape);
+                    }
+                }
+
+                if let Some(editor) = text_input {
+                    let show_caret = (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        / 500)
+                        .is_multiple_of(2);
+                    self.render_text_editor(rt, editor, show_caret);
                 }
             }
 
-            if let Some(editor) = text_input {
-                let show_caret = (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis()
-                    / 500)
-                    .is_multiple_of(2);
-                self.render_text_editor(rt, editor, show_caret);
-            }
-
             // ── Spotlight Mask (Screen Space for full edge-to-edge coverage) ──
-            if spotlight.active {
+            let show_spotlight = mode == AppMode::Spotlight
+                || ((mode == AppMode::StaticZoom || mode == AppMode::Draw) && spotlight.active);
+            if show_spotlight {
                 rt.SetTransform(&identity);
                 self.render_spotlight_mask(
                     rt,
@@ -529,8 +548,10 @@ impl D2DRenderer {
                 rt.SetTransform(&canvas_matrix);
             }
 
-            // ── Laser Pointer (Zoomed with canvas) ──
-            if !laser_trail.is_empty() || !laser_ripples.is_empty() || laser_pos.is_some() {
+            // ── Laser Pointer (Zoomed with canvas; Draw & StaticZoom only) ──
+            if (mode == AppMode::Draw || mode == AppMode::StaticZoom)
+                && (!laser_trail.is_empty() || !laser_ripples.is_empty() || laser_pos.is_some())
+            {
                 self.render_laser_pointer(rt, laser_trail, laser_ripples, laser_pos, current_color);
             }
 
@@ -538,7 +559,8 @@ impl D2DRenderer {
             rt.SetTransform(&identity);
 
             // ── Eraser Cursor Indicator ──
-            if current_tool == DrawTool::Eraser
+            if (mode == AppMode::Draw || mode == AppMode::StaticZoom)
+                && current_tool == DrawTool::Eraser
                 && let Some(epos) = eraser_pos
             {
                 self.render_eraser_indicator(rt, epos);
@@ -562,20 +584,25 @@ impl D2DRenderer {
                     };
                     rt.FillRectangle(&full_rect, &dim_brush);
                 }
+
+                if let Some((mins, secs, progress, paused, is_overtime)) = timer_info {
+                    self.render_countdown_timer(
+                        rt,
+                        width,
+                        height,
+                        mins,
+                        secs,
+                        progress,
+                        paused,
+                        is_overtime,
+                        timer_widget,
+                    );
+                }
             }
 
-            if let Some((mins, secs, progress, paused, is_overtime)) = timer_info {
-                self.render_countdown_timer(
-                    rt,
-                    width,
-                    height,
-                    mins,
-                    secs,
-                    progress,
-                    paused,
-                    is_overtime,
-                    timer_widget,
-                );
+            // ── Floating Magnifier Loupe Lens ──
+            if mode == AppMode::Loupe && loupe.active {
+                self.render_loupe(rt, width, height, loupe, bg_bitmap);
             }
 
             if mode != AppMode::Timer {
