@@ -2,8 +2,8 @@
 
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_DOWN, VK_OEM_MINUS,
-    VK_OEM_PLUS, VK_UP,
+    MOD_CONTROL, MOD_NOREPEAT, RegisterHotKey, UnregisterHotKey, VK_DOWN, VK_OEM_COMMA,
+    VK_OEM_MINUS, VK_OEM_PLUS, VK_UP,
 };
 
 pub const HOTKEY_STATIC_ZOOM: i32 = 101; // Ctrl+1
@@ -16,6 +16,7 @@ pub const HOTKEY_LIVE_ZOOM_IN: i32 = 107; // Ctrl+Up
 pub const HOTKEY_LIVE_ZOOM_OUT: i32 = 108; // Ctrl+Down
 pub const HOTKEY_LIVE_ZOOM_IN_PLUS: i32 = 109; // Ctrl+= / Ctrl++
 pub const HOTKEY_LIVE_ZOOM_OUT_MINUS: i32 = 110; // Ctrl+-
+pub const HOTKEY_SETTINGS: i32 = 111; // Ctrl+,
 
 pub struct HotkeyManager {
     hwnd: HWND,
@@ -31,49 +32,51 @@ impl HotkeyManager {
     }
 
     pub fn register_all(&mut self) {
-        unsafe {
-            let ctrl_norepeat = MOD_CONTROL | MOD_NOREPEAT;
+        let cfg = crate::config::AppConfig::load();
+        self.register_from_config(&cfg);
+    }
 
-            // Ctrl+1: Static Zoom
-            if RegisterHotKey(
-                Some(self.hwnd),
-                HOTKEY_STATIC_ZOOM,
-                ctrl_norepeat,
-                '1' as u32,
-            )
-            .is_ok()
-            {
+    pub fn register_from_config(&mut self, cfg: &crate::config::AppConfig) {
+        unsafe {
+            let register = |hwnd: HWND, id: i32, hk: &crate::config::HotkeyBinding| -> bool {
+                let flags = windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS(
+                    hk.modifiers | MOD_NOREPEAT.0,
+                );
+                RegisterHotKey(Some(hwnd), id, flags, hk.vk_code).is_ok()
+            };
+
+            // 1. Static Zoom
+            if register(self.hwnd, HOTKEY_STATIC_ZOOM, &cfg.hotkey_static_zoom) {
                 self.registered.push(HOTKEY_STATIC_ZOOM);
             }
 
-            // Ctrl+2: Draw Mode
-            if RegisterHotKey(Some(self.hwnd), HOTKEY_DRAW, ctrl_norepeat, '2' as u32).is_ok() {
+            // 2. Draw Mode
+            if register(self.hwnd, HOTKEY_DRAW, &cfg.hotkey_draw) {
                 self.registered.push(HOTKEY_DRAW);
             }
 
-            // Ctrl+3: Spotlight
-            if RegisterHotKey(Some(self.hwnd), HOTKEY_SPOTLIGHT, ctrl_norepeat, '3' as u32).is_ok()
-            {
+            // 3. Spotlight
+            if register(self.hwnd, HOTKEY_SPOTLIGHT, &cfg.hotkey_spotlight) {
                 self.registered.push(HOTKEY_SPOTLIGHT);
             }
 
-            // Ctrl+4: Live Zoom
-            if RegisterHotKey(Some(self.hwnd), HOTKEY_LIVE_ZOOM, ctrl_norepeat, '4' as u32).is_ok()
-            {
+            // 4. Live Zoom
+            if register(self.hwnd, HOTKEY_LIVE_ZOOM, &cfg.hotkey_live_zoom) {
                 self.registered.push(HOTKEY_LIVE_ZOOM);
             }
 
-            // Ctrl+5: Timer
-            if RegisterHotKey(Some(self.hwnd), HOTKEY_TIMER, ctrl_norepeat, '5' as u32).is_ok() {
+            // 5. Timer
+            if register(self.hwnd, HOTKEY_TIMER, &cfg.hotkey_timer) {
                 self.registered.push(HOTKEY_TIMER);
             }
 
-            // Ctrl+6: Loupe Magnifier
-            if RegisterHotKey(Some(self.hwnd), HOTKEY_LOUPE, ctrl_norepeat, '6' as u32).is_ok() {
+            // 6. Loupe Magnifier
+            if register(self.hwnd, HOTKEY_LOUPE, &cfg.hotkey_loupe) {
                 self.registered.push(HOTKEY_LOUPE);
             }
 
-            // Ctrl+Up: Live Zoom In
+            // Live Zoom secondary keys
+            let ctrl_norepeat = MOD_CONTROL | MOD_NOREPEAT;
             if RegisterHotKey(
                 Some(self.hwnd),
                 HOTKEY_LIVE_ZOOM_IN,
@@ -85,7 +88,6 @@ impl HotkeyManager {
                 self.registered.push(HOTKEY_LIVE_ZOOM_IN);
             }
 
-            // Ctrl+Down: Live Zoom Out
             if RegisterHotKey(
                 Some(self.hwnd),
                 HOTKEY_LIVE_ZOOM_OUT,
@@ -97,7 +99,6 @@ impl HotkeyManager {
                 self.registered.push(HOTKEY_LIVE_ZOOM_OUT);
             }
 
-            // Ctrl++: Live Zoom In
             if RegisterHotKey(
                 Some(self.hwnd),
                 HOTKEY_LIVE_ZOOM_IN_PLUS,
@@ -109,7 +110,6 @@ impl HotkeyManager {
                 self.registered.push(HOTKEY_LIVE_ZOOM_IN_PLUS);
             }
 
-            // Ctrl+-: Live Zoom Out
             if RegisterHotKey(
                 Some(self.hwnd),
                 HOTKEY_LIVE_ZOOM_OUT_MINUS,
@@ -120,7 +120,24 @@ impl HotkeyManager {
             {
                 self.registered.push(HOTKEY_LIVE_ZOOM_OUT_MINUS);
             }
+
+            // 7. Settings Window (Ctrl+,)
+            if RegisterHotKey(
+                Some(self.hwnd),
+                HOTKEY_SETTINGS,
+                ctrl_norepeat,
+                VK_OEM_COMMA.0 as u32,
+            )
+            .is_ok()
+            {
+                self.registered.push(HOTKEY_SETTINGS);
+            }
         }
+    }
+
+    pub fn reload_from_config(&mut self, cfg: &crate::config::AppConfig) {
+        self.unregister_all();
+        self.register_from_config(cfg);
     }
 
     pub fn unregister_all(&mut self) {

@@ -35,6 +35,7 @@ pub const ID_TRAY_BLACKBOARD: usize = 2013;
 pub const ID_TRAY_OPEN_CONFIG: usize = 2014;
 pub const ID_TRAY_RESET_TOOLBAR: usize = 2015;
 pub const ID_TRAY_BLUR: usize = 2016;
+pub const ID_TRAY_SETTINGS: usize = 2017;
 
 /// Enable authentic Windows 11 / Windows 10 Dark Mode for Win32 popup menus
 pub fn enable_windows_dark_mode_for_menus() {
@@ -180,6 +181,12 @@ impl TrayIcon {
                 let _ = AppendMenuW(
                     opts_menu,
                     MF_STRING,
+                    ID_TRAY_SETTINGS,
+                    w!("Zoomify Settings...\tCtrl+,"),
+                );
+                let _ = AppendMenuW(
+                    opts_menu,
+                    MF_STRING,
                     ID_TRAY_CHEATSHEET,
                     w!("Keyboard Shortcuts\tF1"),
                 );
@@ -193,7 +200,7 @@ impl TrayIcon {
                     opts_menu,
                     MF_STRING,
                     ID_TRAY_OPEN_CONFIG,
-                    w!("Open Settings (config.json)"),
+                    w!("Open Raw Config (config.json)"),
                 );
                 let _ = AppendMenuW(opts_menu, MF_SEPARATOR, 0, PCWSTR::null());
                 let _ = AppendMenuW(opts_menu, MF_STRING, ID_TRAY_ABOUT, w!("About Zoomify"));

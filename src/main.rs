@@ -8,6 +8,7 @@ mod live_zoom;
 mod monitor;
 mod overlay;
 mod renderer;
+mod settings_window;
 mod shapes;
 mod tray;
 mod types;
@@ -35,7 +36,7 @@ use windows::core::{PCWSTR, Result, w};
 use hotkeys::*;
 use overlay::OverlayWindow;
 use tray::*;
-use types::{AppMode, CanvasBackground, DrawTool};
+use types::{AppMode, CanvasBackground, ColorPreset, DrawTool};
 
 fn ensure_live_zoom_stopped(overlay: &mut OverlayWindow) {
     if overlay.live_zoom.is_active() || overlay.mode == AppMode::LiveZoom {
@@ -49,6 +50,7 @@ struct AppContext {
     overlay: Rc<RefCell<OverlayWindow>>,
     tray: TrayIcon,
     hotkeys: HotkeyManager,
+    settings_window: Rc<RefCell<settings_window::SettingsWindow>>,
 }
 
 const TRAY_HOST_CLASS: PCWSTR = w!("ZoomifyTrayHostClass");
@@ -140,6 +142,9 @@ unsafe extern "system" fn tray_wnd_proc(
                         } else {
                             overlay.enter_loupe_mode();
                         }
+                    }
+                    HOTKEY_SETTINGS => {
+                        ctx.settings_window.borrow_mut().show();
                     }
                     _ => {}
                 }
@@ -270,6 +275,9 @@ unsafe extern "system" fn tray_wnd_proc(
                         overlay.set_toast("📌", "Toolbar Position Reset to Top Center");
                         overlay.request_repaint();
                     }
+                    ID_TRAY_SETTINGS => {
+                        ctx.settings_window.borrow_mut().show();
+                    }
                     ID_TRAY_OPEN_CONFIG => {
                         if let Some(appdata) = std::env::var_os("APPDATA") {
                             let mut path = std::path::PathBuf::from(appdata);
@@ -295,6 +303,7 @@ unsafe extern "system" fn tray_wnd_proc(
                             • Ctrl+4: Live Zoom (Ctrl+Wheel or Ctrl+Up/Down to zoom)\n\
                             • Ctrl+5: Presentation Countdown Timer\n\
                             • Ctrl+6: Magnifier Loupe Lens (Tab=Shape, Space=Pin, R=Reticle, Wheel=Zoom)\n\
+                            • Ctrl+,: Settings & Hotkeys Configurator\n\
                             • F1: Shortcut Cheat Sheet Overlay | F2: Toggle HUD\n\
                             • Mouse Modifiers: Shift=Line, Ctrl=Rect, Tab=Ellipse, Shift+Ctrl=Arrow\n\
                             • Colors: r, g, b, y, o, c | Shift+P: Pink | Shift+W: White | Shift+B: Black");
@@ -311,6 +320,29 @@ unsafe extern "system" fn tray_wnd_proc(
                     }
                     _ => {}
                 }
+                LRESULT(0)
+            }
+
+            settings_window::WM_SETTINGS_APPLIED => {
+                let cfg = config::AppConfig::load();
+                ctx.hotkeys.reload_from_config(&cfg);
+                let mut overlay = ctx.overlay.borrow_mut();
+                overlay.stroke_width = cfg.default_stroke_width;
+                overlay.spotlight.radius = cfg.spotlight_radius;
+                overlay.timer_seconds = cfg.timer_duration_mins * 60;
+                overlay.timer_sound_enabled = cfg.timer_sound_enabled;
+                overlay.current_color = match cfg.default_color.as_str() {
+                    "Red" => ColorPreset::Red,
+                    "Green" => ColorPreset::Green,
+                    "Blue" => ColorPreset::Blue,
+                    "Yellow" => ColorPreset::Yellow,
+                    "Orange" => ColorPreset::Orange,
+                    "Pink" => ColorPreset::Pink,
+                    "Cyan" => ColorPreset::Cyan,
+                    _ => ColorPreset::Red,
+                };
+                overlay.set_toast("⚙️", "Settings & Hotkeys Applied");
+                overlay.request_repaint();
                 LRESULT(0)
             }
 
@@ -384,6 +416,7 @@ fn main() -> Result<()> {
         )?;
 
         let overlay = OverlayWindow::create()?;
+        let settings_window = settings_window::SettingsWindow::create(tray_hwnd)?;
         let mut tray = TrayIcon::new(tray_hwnd);
         let mut hotkeys = HotkeyManager::new(tray_hwnd);
         hotkeys.register_all();
@@ -393,13 +426,14 @@ fn main() -> Result<()> {
         // Show non-intrusive Windows tray notification balloon
         tray.show_balloon(
             "Zoomify is Ready!",
-            "Hotkeys:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+5: Timer\n• Ctrl+6: Loupe",
+            "Hotkeys:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+5: Timer\n• Ctrl+6: Loupe\n• Ctrl+,: Settings",
         );
 
         let app_ctx = Box::new(AppContext {
             overlay,
             tray,
             hotkeys,
+            settings_window,
         });
 
         let app_ctx_ptr = Box::into_raw(app_ctx);
@@ -414,6 +448,7 @@ fn main() -> Result<()> {
         let mut app_ctx = Box::from_raw(app_ctx_ptr);
         app_ctx.hotkeys.unregister_all();
         app_ctx.overlay.borrow_mut().exit_overlay();
+        app_ctx.settings_window.borrow_mut().hide();
 
         windows::Win32::System::Ole::OleUninitialize();
         if let Ok(h) = mutex_handle {

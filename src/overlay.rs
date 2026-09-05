@@ -106,6 +106,7 @@ pub struct OverlayWindow {
     pub timer_remaining: f64,
     pub timer_paused: bool,
     pub timer_alarm_sounded: bool,
+    pub timer_sound_enabled: bool,
     pub timer_last_tick: Instant,
     pub timer_widget: TimerWidgetState,
     pub screen_x: i32,
@@ -311,6 +312,7 @@ impl OverlayWindow {
                 timer_remaining: timer_secs as f64,
                 timer_paused: false,
                 timer_alarm_sounded: false,
+                timer_sound_enabled: cfg.timer_sound_enabled,
                 timer_last_tick: Instant::now(),
                 timer_widget: TimerWidgetState::default(),
                 screen_x,
@@ -1451,7 +1453,9 @@ impl OverlayWindow {
                                 && !this.timer_alarm_sounded
                             {
                                 this.timer_alarm_sounded = true;
-                                let _ = MessageBeep(0);
+                                if this.timer_sound_enabled {
+                                    let _ = MessageBeep(0);
+                                }
                             }
                             needs_paint = true;
                         } else {
