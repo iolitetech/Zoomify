@@ -1,7 +1,7 @@
 use super::{D2DRenderer, v2};
 use crate::shapes::{
-    SELECTION_HANDLE_SIZE, calculate_arrow_head, normalize_rect, points_to_bezier_segments,
-    pressure_width_factor, selection_handle_points,
+    SELECTION_HANDLE_SIZE, calculate_arrow_head, contained_text_origin, normalize_rect,
+    points_to_bezier_segments, pressure_width_factor, selection_handle_points,
 };
 use crate::types::{
     ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserRipple, LaserTrailPoint, Point2D, Shape,
@@ -325,6 +325,7 @@ impl D2DRenderer {
                             *is_bold,
                             *is_italic,
                             *font_family,
+                            f32::MAX,
                         );
                         let layout_w = block_w.max(30.0) + 16.0;
                         let layout_h = block_h + 8.0;
@@ -690,6 +691,66 @@ impl D2DRenderer {
         }
     }
 
+    /// A label centred inside the shape holding it.
+    ///
+    /// No card of its own: the container is the card. The position is derived
+    /// from the container's bounds every frame rather than stored, which is
+    /// what makes the label follow moves and resizes without any bookkeeping.
+    pub(super) unsafe fn render_contained_text(
+        &self,
+        rt: &ID2D1RenderTarget,
+        shape: &Shape,
+        container: (f32, f32, f32, f32),
+    ) {
+        unsafe {
+            let Shape::Text {
+                text,
+                font_size,
+                color,
+                is_bold,
+                is_italic,
+                font_family,
+                ..
+            } = shape
+            else {
+                return;
+            };
+            if text.is_empty() {
+                return;
+            }
+
+            let pad = TextEditorState::CONTAINER_PADDING;
+            let wrap = ((container.2 - container.0) - pad * 2.0).max(24.0);
+            let (w, h) =
+                self.measure_text_block(text, *font_size, *is_bold, *is_italic, *font_family, wrap);
+            let origin = contained_text_origin(container, w, h);
+
+            let Ok(format) =
+                self.get_custom_text_format(*font_size, *is_bold, *is_italic, *font_family)
+            else {
+                return;
+            };
+            let Some(brush) = self.solid_brush(rt, &color.to_d2d_color(1.0)) else {
+                return;
+            };
+            let utf16: Vec<u16> = text.encode_utf16().collect();
+            let rect = D2D_RECT_F {
+                left: origin.x,
+                top: origin.y,
+                right: origin.x + w.max(wrap),
+                bottom: origin.y + h,
+            };
+            rt.DrawText(
+                &utf16,
+                &format,
+                &rect,
+                &brush,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
     /// Alignment feedback for a snap in effect.
     ///
     /// Screen space, so the guides stay hairline-thin and the markers keep
@@ -814,7 +875,6 @@ impl D2DRenderer {
         show_caret: bool,
     ) {
         unsafe {
-            let origin = &editor.origin;
             let text = &editor.text;
             let cursor = editor.cursor;
             let col = editor.color.to_d2d_color(1.0);
@@ -831,9 +891,18 @@ impl D2DRenderer {
                 editor.is_bold,
                 editor.is_italic,
                 editor.font_family,
+                editor.wrap_width(),
             );
-            let estimated_w = block_w.max(140.0) + 30.0;
-            let estimated_h = block_h + 14.0;
+
+            // A label typed into a shape is centred in it and wears no card of
+            // its own — the shape is the card. Free text keeps its own.
+            let (origin, estimated_w, estimated_h) = match editor.container_bounds {
+                Some(b) => {
+                    let o = contained_text_origin(b, block_w, block_h);
+                    (o, block_w, block_h)
+                }
+                None => (editor.origin, block_w.max(140.0) + 30.0, block_h + 14.0),
+            };
             let rect = D2D_RECT_F {
                 left: origin.x - 8.0,
                 top: origin.y - 6.0,
@@ -847,6 +916,7 @@ impl D2DRenderer {
                 radiusY: 6.0,
             };
 
+            if editor.container_bounds.is_none() {
             match editor.card_style {
                 TextCardStyle::Badge => {
                     if let Some(bg_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
@@ -897,6 +967,7 @@ impl D2DRenderer {
                         rt.DrawRoundedRectangle(&rrect, &border_brush, 1.0, None);
                     }
                 }
+            }
             }
 
             if let Some(brush) = self.solid_brush(rt, &col) {

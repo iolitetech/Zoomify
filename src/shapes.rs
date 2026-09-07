@@ -353,6 +353,43 @@ pub fn recognize_smart_shape(
     None
 }
 
+// ─────────────────────── Container labels ───────────────────────
+
+/// Whether a shape can hold a label.
+///
+/// Boxes and discs read as containers; a line, a scribble or a blur patch does
+/// not, and free-floating text should stay free-floating.
+pub fn can_contain_text(shape: &Shape) -> bool {
+    matches!(
+        shape,
+        Shape::Rectangle { .. } | Shape::Ellipse { .. } | Shape::StepBadge { .. }
+    )
+}
+
+/// Where a label of the given size sits inside its container: centred on both
+/// axes, which is what makes it look deliberate rather than dropped in.
+pub fn contained_text_origin(
+    container: (f32, f32, f32, f32),
+    text_w: f32,
+    text_h: f32,
+) -> Point2D {
+    let (l, t, r, b) = container;
+    Point2D::new(
+        l + ((r - l) - text_w) * 0.5,
+        t + ((b - t) - text_h) * 0.5,
+    )
+}
+
+/// The height a container needs to hold a label of `text_h`, never shrinking
+/// it below what it already is.
+///
+/// Growing rather than clipping is the less surprising behaviour: the box is
+/// the thing the user sized, but losing words is worse than a taller box.
+pub fn container_height_for(current: (f32, f32, f32, f32), text_h: f32, pad: f32) -> f32 {
+    let have = current.3 - current.1;
+    have.max(text_h + pad * 2.0)
+}
+
 // ─────────────────────── Snapping ───────────────────────
 //
 // Two kinds, both measured in screen DIPs so the pull feels the same at any
@@ -1009,6 +1046,55 @@ mod tests {
             fill: FillMode::None,
             pattern: StrokePattern::Solid,
         }
+    }
+
+    #[test]
+    fn test_only_boxes_and_discs_hold_labels() {
+        assert!(can_contain_text(&rect(0.0, 0.0, 10.0, 10.0)));
+        assert!(can_contain_text(&Shape::Ellipse {
+            start: Point2D::new(0.0, 0.0),
+            end: Point2D::new(10.0, 10.0),
+            color: ColorPreset::Red,
+            width: 1.0,
+            fill: FillMode::None,
+            pattern: StrokePattern::Solid,
+        }));
+        // A line or a blur patch is not a container.
+        assert!(!can_contain_text(&Shape::Line {
+            start: Point2D::new(0.0, 0.0),
+            end: Point2D::new(10.0, 10.0),
+            color: ColorPreset::Red,
+            width: 1.0,
+            pattern: StrokePattern::Solid,
+        }));
+        assert!(!can_contain_text(&Shape::Blur {
+            start: Point2D::new(0.0, 0.0),
+            end: Point2D::new(10.0, 10.0),
+            block_size: 8.0,
+        }));
+    }
+
+    #[test]
+    fn test_contained_text_is_centred_both_ways() {
+        let o = contained_text_origin((0.0, 0.0, 100.0, 60.0), 40.0, 20.0);
+        assert_eq!(o, Point2D::new(30.0, 20.0));
+    }
+
+    #[test]
+    fn test_contained_text_centres_even_when_it_overflows() {
+        // Wider than the box: it still centres, so it spills evenly rather
+        // than hanging off one side.
+        let o = contained_text_origin((0.0, 0.0, 50.0, 60.0), 90.0, 20.0);
+        assert_eq!(o.x, -20.0);
+    }
+
+    #[test]
+    fn test_container_grows_for_a_tall_label_but_never_shrinks() {
+        let box_ = (0.0, 0.0, 100.0, 60.0);
+        // Tall label: the box has to grow to text + padding on both sides.
+        assert_eq!(container_height_for(box_, 80.0, 10.0), 100.0);
+        // Short label leaves the height the user chose alone.
+        assert_eq!(container_height_for(box_, 10.0, 10.0), 60.0);
     }
 
     #[test]

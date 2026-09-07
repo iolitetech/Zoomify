@@ -414,6 +414,8 @@ impl D2DRenderer {
         is_bold: bool,
         is_italic: bool,
         font_family: TextFontFamily,
+        // Wrap at this width; f32::MAX for a single unbroken run per line.
+        max_width: f32,
     ) -> (f32, f32) {
         let fallback = || crate::types::measure_text_block(text, font_size);
         let Ok(format) = self.get_custom_text_format(font_size, is_bold, is_italic, font_family)
@@ -422,10 +424,17 @@ impl D2DRenderer {
         };
         let utf16: Vec<u16> = text.encode_utf16().collect();
         unsafe {
-            // No wrapping: a line ends only where the author put a newline.
+            // Unbounded width means a line ends only where the author put a
+            // newline; a real width lets DirectWrite wrap, which is what a
+            // label inside a container needs.
+            let wrap = if max_width.is_finite() {
+                max_width.max(1.0)
+            } else {
+                f32::MAX / 4.0
+            };
             let Ok(layout) =
                 self.dwrite_factory
-                    .CreateTextLayout(&utf16, &format, f32::MAX / 4.0, f32::MAX / 4.0)
+                    .CreateTextLayout(&utf16, &format, wrap, f32::MAX / 4.0)
             else {
                 return fallback();
             };
@@ -676,8 +685,21 @@ impl D2DRenderer {
 
             // ── Shapes Layer (Zoomed with canvas; Draw & StaticZoom only) ──
             if mode == AppMode::Draw || mode == AppMode::StaticZoom {
-                for shape in shapes {
-                    self.render_single_shape(rt, &shape.shape, bg_bitmap);
+                for a in shapes {
+                    // A label is drawn from its container's bounds, so it has
+                    // to wait until the container is on screen.
+                    if a.container.is_some() {
+                        continue;
+                    }
+                    self.render_single_shape(rt, &a.shape, bg_bitmap);
+                }
+                for a in shapes {
+                    if let Some(cid) = a.container
+                        && let Some(owner) = shapes.iter().find(|o| o.id == cid)
+                    {
+                        let bounds = crate::shapes::shape_bounds(&owner.shape);
+                        self.render_contained_text(rt, &a.shape, bounds);
+                    }
                 }
 
                 if let Some(shape) = active_shape {
@@ -1029,8 +1051,21 @@ impl D2DRenderer {
                             );
                         }
 
-                        for shape in shapes {
-                            self.render_single_shape(&dc_rt, &shape.shape, bg_bmp.as_ref());
+                        // Same two passes as the live path, so an exported
+                        // image has its labels in the same places.
+                        for a in shapes {
+                            if a.container.is_some() {
+                                continue;
+                            }
+                            self.render_single_shape(&dc_rt, &a.shape, bg_bmp.as_ref());
+                        }
+                        for a in shapes {
+                            if let Some(cid) = a.container
+                                && let Some(owner) = shapes.iter().find(|o| o.id == cid)
+                            {
+                                let bounds = crate::shapes::shape_bounds(&owner.shape);
+                                self.render_contained_text(&dc_rt, &a.shape, bounds);
+                            }
                         }
 
                         if let Some(shape) = active_shape {

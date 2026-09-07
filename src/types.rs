@@ -494,6 +494,11 @@ pub enum Shape {
 #[derive(Debug, Clone)]
 pub struct TextEditorState {
     pub origin: Point2D,
+    /// The shape this label is being typed into, if any. While it is set the
+    /// editor is laid out from the container's bounds rather than `origin`.
+    pub container: Option<ShapeId>,
+    /// Bounds of that container, refreshed as it is edited.
+    pub container_bounds: Option<(f32, f32, f32, f32)>,
     pub text: String,
     pub cursor: usize,
     pub color: ColorPreset,
@@ -516,6 +521,8 @@ impl TextEditorState {
     ) -> Self {
         Self {
             origin,
+            container: None,
+            container_bounds: None,
             text: String::new(),
             cursor: 0,
             color,
@@ -524,6 +531,18 @@ impl TextEditorState {
             is_italic,
             card_style,
             font_family,
+        }
+    }
+
+    /// Padding between a label and the edge of the shape holding it.
+    pub const CONTAINER_PADDING: f32 = 10.0;
+
+    /// Width the editor wraps at: the container's inner width, or unbounded
+    /// for free-floating text, which only breaks where the author does.
+    pub fn wrap_width(&self) -> f32 {
+        match self.container_bounds {
+            Some((l, _, r, _)) => (r - l - Self::CONTAINER_PADDING * 2.0).max(24.0),
+            None => f32::MAX,
         }
     }
 
@@ -695,6 +714,12 @@ pub enum HistoryAction {
         /// anything anchored to it survives the round trip.
         index: usize,
         shape: Annotation,
+    },
+    /// Several annotations removed together — a container and its label — so
+    /// one undo brings the whole thing back.
+    DeleteShapes {
+        /// Ascending by index, which is the order they go back in.
+        items: Vec<(usize, Annotation)>,
     },
     Clear(Vec<Annotation>),
     /// A move or resize applied to an already-committed shape. Addressed by id

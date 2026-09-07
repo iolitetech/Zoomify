@@ -32,7 +32,8 @@ use crate::clipboard::{copy_bgra_to_clipboard, get_clipboard_text};
 use crate::live_zoom::LiveZoomEngine;
 use crate::renderer::D2DRenderer;
 use crate::shapes::{
-    SNAP_TOLERANCE_DIP, SnapGuide, collect_anchors, handle_at, push_pressure,
+    SNAP_TOLERANCE_DIP, SnapGuide, can_contain_text, collect_anchors, container_height_for,
+    handle_at, push_pressure,
     recognize_smart_shape, resize_shape, resized_bounds, shape_bounds, shape_intersects_circle,
     snap_point, snap_to_angle, snap_to_square, snap_translation, translate_shape,
 };
@@ -1320,6 +1321,16 @@ impl OverlayWindow {
                         .push(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↩️", "Restored Erased Shape");
                 }
+                HistoryAction::DeleteShapes { items } => {
+                    // Ascending, so each insert lands before the next one's index.
+                    for (index, shape) in &items {
+                        let at = (*index).min(self.shapes.len());
+                        self.shapes.insert(at, shape.clone());
+                    }
+                    self.redo_history
+                        .push(HistoryAction::DeleteShapes { items });
+                    self.set_toast("↩️", "Restored Deleted Annotation");
+                }
                 HistoryAction::Clear(prev_shapes) => {
                     let current_shapes = std::mem::replace(&mut self.shapes, prev_shapes);
                     self.redo_history.push(HistoryAction::Clear(current_shapes));
@@ -1369,6 +1380,17 @@ impl OverlayWindow {
                         .push(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↪️", "Re-erased Shape");
                 }
+                HistoryAction::DeleteShapes { items } => {
+                    // Descending, so removing one does not shift the next.
+                    for (index, _) in items.iter().rev() {
+                        if *index < self.shapes.len() {
+                            self.shapes.remove(*index);
+                        }
+                    }
+                    self.undo_history
+                        .push(HistoryAction::DeleteShapes { items });
+                    self.set_toast("↪️", "Re-deleted Annotation");
+                }
                 HistoryAction::Clear(_prev_shapes) => {
                     let current_shapes = std::mem::take(&mut self.shapes);
                     self.undo_history.push(HistoryAction::Clear(current_shapes));
@@ -1417,7 +1439,7 @@ impl OverlayWindow {
         {
             let (w, h) =
                 self.renderer
-                    .measure_text_block(text, *font_size, *is_bold, *is_italic, *font_family);
+                    .measure_text_block(text, *font_size, *is_bold, *is_italic, *font_family, f32::MAX);
             return (origin.x, origin.y, origin.x + w.max(20.0), origin.y + h);
         }
         shape_bounds(shape)
@@ -1594,6 +1616,11 @@ impl OverlayWindow {
             });
             self.redo_history.clear();
         }
+        // Shrinking a box below its label would clip words, so it grows back.
+        if self.label_of(id).is_some() {
+            self.grow_container_to_fit(id);
+        }
+        let after = self.annotation(id).map(|a| a.shape.clone()).unwrap_or(after);
         let bounds = self.shape_bounds_exact(&after);
         if let Some(sel) = &mut self.selection {
             sel.original = after;
@@ -1606,14 +1633,38 @@ impl OverlayWindow {
         let Some(sel) = self.selection.take() else {
             return;
         };
-        let Some(index) = self.annotation_index(sel.id) else {
-            return;
-        };
-        let shape = self.shapes.remove(index);
-        self.undo_history.push(HistoryAction::DeleteShape { index, shape });
+        if self.delete_annotation(sel.id) {
+            self.set_toast("🗑️", "Deleted Annotation");
+            self.request_repaint();
+        }
+    }
+
+    /// Remove an annotation and any label bound to it, as one undo step.
+    ///
+    /// A label with no container left would render nowhere, so the two have to
+    /// go together — and come back together.
+    fn delete_annotation(&mut self, id: ShapeId) -> bool {
+        let mut ids = vec![id];
+        if let Some(label) = self.label_of(id) {
+            ids.push(label.id);
+        }
+        let mut items: Vec<(usize, Annotation)> = Vec::new();
+        // Highest index first, so each removal leaves the earlier ones valid.
+        let mut indices: Vec<usize> = ids
+            .iter()
+            .filter_map(|i| self.annotation_index(*i))
+            .collect();
+        indices.sort_unstable();
+        for index in indices.into_iter().rev() {
+            items.push((index, self.shapes.remove(index)));
+        }
+        if items.is_empty() {
+            return false;
+        }
+        items.reverse();
+        self.undo_history.push(HistoryAction::DeleteShapes { items });
         self.redo_history.clear();
-        self.set_toast("🗑️", "Deleted Annotation");
-        self.request_repaint();
+        true
     }
 
     /// Arrow-key nudge, in canvas units.
@@ -1690,7 +1741,8 @@ impl OverlayWindow {
     pub fn commit_text_editor(&mut self) {
         if let Some(editor) = self.text_editor.take() {
             if !editor.text.trim().is_empty() {
-                self.push_shape(Shape::Text {
+                let container = editor.container;
+                let id = self.push_shape(Shape::Text {
                     origin: editor.origin,
                     text: editor.text,
                     font_size: editor.font_size,
@@ -1700,9 +1752,153 @@ impl OverlayWindow {
                     card_style: editor.card_style,
                     font_family: editor.font_family,
                 });
+                if let Some(cid) = container {
+                    if self.annotation(cid).is_some() {
+                        if let Some(a) = self.shapes.iter_mut().find(|a| a.id == id) {
+                            a.container = Some(cid);
+                        }
+                        self.grow_container_to_fit(cid);
+                    } else {
+                        // The container went away mid-edit; leave the text as
+                        // free-floating rather than losing what was typed.
+                        if let Some(a) = self.shapes.iter_mut().find(|a| a.id == id) {
+                            a.container = None;
+                        }
+                    }
+                }
             }
             self.request_repaint();
         }
+    }
+
+    /// The label bound to `container`, if it has one.
+    fn label_of(&self, container: ShapeId) -> Option<&Annotation> {
+        self.shapes.iter().find(|a| a.container == Some(container))
+    }
+
+    /// Grow a container's height until its label fits.
+    ///
+    /// Only ever grows: the box is the thing the user sized, but silently
+    /// clipping words is worse than a taller box.
+    fn grow_container_to_fit(&mut self, container: ShapeId) {
+        let Some(label) = self.label_of(container) else {
+            return;
+        };
+        let Shape::Text {
+            text,
+            font_size,
+            is_bold,
+            is_italic,
+            font_family,
+            ..
+        } = label.shape.clone()
+        else {
+            return;
+        };
+        let Some(idx) = self.annotation_index(container) else {
+            return;
+        };
+        let bounds = shape_bounds(&self.shapes[idx].shape);
+        let pad = TextEditorState::CONTAINER_PADDING;
+        let wrap = ((bounds.2 - bounds.0) - pad * 2.0).max(24.0);
+        let (_, h) = self.renderer.measure_text_block(
+            &text, font_size, is_bold, is_italic, font_family, wrap,
+        );
+        let needed = container_height_for(bounds, h, pad);
+        if needed > bounds.3 - bounds.1 + 0.5 {
+            let to = (bounds.0, bounds.1, bounds.2, bounds.1 + needed);
+            let mut grown = self.shapes[idx].shape.clone();
+            resize_shape(&mut grown, bounds, to);
+            self.shapes[idx].shape = grown;
+        }
+    }
+
+    /// Open the editor on `container`'s label, creating one if it has none.
+    fn edit_container_label(&mut self, container: ShapeId) -> bool {
+        let Some(owner) = self.annotation(container) else {
+            return false;
+        };
+        if !can_contain_text(&owner.shape) {
+            return false;
+        }
+        let bounds = shape_bounds(&owner.shape);
+
+        // An existing label is lifted out and put back on commit, so editing
+        // and creating follow exactly the same path.
+        let existing = self.label_of(container).map(|a| (a.id, a.shape.clone()));
+        let (text, font_size, color, is_bold, is_italic, card_style, font_family) = match existing {
+            Some((
+                id,
+                Shape::Text {
+                    text,
+                    font_size,
+                    color,
+                    is_bold,
+                    is_italic,
+                    card_style,
+                    font_family,
+                    ..
+                },
+            )) => {
+                if let Some(index) = self.annotation_index(id) {
+                    let removed = self.shapes.remove(index);
+                    self.undo_history.push(HistoryAction::DeleteShape {
+                        index,
+                        shape: removed,
+                    });
+                    self.redo_history.clear();
+                }
+                (
+                    text,
+                    font_size,
+                    color,
+                    is_bold,
+                    is_italic,
+                    card_style,
+                    font_family,
+                )
+            }
+            _ => (
+                String::new(),
+                self.font_size,
+                self.current_color,
+                self.text_is_bold,
+                self.text_is_italic,
+                self.text_card_style,
+                self.text_font_family,
+            ),
+        };
+
+        let mut editor = TextEditorState::new(
+            Point2D::new(bounds.0, bounds.1),
+            color,
+            font_size,
+            is_bold,
+            is_italic,
+            card_style,
+            font_family,
+        );
+        editor.cursor = text.len();
+        editor.text = text;
+        editor.container = Some(container);
+        editor.container_bounds = Some(bounds);
+        self.text_editor = Some(editor);
+        self.selection = None;
+        self.set_toast("✏️", "Label (Esc to finish)");
+        self.request_repaint();
+        true
+    }
+
+    /// The topmost container-capable shape under a canvas point.
+    fn container_at(&self, canvas_pt: Point2D) -> Option<ShapeId> {
+        self.shapes
+            .iter()
+            .rev()
+            .find(|a| {
+                can_contain_text(&a.shape)
+                    && shape_intersects_circle(&a.shape, canvas_pt, 2.0)
+            })
+            .map(|a| a.id)
     }
 
     pub fn get_composite_capture(&self, include_spotlight: bool) -> Option<ScreenCapture> {
@@ -2725,14 +2921,11 @@ impl OverlayWindow {
                             }
                         }
                         if let Some(idx) = erased_idx {
-                            let erased_shape = this.shapes.remove(idx);
+                            let erased_id = this.shapes[idx].id;
                             this.selection = None;
-                            this.undo_history.push(HistoryAction::DeleteShape {
-                                index: idx,
-                                shape: erased_shape,
-                            });
-                            this.redo_history.clear();
-                            this.set_toast("🧹", "Erased Shape");
+                            if this.delete_annotation(erased_id) {
+                                this.set_toast("🧹", "Erased Shape");
+                            }
                             this.request_repaint();
                         }
                         return LRESULT(0);
@@ -3071,6 +3264,13 @@ impl OverlayWindow {
 
                     if this.current_tool == DrawTool::Text {
                         this.commit_text_editor();
+                        // Clicking inside a box types a label into it rather
+                        // than dropping loose text on top.
+                        if let Some(cid) = this.container_at(canvas_pt)
+                            && this.edit_container_label(cid)
+                        {
+                            return LRESULT(0);
+                        }
                         let cur_col = this.current_color;
                         let cur_sz = this.font_size;
                         let is_bold = this.text_is_bold;
@@ -3141,8 +3341,16 @@ impl OverlayWindow {
                         let consumed = this.select_press(screen_pt, canvas_pt);
                         // Double-clicking a text annotation puts it back in the
                         // editor instead of starting a drag.
-                        if msg == WM_LBUTTONDBLCLK && consumed && this.reopen_selected_text() {
-                            return LRESULT(0);
+                        if msg == WM_LBUTTONDBLCLK && consumed {
+                            let picked = this.selection.as_ref().map(|s| s.id);
+                            if let Some(id) = picked
+                                && this.edit_container_label(id)
+                            {
+                                return LRESULT(0);
+                            }
+                            if this.reopen_selected_text() {
+                                return LRESULT(0);
+                            }
                         }
                         if consumed {
                             let _ =
@@ -3162,14 +3370,11 @@ impl OverlayWindow {
                             }
                         }
                         if let Some(idx) = erased_idx {
-                            let erased_shape = this.shapes.remove(idx);
+                            let erased_id = this.shapes[idx].id;
                             this.selection = None;
-                            this.undo_history.push(HistoryAction::DeleteShape {
-                                index: idx,
-                                shape: erased_shape,
-                            });
-                            this.redo_history.clear();
-                            this.set_toast("🧹", "Erased Shape");
+                            if this.delete_annotation(erased_id) {
+                                this.set_toast("🧹", "Erased Shape");
+                            }
                         }
                         this.request_repaint();
                         return LRESULT(0);
