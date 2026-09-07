@@ -8,6 +8,7 @@ mod hotkeys;
 mod live_zoom;
 mod monitor;
 mod overlay;
+mod pdf_export;
 mod renderer;
 mod session;
 mod settings_window;

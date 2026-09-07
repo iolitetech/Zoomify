@@ -3211,6 +3211,50 @@ impl OverlayWindow {
         }
     }
 
+    /// `Ctrl+P`: the same flattened composite as Save/Copy, wrapped in a
+    /// single-page PDF for printing or attaching. Goes through
+    /// `get_composite_capture` like those two, so it honours `export_scale`
+    /// and the current spotlight the same way.
+    pub fn export_pdf(&mut self) {
+        let Some(composite) = self.get_composite_capture(self.spotlight.active) else {
+            self.set_toast("❌", "Nothing to export");
+            return;
+        };
+        let rgb = crate::pdf_export::bgra_to_rgb(&composite.pixels);
+        // Scale the DPI the page is sized from along with export_scale, so a
+        // 2x/3x export prints at the same physical page size, just sharper.
+        let effective_dpi = self.dpi as f32 * self.export_scale as f32;
+        let pdf = crate::pdf_export::build_pdf(composite.width, composite.height, &rgb, effective_dpi);
+
+        let dir = crate::session::pictures_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_toast("❌", format!("Cannot open Pictures folder: {}", e));
+            return;
+        }
+        let stamp = unsafe {
+            let t = windows::Win32::System::SystemInformation::GetLocalTime();
+            format!(
+                "{:04}{:02}{:02}-{:02}{:02}{:02}",
+                t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+            )
+        };
+        let mut path = dir.join(format!("Zoomify_{}.pdf", stamp));
+        let mut n = 2;
+        while path.exists() && n < 1000 {
+            path = dir.join(format!("Zoomify_{}_{}.pdf", stamp, n));
+            n += 1;
+        }
+        let name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "screenshot.pdf".to_string());
+
+        match std::fs::write(&path, pdf) {
+            Ok(()) => self.set_toast("📄", format!("Saved {}", name)),
+            Err(e) => self.set_toast("❌", format!("PDF save failed: {}", e)),
+        }
+    }
+
     // ─────────────────────── Snapping ───────────────────────
 
     /// Snap tolerance in canvas units. The constant is in screen DIPs, so
@@ -5251,6 +5295,9 @@ impl OverlayWindow {
                             }
                             k if k == 'J' as i32 => {
                                 this.export_svg();
+                            }
+                            k if k == 'P' as i32 => {
+                                this.export_pdf();
                             }
                             // Ctrl+Shift+Up/Down fades the selection; Ctrl+E
                             // cycles the arrowhead; Ctrl+Shift+E cycles the

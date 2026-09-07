@@ -4,8 +4,8 @@ Running list of what is built, what is deliberately not, and what is queued.
 Effort labels are rough: **S** a sitting, **M** a few sittings, **L** a project.
 
 Agreed order of work: **B → D → E → G → C → F → A.**
-B is done; **D is next.** Recording (A) is deliberately last: it is the
-largest single item and nothing else depends on it.
+B and D are done; **E is next.** Recording (A) is deliberately last: it is
+the largest single item and nothing else depends on it.
 
 Why this order: D's small items unblock real workflows immediately (paste a
 screenshot in, export above screen resolution). E carries the highest-value
@@ -42,6 +42,7 @@ return in an annotation tool. F is an architecture change to the overlay.
 | Paste an image from the clipboard (`Shape::Image`, CF_DIB/CF_BITMAP) | `1568186` |
 | Export above screen resolution (`Ctrl+Shift+E`, 1x/2x/3x) | `627a2f2` |
 | SVG export (`Ctrl+J`) — vector shapes over a raster background layer | `1cdd81c` |
+| PDF export (`Ctrl+P`) — single-page, no external crate | _pending_ |
 
 ### Design decisions worth not re-litigating
 
@@ -147,14 +148,14 @@ Rich text (per-run bold/italic/colour), alignment inside a container, auto-fit
 font size, bullet lists. All **M** — each needs `Shape::Text` to carry runs
 rather than one flat string.
 
-## D. Export & interop — **in progress**
+## D. Export & interop — **done**
 
-Clipboard paste, export-above-screen-resolution and SVG export are done (see
-Shipped above). Remaining:
+Everything in the original D list has shipped (see Shipped above): clipboard
+paste, export above screen resolution, SVG export, PDF export.
 
-| Item | Effort |
-|---|---|
-| PDF export | **M** |
+PDF is a single-page raster wrapper (no compression, no external crate) —
+SVG is the one that carries the "vector, reusable elsewhere" value; PDF's
+job is printing/attaching the same flattened picture Save/Copy produce.
 
 Drag-and-drop from Explorer/a browser was built and deliberately removed —
 see the note under "Design decisions worth not re-litigating" above for why,

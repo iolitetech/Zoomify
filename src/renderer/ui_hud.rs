@@ -622,6 +622,7 @@ impl D2DRenderer {
                     ("Ctrl+V", "Paste an image from the clipboard"),
                     ("Ctrl+Shift+E", "Cycle export scale (1x/2x/3x)"),
                     ("Ctrl+J", "Export annotations as SVG"),
+                    ("Ctrl+P", "Export screen + drawings as PDF"),
                     ("E / Delete", "Clear canvas (undoable)"),
                     ("Esc / Right-Click", "Return to Pan mode / Exit overlay"),
                 ];
