@@ -20,7 +20,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, LoadCursorW, RegisterClassExW, SW_HIDE,
     SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
     CS_DBLCLKS, ShowWindow, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_POINTERDOWN, WM_POINTERUP,
+    WM_POINTERUPDATE,
     WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -31,7 +32,7 @@ use crate::clipboard::{copy_bgra_to_clipboard, get_clipboard_text};
 use crate::live_zoom::LiveZoomEngine;
 use crate::renderer::D2DRenderer;
 use crate::shapes::{
-    handle_at, recognize_smart_shape, resize_shape, resized_bounds, shape_bounds,
+    handle_at, push_pressure, recognize_smart_shape, resize_shape, resized_bounds, shape_bounds,
     shape_intersects_circle, snap_to_angle, snap_to_square, translate_shape,
 };
 use crate::types::{
@@ -44,6 +45,58 @@ use crate::types::{
     TextCardStyle, TextEditorState, TextFontFamily, TextToolSettings, TimerAction,
     TimerWidgetState, ToastNotification, ZoomState,
 };
+
+/// What a pen or finger reported for one pointer message.
+struct PointerSample {
+    /// Client-space position in physical pixels, matching what a mouse message
+    /// would have packed into lparam.
+    client_x: i16,
+    client_y: i16,
+    /// Normalised 0..=1, only for a pen that reports a pressure axis.
+    pressure: Option<f32>,
+    in_contact: bool,
+}
+
+/// Read a WM_POINTER* message. Returns `None` for pointers that are really the
+/// mouse, which keeps the existing WM_MOUSE* path authoritative for it.
+unsafe fn pointer_sample(hwnd: HWND, wparam: WPARAM) -> Option<PointerSample> {
+    use windows::Win32::Graphics::Gdi::ScreenToClient;
+    use windows::Win32::UI::Input::Pointer::{
+        GetPointerInfo, GetPointerPenInfo, POINTER_FLAG_INCONTACT, POINTER_INFO, POINTER_PEN_INFO,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{PEN_MASK_PRESSURE, PT_PEN, PT_TOUCH};
+
+    unsafe {
+        let id = (wparam.0 & 0xFFFF) as u32;
+        let mut info = POINTER_INFO::default();
+        GetPointerInfo(id, &mut info).ok()?;
+        if info.pointerType != PT_PEN && info.pointerType != PT_TOUCH {
+            return None;
+        }
+
+        let mut pt = info.ptPixelLocation;
+        let _ = ScreenToClient(hwnd, &mut pt);
+
+        let pressure = if info.pointerType == PT_PEN {
+            let mut pen = POINTER_PEN_INFO::default();
+            if GetPointerPenInfo(id, &mut pen).is_ok() && (pen.penMask & PEN_MASK_PRESSURE) != 0 {
+                // The pen pressure axis is 0..1024 with 0 meaning "not reported".
+                Some((pen.pressure as f32 / 1024.0).clamp(0.0, 1.0))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Some(PointerSample {
+            client_x: pt.x as i16,
+            client_y: pt.y as i16,
+            pressure,
+            in_contact: (info.pointerFlags.0 & POINTER_FLAG_INCONTACT.0) != 0,
+        })
+    }
+}
 
 const OVERLAY_CLASS_NAME: PCWSTR = w!("ZoomifyFullscreenOverlay");
 const TIMER_ID_ANIMATION: usize = 1001;
@@ -84,6 +137,12 @@ pub struct OverlayWindow {
     pub undo_history: Vec<HistoryAction>,
     pub redo_history: Vec<HistoryAction>,
     pub active_shape: Option<Shape>,
+    /// Pressure from the most recent pen sample, 0..=1. `None` for mouse,
+    /// touch, or a pen with no pressure axis.
+    pub pen_pressure: Option<f32>,
+    /// True between a pen/touch contact and its release, so stray mouse
+    /// messages can be ignored for the duration.
+    pub pen_active: bool,
     /// Annotation picked with the Select tool, if any.
     pub selection: Option<Selection>,
     pub current_tool: DrawTool,
@@ -316,6 +375,8 @@ impl OverlayWindow {
                 },
                 blur_settings: BlurToolSettings { block_size: 14.0 },
                 live_zoom: LiveZoomEngine::new(),
+                pen_pressure: None,
+                pen_active: false,
                 selection: None,
                 is_drawing: false,
                 draw_start_pt: Point2D::default(),
@@ -1803,6 +1864,15 @@ impl OverlayWindow {
         }
     }
 
+    /// First entry of a new stroke's pressure track, or empty for input with
+    /// no pressure axis (mouse, touch), which keeps the stroke uniform-width.
+    fn pressure_seed(&self) -> Vec<f32> {
+        match self.pen_pressure {
+            Some(p) => vec![p],
+            None => Vec::new(),
+        }
+    }
+
     pub fn create_shape_for_tool(&self, canvas_pt: Point2D) -> Shape {
         match self.current_tool {
             DrawTool::Highlighter => Shape::Stroke {
@@ -1811,6 +1881,7 @@ impl OverlayWindow {
                 width: self.highlighter_settings.stroke_width,
                 is_highlighter: true,
                 pattern: StrokePattern::Solid,
+                pressures: self.pressure_seed(),
             },
             DrawTool::Line => Shape::Line {
                 start: canvas_pt,
@@ -1864,6 +1935,7 @@ impl OverlayWindow {
                 width: self.pen_settings.stroke_width,
                 is_highlighter: false,
                 pattern: self.pen_settings.pattern,
+                pressures: self.pressure_seed(),
             },
         }
     }
@@ -2117,6 +2189,57 @@ impl OverlayWindow {
                 Ok(b) => b,
                 Err(_) => return DefWindowProcW(hwnd, msg, wparam, lparam),
             };
+
+            // ── Pen and touch ──
+            //
+            // Pointer messages are translated into their mouse equivalents so
+            // every tool works from one code path, with the pen's pressure
+            // recorded on the side. Handling them here (rather than letting
+            // DefWindowProc promote them) also stops each contact arriving
+            // twice, once as a pointer and once as a synthetic mouse click.
+            let (msg, lparam, from_pointer) = match msg {
+                WM_POINTERDOWN | WM_POINTERUPDATE | WM_POINTERUP => {
+                    let Some(sample) = pointer_sample(hwnd, wparam) else {
+                        // A mouse wearing a pointer's clothes: leave it to the
+                        // WM_MOUSE* path so nothing is handled twice.
+                        return DefWindowProcW(hwnd, msg, wparam, lparam);
+                    };
+                    this.pen_pressure = sample.pressure;
+                    let packed = LPARAM(
+                        ((sample.client_x as u16 as isize) & 0xFFFF)
+                            | (((sample.client_y as u16 as isize) & 0xFFFF) << 16),
+                    );
+                    let mapped = match msg {
+                        WM_POINTERDOWN => {
+                            this.pen_active = true;
+                            WM_LBUTTONDOWN
+                        }
+                        WM_POINTERUP => {
+                            this.pen_active = false;
+                            WM_LBUTTONUP
+                        }
+                        // A hovering pen still moves the cursor; only a stroke
+                        // in progress draws, which `is_drawing` already gates.
+                        _ => WM_MOUSEMOVE,
+                    };
+                    (mapped, packed, true)
+                }
+                other => (other, lparam, false),
+            };
+
+            // While a pen or finger is down the mouse is a bystander. Windows
+            // still moves and restores the system cursor around an injected or
+            // real pen stroke, and a stray move promoted from that would splice
+            // the cursor's position straight into the middle of the stroke.
+            if this.pen_active
+                && !from_pointer
+                && matches!(
+                    msg,
+                    WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_LBUTTONDBLCLK
+                )
+            {
+                return LRESULT(0);
+            }
 
             match msg {
                 WM_PAINT => {
@@ -2550,14 +2673,18 @@ impl OverlayWindow {
                         this.was_shifted_during_draw = is_shift;
                         let start_pt = this.draw_start_pt;
 
+                        let pen_pressure = this.pen_pressure;
                         match &mut this.active_shape {
-                            Some(Shape::Stroke { points, .. }) => {
+                            Some(Shape::Stroke {
+                                points, pressures, ..
+                            }) => {
                                 let should_push = match points.last() {
                                     Some(last) => last.distance(&canvas_pt) >= 1.5,
                                     None => true,
                                 };
                                 if should_push {
                                     points.push(canvas_pt);
+                                    push_pressure(pressures, pen_pressure, points.len());
                                     this.request_repaint();
                                 }
                             }
@@ -2969,6 +3096,7 @@ impl OverlayWindow {
                                 width: this.pen_settings.stroke_width,
                                 is_highlighter: false,
                                 pattern: this.pen_settings.pattern,
+                                pressures: this.pressure_seed(),
                             }
                         }
                     } else {

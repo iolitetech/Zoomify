@@ -621,6 +621,11 @@ impl SettingsWindow {
                         self.hover_item = Some("btn_open_cfg".to_string());
                         return;
                     }
+                    let cy_wgc = 406.0;
+                    if x >= 620.0 && x <= 685.0 && y >= cy_wgc + 20.0 && y <= cy_wgc + 54.0 {
+                        self.hover_item = Some("gen_toggle_wgc".to_string());
+                        return;
+                    }
                 }
                 SettingsTab::Canvas => {
                     // 1. Zoom stepper [-] [+]
@@ -838,6 +843,12 @@ impl SettingsWindow {
                 let cy2 = 242.0;
                 if x >= 620.0 && x <= 685.0 && y >= cy2 + 20.0 && y <= cy2 + 54.0 {
                     self.config.allow_monitor_cycling = !self.config.allow_monitor_cycling;
+                    self.request_repaint();
+                    return;
+                }
+                let cy_wgc = 406.0;
+                if x >= 620.0 && x <= 685.0 && y >= cy_wgc + 20.0 && y <= cy_wgc + 54.0 {
+                    self.config.use_graphics_capture = !self.config.use_graphics_capture;
                     self.request_repaint();
                     return;
                 }
@@ -1627,6 +1638,58 @@ impl SettingsWindow {
                 &b,
             );
         }
+
+        // Card 5: capture backend
+        let cy_wgc = 406.0;
+        let card5 = D2D_RECT_F {
+            left: 205.0,
+            top: cy_wgc,
+            right: 700.0,
+            bottom: cy_wgc + 72.0,
+        };
+        let rr5 = D2D1_ROUNDED_RECT {
+            rect: card5,
+            radiusX: 7.0,
+            radiusY: 7.0,
+        };
+        if let Ok(b) = rt.CreateSolidColorBrush(&card_bg, None) {
+            rt.FillRoundedRectangle(&rr5, &b);
+        }
+        if let Ok(b) = rt.CreateSolidColorBrush(&card_border, None) {
+            rt.DrawRoundedRectangle(&rr5, &b, 1.0, None);
+        }
+        if let Ok(b) = rt.CreateSolidColorBrush(&text_primary, None) {
+            let tr = D2D_RECT_F {
+                left: 220.0,
+                top: cy_wgc + 14.0,
+                right: 590.0,
+                bottom: cy_wgc + 34.0,
+            };
+            draw_text(
+                rt,
+                w!("Hardware Screen Capture").as_wide(),
+                &self.format_section,
+                &tr,
+                &b,
+            );
+        }
+        if let Ok(b) = rt.CreateSolidColorBrush(&text_secondary, None) {
+            let tr = D2D_RECT_F {
+                left: 220.0,
+                top: cy_wgc + 38.0,
+                right: 590.0,
+                bottom: cy_wgc + 58.0,
+            };
+            draw_text(
+                rt,
+                w!("Capture composed frames so video and protected content are not black")
+                    .as_wide(),
+                &self.format_desc,
+                &tr,
+                &b,
+            );
+        }
+        self.render_toggle_switch(rt, 636.0, cy_wgc + 26.0, self.config.use_graphics_capture);
     }
 
     unsafe fn render_sessions_tab(&self, rt: &ID2D1HwndRenderTarget) {

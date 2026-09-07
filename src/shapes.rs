@@ -353,6 +353,37 @@ pub fn recognize_smart_shape(
     None
 }
 
+// ─────────────────────── Pen pressure ───────────────────────
+
+/// Maps pen pressure (0..=1) onto a stroke-width multiplier.
+///
+/// The floor keeps a feather-light touch visible rather than invisible, and the
+/// ceiling stops a hard press from ballooning past the chosen nib size.
+pub fn pressure_width_factor(pressure: f32) -> f32 {
+    const MIN: f32 = 0.35;
+    const MAX: f32 = 1.45;
+    MIN + (MAX - MIN) * pressure.clamp(0.0, 1.0)
+}
+
+/// Extend a stroke's pressure track alongside its points.
+///
+/// A stroke that started without pressure stays without it, so mouse strokes
+/// keep the cheaper uniform-width path. Once a stroke has pressure the track is
+/// kept exactly as long as `points`, repeating the last sample if the pen stops
+/// reporting, because the renderer only honours a track that lines up.
+pub fn push_pressure(pressures: &mut Vec<f32>, sample: Option<f32>, point_count: usize) {
+    if pressures.is_empty() {
+        return;
+    }
+    let next = sample.or_else(|| pressures.last().copied()).unwrap_or(1.0);
+    pressures.push(next);
+    // A dropped pointer message must not desynchronise the two vectors.
+    while pressures.len() < point_count {
+        pressures.push(next);
+    }
+    pressures.truncate(point_count);
+}
+
 // ─────────────────────── Selection geometry ───────────────────────
 //
 // The Select tool works entirely off a shape's axis-aligned bounding box:
@@ -762,6 +793,61 @@ mod tests {
     }
 
     #[test]
+    fn test_pressure_width_factor_is_monotonic_and_bounded() {
+        let light = pressure_width_factor(0.0);
+        let mid = pressure_width_factor(0.5);
+        let hard = pressure_width_factor(1.0);
+        assert!(light < mid && mid < hard);
+        // A feather touch stays visible; a hard press stays near the nib size.
+        assert!(light > 0.2, "{}", light);
+        assert!(hard < 1.6, "{}", hard);
+        // Out-of-range readings clamp rather than invert the stroke.
+        assert_eq!(pressure_width_factor(-1.0), light);
+        assert_eq!(pressure_width_factor(9.0), hard);
+    }
+
+    #[test]
+    fn test_push_pressure_ignores_strokes_that_never_had_any() {
+        // A mouse stroke must stay on the cheaper uniform-width path.
+        let mut p: Vec<f32> = Vec::new();
+        push_pressure(&mut p, Some(0.8), 5);
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn test_push_pressure_tracks_point_count() {
+        let mut p = vec![0.5];
+        push_pressure(&mut p, Some(0.6), 2);
+        push_pressure(&mut p, Some(0.7), 3);
+        assert_eq!(p, vec![0.5, 0.6, 0.7]);
+    }
+
+    #[test]
+    fn test_push_pressure_repeats_last_sample_when_the_pen_goes_quiet() {
+        let mut p = vec![0.4];
+        push_pressure(&mut p, None, 2);
+        assert_eq!(p, vec![0.4, 0.4]);
+    }
+
+    #[test]
+    fn test_push_pressure_resyncs_after_a_dropped_message() {
+        // The renderer only honours a track the same length as the points, so a
+        // gap must be filled rather than left short.
+        let mut p = vec![0.3];
+        push_pressure(&mut p, Some(0.9), 4);
+        assert_eq!(p.len(), 4);
+        assert_eq!(p[0], 0.3);
+        assert!(p[1..].iter().all(|v| *v == 0.9));
+    }
+
+    #[test]
+    fn test_push_pressure_trims_if_it_ever_runs_ahead() {
+        let mut p = vec![0.1, 0.2, 0.3, 0.4];
+        push_pressure(&mut p, Some(0.5), 2);
+        assert_eq!(p.len(), 2);
+    }
+
+    #[test]
     fn test_shape_bounds_stroke_covers_every_point_plus_half_width() {
         let s = Shape::Stroke {
             points: vec![
@@ -772,6 +858,7 @@ mod tests {
             color: ColorPreset::Red,
             width: 4.0,
             is_highlighter: false,
+            pressures: Vec::new(),
             pattern: StrokePattern::Solid,
         };
         assert_eq!(shape_bounds(&s), (8.0, 8.0, 62.0, 72.0));
@@ -799,6 +886,7 @@ mod tests {
             color: ColorPreset::Red,
             width: 2.0,
             is_highlighter: false,
+            pressures: Vec::new(),
             pattern: StrokePattern::Solid,
         };
         translate_shape(&mut s, 5.0, -3.0);
@@ -923,6 +1011,7 @@ mod tests {
                 color: ColorPreset::Red,
                 width: 8.0,
                 is_highlighter: false,
+                pressures: Vec::new(),
                 pattern: StrokePattern::Solid,
             },
         ];

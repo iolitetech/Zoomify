@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod capture;
+mod capture_wgc;
 mod clipboard;
 mod config;
 mod hotkeys;
@@ -359,6 +360,7 @@ unsafe extern "system" fn tray_wnd_proc(
 
             settings_window::WM_SETTINGS_APPLIED => {
                 let cfg = config::AppConfig::load();
+                capture::set_use_graphics_capture(cfg.use_graphics_capture);
                 let failed = ctx.hotkeys.reload_from_config(&cfg);
                 let mut overlay = ctx.overlay.borrow_mut();
                 overlay.stroke_width = cfg.default_stroke_width;
@@ -452,6 +454,10 @@ fn main() -> Result<()> {
             Some(hinstance),
             None,
         )?;
+
+        capture::set_use_graphics_capture(
+            config::AppConfig::load().use_graphics_capture,
+        );
 
         let overlay = OverlayWindow::create()?;
         overlay.borrow_mut().set_host_hwnd(tray_hwnd);

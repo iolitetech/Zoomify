@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_SIZE_U, D2D1_PIXEL_FORMAT};
 use windows::Win32::Graphics::Direct2D::{D2D1_BITMAP_PROPERTIES, ID2D1Bitmap, ID2D1RenderTarget};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -22,8 +23,77 @@ pub struct ScreenCapture {
     pub pixels: Vec<u8>, // 32-bit BGRA top-down
 }
 
+/// Whether to try Windows.Graphics.Capture before falling back to BitBlt.
+/// Set once from config at startup; captures happen too often to re-read a file.
+static USE_WGC: AtomicBool = AtomicBool::new(true);
+
+pub fn set_use_graphics_capture(enabled: bool) {
+    USE_WGC.store(enabled, Ordering::Relaxed);
+}
+
 impl ScreenCapture {
+    /// Grab a screen rectangle, preferring Windows.Graphics.Capture.
+    ///
+    /// WGC sees what the compositor composed — hardware-overlay video and
+    /// accelerated surfaces that come back black through GDI — so it is tried
+    /// first. It only works a whole monitor at a time, so a rectangle that
+    /// spans displays (or any failure at all) drops through to BitBlt.
     pub fn capture_rect(x: i32, y: i32, width: u32, height: u32) -> Option<Self> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        if USE_WGC.load(Ordering::Relaxed)
+            && let Some(cap) = Self::capture_rect_wgc(x, y, width, height)
+        {
+            return Some(cap);
+        }
+        Self::capture_rect_bitblt(x, y, width, height)
+    }
+
+    fn capture_rect_wgc(x: i32, y: i32, width: u32, height: u32) -> Option<Self> {
+        let (mon_w, mon_h, pixels, origin_x, origin_y) =
+            crate::capture_wgc::capture_monitor_at(x, y)?;
+
+        let src_x = x - origin_x;
+        let src_y = y - origin_y;
+        // Anything reaching outside this monitor is a job for BitBlt, which
+        // reads the whole virtual desktop.
+        if src_x < 0
+            || src_y < 0
+            || src_x as u32 + width > mon_w
+            || src_y as u32 + height > mon_h
+        {
+            return None;
+        }
+
+        if src_x == 0 && src_y == 0 && width == mon_w && height == mon_h {
+            return Some(Self {
+                x,
+                y,
+                width,
+                height,
+                pixels,
+            });
+        }
+
+        let mut out = vec![0u8; (width as usize) * (height as usize) * 4];
+        let src_stride = mon_w as usize * 4;
+        let dst_stride = width as usize * 4;
+        for row in 0..height as usize {
+            let s = (src_y as usize + row) * src_stride + src_x as usize * 4;
+            let dbeg = row * dst_stride;
+            out[dbeg..dbeg + dst_stride].copy_from_slice(&pixels[s..s + dst_stride]);
+        }
+        Some(Self {
+            x,
+            y,
+            width,
+            height,
+            pixels: out,
+        })
+    }
+
+    fn capture_rect_bitblt(x: i32, y: i32, width: u32, height: u32) -> Option<Self> {
         unsafe {
             if width == 0 || height == 0 {
                 return None;

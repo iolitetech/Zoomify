@@ -101,6 +101,10 @@ fn default_show_minimap() -> bool {
     true
 }
 
+fn default_graphics_capture() -> bool {
+    true
+}
+
 /// Ten is enough to walk back through a talk without filling a folder.
 fn default_session_keep_last() -> u32 {
     10
@@ -170,6 +174,11 @@ pub struct AppConfig {
     /// Keep only this many sessions in the folder; 0 keeps every one.
     #[serde(default = "default_session_keep_last")]
     pub session_keep_last: u32,
+    /// Capture the screen through Windows.Graphics.Capture rather than BitBlt.
+    /// On means hardware-composed content (video, protected surfaces) is not
+    /// captured black; turn it off to force the GDI path.
+    #[serde(default = "default_graphics_capture")]
+    pub use_graphics_capture: bool,
     #[serde(default = "default_hk_static_zoom")]
     pub hotkey_static_zoom: HotkeyBinding,
     #[serde(default = "default_hk_draw")]
@@ -207,6 +216,7 @@ impl Default for AppConfig {
             session_folder: String::new(),
             session_export_png: false,
             session_keep_last: default_session_keep_last(),
+            use_graphics_capture: default_graphics_capture(),
             hotkey_static_zoom: default_hk_static_zoom(),
             hotkey_draw: default_hk_draw(),
             hotkey_spotlight: default_hk_spotlight(),

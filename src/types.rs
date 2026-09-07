@@ -359,6 +359,11 @@ pub enum Shape {
         width: f32,
         is_highlighter: bool,
         pattern: StrokePattern,
+        /// Per-point pen pressure in 0..=1, parallel to `points`. Empty when
+        /// the stroke came from a mouse or a pen with no pressure axis, in
+        /// which case `width` applies uniformly.
+        #[serde(default)]
+        pressures: Vec<f32>,
     },
     Line {
         start: Point2D,

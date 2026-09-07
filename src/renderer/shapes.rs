@@ -1,7 +1,7 @@
 use super::{D2DRenderer, v2};
 use crate::shapes::{
     SELECTION_HANDLE_SIZE, calculate_arrow_head, normalize_rect, points_to_bezier_segments,
-    selection_handle_points,
+    pressure_width_factor, selection_handle_points,
 };
 use crate::types::{
     ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserRipple, LaserTrailPoint, Point2D, Shape,
@@ -35,6 +35,7 @@ impl D2DRenderer {
                     width,
                     is_highlighter,
                     pattern,
+                    pressures,
                 } => {
                     if points.is_empty() {
                         return;
@@ -48,14 +49,43 @@ impl D2DRenderer {
                     };
                     let col = color.to_d2d_color(alpha);
 
+                    // A pen stroke carries a pressure per point, so it is drawn
+                    // segment by segment with a width that follows the press.
+                    // Bezier smoothing needs one width for the whole figure, so
+                    // it only applies to the uniform case.
+                    let has_pressure =
+                        !pressures.is_empty() && pressures.len() == points.len();
+
                     if let Some(brush) = self.solid_brush(rt, &col) {
                         if points.len() == 1 {
+                            let w = if has_pressure {
+                                actual_width * pressure_width_factor(pressures[0])
+                            } else {
+                                actual_width
+                            };
                             let dot = D2D1_ELLIPSE {
                                 point: v2(points[0].x, points[0].y),
-                                radiusX: actual_width / 2.0,
-                                radiusY: actual_width / 2.0,
+                                radiusX: w / 2.0,
+                                radiusY: w / 2.0,
                             };
                             rt.FillEllipse(&dot, &brush);
+                        } else if has_pressure {
+                            let stroke_style = self.get_stroke_style(*pattern);
+                            for i in 0..points.len() - 1 {
+                                // Average the endpoints so neighbouring segments
+                                // meet at the same width and the line reads as
+                                // one tapering stroke rather than a staircase.
+                                let f = (pressure_width_factor(pressures[i])
+                                    + pressure_width_factor(pressures[i + 1]))
+                                    * 0.5;
+                                rt.DrawLine(
+                                    v2(points[i].x, points[i].y),
+                                    v2(points[i + 1].x, points[i + 1].y),
+                                    &brush,
+                                    actual_width * f,
+                                    Some(stroke_style),
+                                );
+                            }
                         } else if let Ok(path) = self.factory.CreatePathGeometry()
                             && let Ok(sink) = path.Open()
                         {

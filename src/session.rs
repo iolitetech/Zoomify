@@ -287,6 +287,7 @@ mod tests {
                 color: ColorPreset::Custom(12, 240, 7),
                 width: 4.0,
                 is_highlighter: true,
+                pressures: Vec::new(),
                 pattern: StrokePattern::Dashed,
             },
             Shape::Text {
