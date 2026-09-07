@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
@@ -351,6 +353,71 @@ impl TextFontFamily {
     }
 }
 
+/// Stable identity for an annotation.
+///
+/// Relationships between annotations — a label inside a box, an arrow anchored
+/// to one — have to survive deletion, undo and reordering. A position in a
+/// `Vec` survives none of those: delete one shape and every later index shifts,
+/// silently re-pointing anything that referred to them.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+)]
+pub struct ShapeId(pub u64);
+
+static NEXT_SHAPE_ID: AtomicU64 = AtomicU64::new(1);
+
+impl ShapeId {
+    pub fn fresh() -> Self {
+        Self(NEXT_SHAPE_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Push the counter past everything in a loaded session, so newly drawn
+    /// annotations cannot collide with the ids that came off disk.
+    pub fn reserve_above(highest: ShapeId) {
+        let want = highest.0 + 1;
+        let mut current = NEXT_SHAPE_ID.load(Ordering::Relaxed);
+        while current < want {
+            match NEXT_SHAPE_ID.compare_exchange_weak(
+                current,
+                want,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+/// A shape plus everything about it that is not geometry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Annotation {
+    pub id: ShapeId,
+    pub shape: Shape,
+    /// For a `Text`: the annotation it is centred inside.
+    ///
+    /// While this is set the text's own `origin` is unused — its layout is
+    /// derived from the container's bounds every frame, which is exactly what
+    /// makes it follow the container through moves and resizes for free.
+    #[serde(default)]
+    pub container: Option<ShapeId>,
+}
+
+impl Annotation {
+    pub fn new(shape: Shape) -> Self {
+        Self {
+            id: ShapeId::fresh(),
+            shape,
+            container: None,
+        }
+    }
+
+    pub fn is_contained_text(&self) -> bool {
+        self.container.is_some() && matches!(self.shape, Shape::Text { .. })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Shape {
     Stroke {
@@ -618,19 +685,22 @@ pub fn measure_text_block(text: &str, font_size: f32) -> (f32, f32) {
 
 #[derive(Debug, Clone)]
 pub enum HistoryAction {
-    AddShape(Shape),
+    AddShape(Annotation),
     AddStepBadge {
-        shape: Shape,
+        shape: Annotation,
         prev_counter: u32,
     },
     DeleteShape {
+        /// Where to put it back; the annotation carries its own identity, so
+        /// anything anchored to it survives the round trip.
         index: usize,
-        shape: Shape,
+        shape: Annotation,
     },
-    Clear(Vec<Shape>),
-    /// A move or resize applied to an already-committed shape.
+    Clear(Vec<Annotation>),
+    /// A move or resize applied to an already-committed shape. Addressed by id
+    /// rather than position, which shifts under it.
     TransformShape {
-        index: usize,
+        id: ShapeId,
         before: Shape,
         after: Shape,
     },
@@ -674,8 +744,9 @@ pub enum DragKind {
 /// A shape picked with the Select tool, plus any drag in progress.
 #[derive(Debug, Clone)]
 pub struct Selection {
-    /// Index into `shapes`.
-    pub index: usize,
+    /// Which annotation is selected. An id rather than a position, because
+    /// positions shift under deletions and undo.
+    pub id: ShapeId,
     pub drag: Option<DragKind>,
     /// Canvas point where the current drag started.
     pub grab: Point2D,

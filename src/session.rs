@@ -20,10 +20,10 @@ use windows::Win32::UI::Shell::{
 use windows::core::{PCWSTR, w};
 
 use crate::config::AppConfig;
-use crate::types::{CanvasBackground, Shape};
+use crate::types::{Annotation, CanvasBackground, Shape, ShapeId};
 
 /// Bumped only when the on-disk shape changes incompatibly.
-pub const SESSION_VERSION: u32 = 1;
+pub const SESSION_VERSION: u32 = 2;
 
 const FILE_PREFIX: &str = "Zoomify_Session_";
 const FILE_SUFFIX: &str = ".json";
@@ -35,11 +35,30 @@ pub struct Session {
     pub saved_at: String,
     pub background: String,
     pub step_counter: u32,
-    pub shapes: Vec<Shape>,
+    /// v1 files stored bare shapes with no identity. They still load: each one
+    /// is handed a fresh id on the way in.
+    #[serde(deserialize_with = "de_annotations")]
+    pub shapes: Vec<Annotation>,
+}
+
+fn de_annotations<'de, D>(deserializer: D) -> Result<Vec<Annotation>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Either {
+        Modern(Vec<Annotation>),
+        Legacy(Vec<Shape>),
+    }
+    Ok(match Either::deserialize(deserializer)? {
+        Either::Modern(v) => v,
+        Either::Legacy(v) => v.into_iter().map(Annotation::new).collect(),
+    })
 }
 
 impl Session {
-    pub fn new(shapes: Vec<Shape>, background: CanvasBackground, step_counter: u32) -> Self {
+    pub fn new(shapes: Vec<Annotation>, background: CanvasBackground, step_counter: u32) -> Self {
         Self {
             version: SESSION_VERSION,
             saved_at: local_stamp_readable(),
@@ -150,6 +169,10 @@ pub fn load(path: &Path) -> Result<Session, String> {
             "saved by a newer Zoomify (format v{}, this build reads v{})",
             session.version, SESSION_VERSION
         ));
+    }
+    // Newly drawn annotations must not collide with ids that came off disk.
+    if let Some(highest) = session.shapes.iter().map(|a| a.id).max() {
+        ShapeId::reserve_above(highest);
     }
     Ok(session)
 }
@@ -280,8 +303,8 @@ mod tests {
         dir
     }
 
-    fn sample_shapes() -> Vec<Shape> {
-        vec![
+    fn sample_shapes() -> Vec<Annotation> {
+        [
             Shape::Stroke {
                 points: vec![Point2D::new(1.0, 2.0), Point2D::new(3.0, 4.5)],
                 color: ColorPreset::Custom(12, 240, 7),
@@ -301,6 +324,32 @@ mod tests {
                 font_family: crate::types::TextFontFamily::CascadiaCode,
             },
         ]
+        .into_iter()
+        .map(Annotation::new)
+        .collect()
+    }
+
+    #[test]
+    fn test_v1_sessions_still_load_and_get_fresh_ids() {
+        // v1 stored bare shapes, with no identity at all.
+        let dir = temp_dir("v1");
+        let path = dir.join("Zoomify_Session_20240101-000000.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"saved_at":"","background":"Whiteboard","step_counter":3,
+                "shapes":[{"Text":{"origin":{"x":1.0,"y":2.0},"text":"hi","font_size":20.0,
+                "color":"Red","is_bold":false,"is_italic":false,"card_style":"Badge",
+                "font_family":"SegoeUI"}}]}"#,
+        )
+        .unwrap();
+
+        let s = load(&path).unwrap();
+        assert_eq!(s.shapes.len(), 1);
+        assert_eq!(s.step_counter, 3);
+        assert!(s.shapes[0].container.is_none());
+        // It got an id, and the counter was pushed past it so nothing collides.
+        let assigned = s.shapes[0].id;
+        assert!(ShapeId::fresh() > assigned);
     }
 
     #[test]

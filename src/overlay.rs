@@ -38,10 +38,12 @@ use crate::shapes::{
 };
 use crate::types::{
     AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, BlurToolSettings,
-    CanvasBackground, ColorPickerState, ColorPreset, DragKind, DrawTool, FillMode, FluentAction,
+    Annotation, CanvasBackground, ColorPickerState, ColorPreset, DragKind, DrawTool, FillMode,
+    FluentAction,
     FluentToolbarState,
     HistoryAction, LaserRipple, LaserTrailPoint, LoupeState, MinimapState, Point2D, Shape,
-    Selection, ShapeToolSettings, SpotlightState, StepBadgeToolSettings, StrokePattern,
+    Selection, ShapeId, ShapeToolSettings, SpotlightState, StepBadgeToolSettings,
+    StrokePattern,
     StrokeToolSettings,
     TextCardStyle, TextEditorState, TextFontFamily, TextToolSettings, TimerAction,
     TimerWidgetState, ToastNotification, ZoomState,
@@ -134,7 +136,7 @@ pub struct OverlayWindow {
     pub spotlight: SpotlightState,
     pub loupe: LoupeState,
     pub was_shifted_during_draw: bool,
-    pub shapes: Vec<Shape>,
+    pub shapes: Vec<Annotation>,
     pub undo_history: Vec<HistoryAction>,
     pub redo_history: Vec<HistoryAction>,
     pub active_shape: Option<Shape>,
@@ -1271,22 +1273,25 @@ impl OverlayWindow {
         self.request_repaint();
     }
 
-    pub fn push_shape(&mut self, shape: Shape) {
+    pub fn push_shape(&mut self, shape: Shape) -> ShapeId {
         self.selection = None;
-        self.shapes.push(shape.clone());
-        let prev_counter = match &shape {
+        let annotation = Annotation::new(shape);
+        let id = annotation.id;
+        self.shapes.push(annotation.clone());
+        let prev_counter = match &annotation.shape {
             Shape::StepBadge { number, .. } => Some(*number),
             _ => None,
         };
         let action = match prev_counter {
             Some(prev) => HistoryAction::AddStepBadge {
-                shape,
+                shape: annotation,
                 prev_counter: prev,
             },
-            None => HistoryAction::AddShape(shape),
+            None => HistoryAction::AddShape(annotation),
         };
         self.undo_history.push(action);
         self.redo_history.clear();
+        id
     }
 
     pub fn undo(&mut self) {
@@ -1320,18 +1325,11 @@ impl OverlayWindow {
                     self.redo_history.push(HistoryAction::Clear(current_shapes));
                     self.set_toast("↩️", "Restored Cleared Canvas");
                 }
-                HistoryAction::TransformShape {
-                    index,
-                    before,
-                    after,
-                } => {
-                    if index < self.shapes.len() {
-                        self.shapes[index] = before.clone();
-                        self.redo_history.push(HistoryAction::TransformShape {
-                            index,
-                            before,
-                            after,
-                        });
+                HistoryAction::TransformShape { id, before, after } => {
+                    if let Some(a) = self.shapes.iter_mut().find(|a| a.id == id) {
+                        a.shape = before.clone();
+                        self.redo_history
+                            .push(HistoryAction::TransformShape { id, before, after });
                         self.set_toast("↩️", "Undo Edit");
                     }
                 }
@@ -1376,18 +1374,11 @@ impl OverlayWindow {
                     self.undo_history.push(HistoryAction::Clear(current_shapes));
                     self.set_toast("↪️", "Re-cleared Canvas");
                 }
-                HistoryAction::TransformShape {
-                    index,
-                    before,
-                    after,
-                } => {
-                    if index < self.shapes.len() {
-                        self.shapes[index] = after.clone();
-                        self.undo_history.push(HistoryAction::TransformShape {
-                            index,
-                            before,
-                            after,
-                        });
+                HistoryAction::TransformShape { id, before, after } => {
+                    if let Some(a) = self.shapes.iter_mut().find(|a| a.id == id) {
+                        a.shape = after.clone();
+                        self.undo_history
+                            .push(HistoryAction::TransformShape { id, before, after });
                         self.set_toast("↪️", "Redo Edit");
                     }
                 }
@@ -1435,8 +1426,17 @@ impl OverlayWindow {
     /// Bounds of the current selection, in canvas coordinates.
     pub fn selection_bounds(&self) -> Option<(f32, f32, f32, f32)> {
         let sel = self.selection.as_ref()?;
-        let shape = self.shapes.get(sel.index)?;
-        Some(self.shape_bounds_exact(shape))
+        let a = self.annotation(sel.id)?;
+        Some(self.shape_bounds_exact(&a.shape))
+    }
+
+    /// The selected annotation, if it is still on the canvas.
+    fn annotation(&self, id: ShapeId) -> Option<&Annotation> {
+        self.shapes.iter().find(|a| a.id == id)
+    }
+
+    fn annotation_index(&self, id: ShapeId) -> Option<usize> {
+        self.shapes.iter().position(|a| a.id == id)
     }
 
     /// The same bounds converted to screen DIPs, where the grips live.
@@ -1450,7 +1450,7 @@ impl OverlayWindow {
     /// Drop the selection if it no longer points at a live shape.
     fn validate_selection(&mut self) {
         if let Some(sel) = &self.selection
-            && sel.index >= self.shapes.len()
+            && self.annotation(sel.id).is_none()
         {
             self.selection = None;
         }
@@ -1463,11 +1463,12 @@ impl OverlayWindow {
         // because grips sit outside the shape's own outline.
         if let Some(screen_bounds) = self.selection_bounds_screen()
             && let Some(handle) = handle_at(screen_bounds, screen_pt)
-            && let Some(index) = self.selection.as_ref().map(|s| s.index)
-            && let Some(original) = self.shapes.get(index).cloned()
+            && let Some(id) = self.selection.as_ref().map(|s| s.id)
+            && let Some(index) = self.annotation_index(id)
         {
+            let original = self.shapes[index].shape.clone();
             let bounds = self.shape_bounds_exact(&original);
-            self.rebuild_snap_anchors(Some(index));
+            self.rebuild_snap_anchors(Some(id));
             if let Some(sel) = &mut self.selection {
                 sel.drag = Some(DragKind::Resize(handle));
                 sel.grab = canvas_pt;
@@ -1479,21 +1480,24 @@ impl OverlayWindow {
 
         // Topmost shape under the cursor. The tolerance is in canvas units, so
         // divide out the zoom to keep the grab area constant on screen.
+        //
+        // Text that lives inside a container is not selectable on its own: the
+        // container owns it, and clicking the label should grab the box.
         let tol = 10.0 / self.zoom.level.max(1.0);
         let hit = self
             .shapes
             .iter()
-            .enumerate()
             .rev()
-            .find(|(_, s)| shape_intersects_circle(s, canvas_pt, tol))
-            .map(|(i, s)| (i, s.clone()));
+            .filter(|a| !a.is_contained_text())
+            .find(|a| shape_intersects_circle(&a.shape, canvas_pt, tol))
+            .map(|a| (a.id, a.shape.clone()));
 
         match hit {
-            Some((index, shape)) => {
+            Some((id, shape)) => {
                 let bounds = self.shape_bounds_exact(&shape);
-                self.rebuild_snap_anchors(Some(index));
+                self.rebuild_snap_anchors(Some(id));
                 self.selection = Some(Selection {
-                    index,
+                    id,
                     drag: Some(DragKind::Move),
                     grab: canvas_pt,
                     original: shape,
@@ -1501,10 +1505,7 @@ impl OverlayWindow {
                 });
                 true
             }
-            None => {
-                let had = self.selection.take().is_some();
-                had
-            }
+            None => self.selection.take().is_some(),
         }
     }
 
@@ -1516,7 +1517,7 @@ impl OverlayWindow {
         let Some(kind) = sel.drag else {
             return false;
         };
-        let index = sel.index;
+        let id = sel.id;
         let dx = canvas_pt.x - sel.grab.x;
         let dy = canvas_pt.y - sel.grab.y;
         let mut updated = sel.original.clone();
@@ -1564,8 +1565,8 @@ impl OverlayWindow {
                 resize_shape(&mut updated, original_bounds, to);
             }
         }
-        if index < self.shapes.len() {
-            self.shapes[index] = updated;
+        if let Some(index) = self.annotation_index(id) {
+            self.shapes[index].shape = updated;
             return true;
         }
         false
@@ -1580,14 +1581,14 @@ impl OverlayWindow {
         if sel.drag.take().is_none() {
             return;
         }
-        let index = sel.index;
+        let id = sel.id;
         let before = sel.original.clone();
-        let Some(after) = self.shapes.get(index).cloned() else {
+        let Some(after) = self.annotation(id).map(|a| a.shape.clone()) else {
             return;
         };
         if before != after {
             self.undo_history.push(HistoryAction::TransformShape {
-                index,
+                id,
                 before,
                 after: after.clone(),
             });
@@ -1605,14 +1606,11 @@ impl OverlayWindow {
         let Some(sel) = self.selection.take() else {
             return;
         };
-        if sel.index >= self.shapes.len() {
+        let Some(index) = self.annotation_index(sel.id) else {
             return;
-        }
-        let shape = self.shapes.remove(sel.index);
-        self.undo_history.push(HistoryAction::DeleteShape {
-            index: sel.index,
-            shape,
-        });
+        };
+        let shape = self.shapes.remove(index);
+        self.undo_history.push(HistoryAction::DeleteShape { index, shape });
         self.redo_history.clear();
         self.set_toast("🗑️", "Deleted Annotation");
         self.request_repaint();
@@ -1623,16 +1621,16 @@ impl OverlayWindow {
         let Some(sel) = &self.selection else {
             return;
         };
-        let index = sel.index;
-        if index >= self.shapes.len() {
+        let id = sel.id;
+        let Some(index) = self.annotation_index(id) else {
             return;
-        }
-        let before = self.shapes[index].clone();
+        };
+        let before = self.shapes[index].shape.clone();
         let mut after = before.clone();
         translate_shape(&mut after, dx, dy);
-        self.shapes[index] = after.clone();
+        self.shapes[index].shape = after.clone();
         self.undo_history.push(HistoryAction::TransformShape {
-            index,
+            id,
             before,
             after: after.clone(),
         });
@@ -1651,11 +1649,13 @@ impl OverlayWindow {
         let Some(sel) = &self.selection else {
             return false;
         };
-        let index = sel.index;
-        let Some(Shape::Text { .. }) = self.shapes.get(index) else {
+        let Some(index) = self.annotation_index(sel.id) else {
             return false;
         };
-        let shape = self.shapes.remove(index);
+        if !matches!(self.shapes[index].shape, Shape::Text { .. }) {
+            return false;
+        }
+        let annotation = self.shapes.remove(index);
         let Shape::Text {
             origin,
             text,
@@ -1665,11 +1665,14 @@ impl OverlayWindow {
             is_italic,
             card_style,
             font_family,
-        } = shape.clone()
+        } = annotation.shape.clone()
         else {
             return false;
         };
-        self.undo_history.push(HistoryAction::DeleteShape { index, shape });
+        self.undo_history.push(HistoryAction::DeleteShape {
+            index,
+            shape: annotation,
+        });
         self.redo_history.clear();
         self.selection = None;
 
@@ -1936,14 +1939,13 @@ impl OverlayWindow {
 
     /// Rebuild the anchor set at the start of a gesture, leaving out `skip`
     /// so a shape never snaps to itself.
-    fn rebuild_snap_anchors(&mut self, skip: Option<usize>) {
+    fn rebuild_snap_anchors(&mut self, skip: Option<ShapeId>) {
         self.snap_anchors = if self.snapping_enabled() {
             let live: Vec<Shape> = self
                 .shapes
                 .iter()
-                .enumerate()
-                .filter(|(i, _)| Some(*i) != skip)
-                .map(|(_, s)| s.clone())
+                .filter(|a| Some(a.id) != skip && !a.is_contained_text())
+                .map(|a| a.shape.clone())
                 .collect();
             collect_anchors(&live)
         } else {
@@ -2717,7 +2719,7 @@ impl OverlayWindow {
                     if this.is_drawing && this.current_tool == DrawTool::Eraser {
                         let mut erased_idx = None;
                         for (idx, shape) in this.shapes.iter().enumerate().rev() {
-                            if shape_intersects_circle(shape, canvas_pt, 16.0) {
+                            if shape_intersects_circle(&shape.shape, canvas_pt, 16.0) {
                                 erased_idx = Some(idx);
                                 break;
                             }
@@ -3154,7 +3156,7 @@ impl OverlayWindow {
                         this.is_drawing = true;
                         let mut erased_idx = None;
                         for (idx, shape) in this.shapes.iter().enumerate().rev() {
-                            if shape_intersects_circle(shape, canvas_pt, 16.0) {
+                            if shape_intersects_circle(&shape.shape, canvas_pt, 16.0) {
                                 erased_idx = Some(idx);
                                 break;
                             }

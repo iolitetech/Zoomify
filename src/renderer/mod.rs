@@ -40,7 +40,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::capture::ScreenCapture;
 use crate::types::{
-    AppMode, CanvasBackground, ColorPickerState, ColorPreset, DrawTool, FluentToolbarState,
+    Annotation, AppMode, CanvasBackground, ColorPickerState, ColorPreset, DrawTool, FluentToolbarState,
     LaserRipple,
     LaserTrailPoint, LoupeState, MinimapState, Point2D, Shape, SpotlightState, StrokePattern,
     TextEditorState, TextFontFamily, TimerWidgetState, ToastNotification, ZoomState,
@@ -560,7 +560,7 @@ impl D2DRenderer {
         zoom_state: &ZoomState,
         spotlight: &SpotlightState,
         loupe: &LoupeState,
-        shapes: &[Shape],
+        shapes: &[Annotation],
         active_shape: Option<&Shape>,
         text_input: Option<&TextEditorState>,
         current_tool: DrawTool,
@@ -677,7 +677,7 @@ impl D2DRenderer {
             // ── Shapes Layer (Zoomed with canvas; Draw & StaticZoom only) ──
             if mode == AppMode::Draw || mode == AppMode::StaticZoom {
                 for shape in shapes {
-                    self.render_single_shape(rt, shape, bg_bitmap);
+                    self.render_single_shape(rt, &shape.shape, bg_bitmap);
                 }
 
                 if let Some(shape) = active_shape {
@@ -848,7 +848,7 @@ impl D2DRenderer {
         bg_type: CanvasBackground,
         zoom_state: &ZoomState,
         spotlight: &SpotlightState,
-        shapes: &[Shape],
+        shapes: &[Annotation],
         active_shape: Option<&Shape>,
         text_input: Option<&TextEditorState>,
         include_spotlight: bool,
@@ -1030,7 +1030,7 @@ impl D2DRenderer {
                         }
 
                         for shape in shapes {
-                            self.render_single_shape(&dc_rt, shape, bg_bmp.as_ref());
+                            self.render_single_shape(&dc_rt, &shape.shape, bg_bmp.as_ref());
                         }
 
                         if let Some(shape) = active_shape {
