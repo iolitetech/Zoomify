@@ -271,6 +271,17 @@ impl StrokePattern {
     }
 }
 
+/// Which edge of a group everything lines up to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignTo {
+    Left,
+    HCentre,
+    Right,
+    Top,
+    VCentre,
+    Bottom,
+}
+
 /// The shape of an arrow's head, independent of `ArrowStyle`, which says
 /// which *ends* carry one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1781,6 +1792,18 @@ pub enum FluentAction {
     ToggleItalic,
     SetTextCardStyle(TextCardStyle),
     SetFontFamily(TextFontFamily),
+    // Select Sub-bar Actions
+    SetArrowHead(ArrowHead),
+    AdjustOpacity(f32),
+    Align(AlignTo),
+    /// True spreads horizontally.
+    Distribute(bool),
+    /// True brings to front.
+    Restack(bool),
+    Duplicate,
+    /// True groups, false ungroups.
+    SetGroup(bool),
+    DeleteSelection,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1807,6 +1830,8 @@ pub struct FluentToolbarState {
     pub current_fill_mode: FillMode,
     pub current_stroke_pattern: StrokePattern,
     pub current_arrow_style: ArrowStyle,
+    /// Which arrowhead button shows as active.
+    pub current_arrow_head: ArrowHead,
     pub current_badge_size: BadgeSize,
     pub current_badge_shape: BadgeShape,
     pub stroke_width: f32,
@@ -1841,6 +1866,7 @@ impl Default for FluentToolbarState {
             current_fill_mode: FillMode::None,
             current_stroke_pattern: StrokePattern::Solid,
             current_arrow_style: ArrowStyle::Single,
+            current_arrow_head: ArrowHead::default(),
             current_badge_size: BadgeSize::Medium,
             current_badge_shape: BadgeShape::Circle,
             stroke_width: 4.0,
@@ -1970,6 +1996,39 @@ pub fn compute_subbar_layout(
     let mut groups: Vec<Vec<(FluentAction, f32)>> = Vec::with_capacity(5);
 
     match tool {
+        // Everything the Select tool can do to what is already on the canvas.
+        // These act on the selection rather than setting a default for the
+        // next shape, which is what the other sub-bars do.
+        DrawTool::Select => {
+            groups.push(vec![
+                (FluentAction::Align(AlignTo::Left), 30.0),
+                (FluentAction::Align(AlignTo::HCentre), 30.0),
+                (FluentAction::Align(AlignTo::Right), 30.0),
+                (FluentAction::Align(AlignTo::Top), 30.0),
+                (FluentAction::Align(AlignTo::VCentre), 30.0),
+                (FluentAction::Align(AlignTo::Bottom), 30.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::Distribute(true), 30.0),
+                (FluentAction::Distribute(false), 30.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::Restack(false), 30.0),
+                (FluentAction::Restack(true), 30.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetGroup(true), 30.0),
+                (FluentAction::SetGroup(false), 30.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::AdjustOpacity(-0.1), 30.0),
+                (FluentAction::AdjustOpacity(0.1), 30.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::Duplicate, 30.0),
+                (FluentAction::DeleteSelection, 30.0),
+            ]);
+        }
         DrawTool::Rectangle | DrawTool::RoundedRectangle | DrawTool::Ellipse => {
             groups.push(vec![
                 (FluentAction::SetStrokeWidth(2.0), 30.0),
@@ -2012,6 +2071,13 @@ pub fn compute_subbar_layout(
                 (FluentAction::SetArrowStyle(ArrowStyle::Single), 36.0),
                 (FluentAction::SetArrowStyle(ArrowStyle::Double), 42.0),
                 (FluentAction::SetArrowStyle(ArrowStyle::Dimension), 44.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetArrowHead(ArrowHead::Triangle), 30.0),
+                (FluentAction::SetArrowHead(ArrowHead::Open), 30.0),
+                (FluentAction::SetArrowHead(ArrowHead::Circle), 30.0),
+                (FluentAction::SetArrowHead(ArrowHead::Diamond), 30.0),
+                (FluentAction::SetArrowHead(ArrowHead::Bar), 30.0),
             ]);
             groups.push(vec![
                 (FluentAction::SetStrokePattern(StrokePattern::Solid), 32.0),

@@ -4,6 +4,7 @@ Running list of what is built, what is deliberately not, and what is queued.
 Effort labels are rough: **S** a sitting, **M** a few sittings, **L** a project.
 
 Agreed order of work: **B (diagramming) → A (recording) → the rest.**
+B is complete; **A is next.**
 
 ---
 
@@ -22,7 +23,14 @@ Agreed order of work: **B (diagramming) → A (recording) → the rest.**
 | Capture pipeline cached and pre-warmed (201ms → 119ms) | `4002f3b` |
 | Arrow rendering rebuilt (was falling apart above ~8px) | `6ecfd08` |
 | Restack (`Ctrl+[` / `Ctrl+]`) and duplicate (`Ctrl+D`) | `af6fa3c` |
-| Multi-select: marquee, Shift+click, group edit | _pending_ |
+| Multi-select: marquee, Shift+click, group edit | `18f4050` |
+| Arrow endpoint re-targeting and detach | `c9d5adc` |
+| Arrow labels, align & distribute | `4264207` |
+| Per-annotation opacity, five arrowhead shapes | `be64573` |
+| Sticky notes | `4cd73eb` |
+| Curved lines and arrows | `bf71cc6` |
+| Grouping | `153be3f` |
+| Select and arrowhead sub-bars | _this commit_ |
 
 ### Design decisions worth not re-litigating
 
@@ -43,8 +51,9 @@ Agreed order of work: **B (diagramming) → A (recording) → the rest.**
 
 ## Known gaps and constraints
 
-- **Toolbar is at 13 tools** and crowded. New tools need a rethink of the bar
-  (customisation, or overflow) rather than another icon.
+- **Toolbar is at 14 tools** and crowded. New tools need a rethink of the bar
+  (customisation, or overflow) rather than another icon. The context sub-bar
+  has room, though, and is where per-selection actions now live.
 - **Canvas settings tab is full** — cards reach 468px against a 504px footer.
   Anything new needing a setting forces a reflow of that page. Snapping already
   had to settle for a config key plus the Alt gesture.
@@ -71,20 +80,32 @@ feeding each `FrameArrived` texture to a Media Foundation `IMFSinkWriter`.
 | Region snip → clipboard | **S** | Was removed in `65b5fe7`; could return |
 | Scrolling capture | **L** | Scroll injection and stitching |
 
-## B. Diagramming — **next up**
+## B. Diagramming — **done**
+
+Everything in the original B list has shipped. What is left is the two items
+that were always the far end of it:
 
 | Item | Effort | Notes |
 |---|---|---|
-| Arrow endpoint re-targeting | **S** | Today a grip *scales* a bound arrow instead of re-binding the end. Most obviously missing piece |
-| Arrow labels | **S** | Text at the midpoint; container text does the hard part already |
-| Sticky notes | **S** | Filled box + label in one gesture |
-| Align & distribute | **S** | Natural now multi-select exists |
-| Arrowhead variants | **S** | Open "V", circle, diamond, bar. `arrow_head_points` is already isolated |
-| Per-shape opacity | **S** | One field, one brush alpha |
-| Curved / elbow arrows | **M** | Multi-point arrows with routing |
-| Grouping (`Ctrl+G`) | **M** | Persistent groups, not a transient selection |
-| Connectors routing around shapes | **L** | Real pathfinding |
-| Layers | **L** | New model concept |
+| Connectors routing around shapes | **L** | Real pathfinding. Curved arrows cover most of what this was for |
+| Layers | **L** | New model concept. Grouping and z-order cover the common cases |
+
+### Keys added by B
+
+| Key | Does |
+|---|---|
+| `Shift+S` | Sticky note |
+| `Ctrl+D` | Duplicate |
+| `Ctrl+[` / `Ctrl+]` | Send to back / bring to front |
+| `Ctrl+G` / `Ctrl+Shift+G` | Group / ungroup |
+| `Ctrl+E` | Cycle arrowhead |
+| `Ctrl+Shift+Up/Down` | Fade in / out |
+| `Ctrl+Alt+arrows` | Align (`C`/`M` centre, `H`/`V` spread) |
+| Drag a line's end | Re-anchor, or drop in space to detach |
+| Drag a line's middle | Bow it into a curve |
+
+All of the above are also buttons on the Select tool's sub-bar, so none of it
+is keyboard-only.
 
 ## C. Text
 

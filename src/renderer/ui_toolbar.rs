@@ -1,6 +1,6 @@
 use super::{D2DRenderer, v2};
 use crate::types::{
-    AppMode, ArrowStyle, BadgeShape, BadgeSize, ColorPreset, DrawTool, FillMode, FluentAction,
+    AlignTo, AppMode, ArrowHead, ArrowStyle, BadgeShape, BadgeSize, ColorPreset, DrawTool, FillMode, FluentAction,
     FluentToolbarState, SpotlightState, StrokePattern, TextCardStyle, TextFontFamily,
 };
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
@@ -624,6 +624,51 @@ impl D2DRenderer {
                             TextFontFamily::CascadiaCode => ("Mono", "Cascadia Code (Monospace)"),
                             TextFontFamily::SegoePrint => ("Hand", "Segoe Print (Handwriting)"),
                         },
+                        FluentAction::SetArrowHead(h) => match h {
+                            ArrowHead::Triangle => ("\u{25b6}", "Solid head (Ctrl+E cycles)"),
+                            ArrowHead::Open => ("\u{203a}", "Open head (Ctrl+E cycles)"),
+                            ArrowHead::Circle => ("\u{25cf}", "Round head (Ctrl+E cycles)"),
+                            ArrowHead::Diamond => ("\u{25c6}", "Diamond head (Ctrl+E cycles)"),
+                            ArrowHead::Bar => ("\u{2758}", "Bar terminator (Ctrl+E cycles)"),
+                        },
+                        FluentAction::Align(a) => match a {
+                            AlignTo::Left => ("\u{2523}", "Align left (Ctrl+Alt+Left)"),
+                            AlignTo::HCentre => ("\u{2503}", "Centre across (Ctrl+Alt+C)"),
+                            AlignTo::Right => ("\u{252b}", "Align right (Ctrl+Alt+Right)"),
+                            AlignTo::Top => ("\u{2533}", "Align top (Ctrl+Alt+Up)"),
+                            AlignTo::VCentre => ("\u{2501}", "Centre down (Ctrl+Alt+M)"),
+                            AlignTo::Bottom => ("\u{253b}", "Align bottom (Ctrl+Alt+Down)"),
+                        },
+                        FluentAction::Distribute(h) => {
+                            if h {
+                                ("\u{2194}", "Even gaps across (Ctrl+Alt+H)")
+                            } else {
+                                ("\u{2195}", "Even gaps down (Ctrl+Alt+V)")
+                            }
+                        }
+                        FluentAction::Restack(front) => {
+                            if front {
+                                ("\u{2b06}", "Bring to front (Ctrl+])")
+                            } else {
+                                ("\u{2b07}", "Send to back (Ctrl+[)")
+                            }
+                        }
+                        FluentAction::SetGroup(on) => {
+                            if on {
+                                ("\u{29c9}", "Group (Ctrl+G)")
+                            } else {
+                                ("\u{2384}", "Ungroup (Ctrl+Shift+G)")
+                            }
+                        }
+                        FluentAction::AdjustOpacity(delta) => {
+                            if delta < 0.0 {
+                                ("\u{25cb}", "Fade out (Ctrl+Shift+Down)")
+                            } else {
+                                ("\u{25cf}", "Fade in (Ctrl+Shift+Up)")
+                            }
+                        }
+                        FluentAction::Duplicate => ("\u{29c9}", "Duplicate (Ctrl+D)"),
+                        FluentAction::DeleteSelection => ("\u{2715}", "Delete (Del)"),
                         _ => ("", ""),
                     };
 

@@ -168,6 +168,8 @@ pub struct OverlayWindow {
     pub fill_mode: FillMode,
     pub stroke_pattern: StrokePattern,
     pub arrow_style: ArrowStyle,
+    /// Head shape for arrows drawn from now on.
+    pub arrow_head: ArrowHead,
     pub badge_size: BadgeSize,
     pub badge_shape: BadgeShape,
     pub live_zoom: LiveZoomEngine,
@@ -343,6 +345,7 @@ impl OverlayWindow {
                 fill_mode,
                 stroke_pattern,
                 arrow_style,
+                arrow_head: ArrowHead::default(),
                 badge_size,
                 badge_shape,
                 pen_settings: StrokeToolSettings {
@@ -2225,6 +2228,32 @@ impl OverlayWindow {
         self.request_repaint();
     }
 
+    /// Set a specific head on every selected arrow.
+    fn apply_arrow_head(&mut self, head: ArrowHead) {
+        let ids = self.selected_ids();
+        let mut items: Vec<(ShapeId, Shape, Shape)> = Vec::new();
+        for id in ids {
+            let Some(index) = self.annotation_index(id) else {
+                continue;
+            };
+            let before = self.shapes[index].shape.clone();
+            let mut after = before.clone();
+            match &mut after {
+                Shape::Arrow { head: h, .. } if *h != head => *h = head,
+                _ => continue,
+            }
+            self.shapes[index].shape = after.clone();
+            items.push((id, before, after));
+        }
+        if items.is_empty() {
+            return;
+        }
+        self.undo_history
+            .push(HistoryAction::TransformShapes { items });
+        self.redo_history.clear();
+        self.request_repaint();
+    }
+
     /// Cycle the arrowhead shape on every selected arrow.
     fn cycle_arrow_head(&mut self) {
         let ids = self.selected_ids();
@@ -3081,6 +3110,26 @@ impl OverlayWindow {
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("🛠️", format!("Tool: {}", t.name()));
             }
+            // Select sub-bar: these act on what is already selected, unlike
+            // the other sub-bars which set a default for the next shape.
+            FluentAction::Align(to) => self.arrange_selection(Some(to), None),
+            FluentAction::Distribute(h) => self.arrange_selection(None, Some(h)),
+            FluentAction::Restack(front) => self.restack_selection(front),
+            FluentAction::SetGroup(on) => self.set_grouping(on),
+            FluentAction::AdjustOpacity(delta) => self.adjust_opacity(delta),
+            FluentAction::Duplicate => self.duplicate_selection(),
+            FluentAction::DeleteSelection => self.delete_selection(),
+            FluentAction::SetArrowHead(head) => {
+                self.arrow_head = head;
+                // Retarget any selected arrows too, so the button reads as
+                // "make it this" rather than only "next one will be".
+                self.apply_arrow_head(head);
+                self.toolbar.current_arrow_head = head;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
+                self.toolbar.update_layout(sw, sh);
+            }
+
             FluentAction::OpenColorPicker => {
                 self.ensure_draw_mode();
                 let open = !self.color_picker.open;

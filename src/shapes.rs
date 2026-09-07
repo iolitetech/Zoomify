@@ -326,15 +326,7 @@ pub fn recognize_smart_shape(
 
 // Alignment
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AlignTo {
-    Left,
-    HCentre,
-    Right,
-    Top,
-    VCentre,
-    Bottom,
-}
+pub use crate::types::AlignTo;
 
 /// How far each box has to move to line up with the others.
 ///
