@@ -15,15 +15,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1,
     VK_F2, VK_HOME, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
-use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DefWindowProcW, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW,
     HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, LoadCursorW,
     RegisterClassExW, SW_HIDE, SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CHAR, WM_DROPFILES, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_PAINT, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+    WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, Result, w};
 
@@ -101,30 +100,6 @@ unsafe fn pointer_sample(hwnd: HWND, wparam: WPARAM) -> Option<PointerSample> {
             in_contact: (info.pointerFlags.0 & POINTER_FLAG_INCONTACT.0) != 0,
         })
     }
-}
-
-/// Read an image file from disk and return it as top-down BGRA, the same
-/// shape `get_clipboard_image` hands back.
-///
-/// The format is sniffed from the file's magic bytes via
-/// `with_guessed_format`, not trusted from the extension — a screenshot saved
-/// with the wrong extension should still open.
-fn decode_image_file(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
-    let reader = image::ImageReader::open(path).ok()?;
-    let reader = reader.with_guessed_format().ok()?;
-    let decoded = reader.decode().ok()?;
-    let rgba = decoded.to_rgba8();
-    let (w, h) = rgba.dimensions();
-    if w == 0 || h == 0 {
-        return None;
-    }
-    // The renderer expects BGRA (DXGI_FORMAT_B8G8R8A8_UNORM); `image` decodes
-    // to RGBA, so red and blue are swapped per pixel on the way in.
-    let mut bgra = rgba.into_raw();
-    for px in bgra.chunks_exact_mut(4) {
-        px.swap(0, 2);
-    }
-    Some((w, h, bgra))
 }
 
 const OVERLAY_CLASS_NAME: PCWSTR = w!("ZoomifyFullscreenOverlay");
@@ -288,11 +263,6 @@ impl OverlayWindow {
                 Some(hinstance),
                 None,
             )?;
-
-            // So an image file dropped from Explorer or a browser arrives as
-            // WM_DROPFILES rather than being swallowed as an OS-level shell
-            // action on the window.
-            DragAcceptFiles(hwnd, true);
 
             let mut renderer = D2DRenderer::new()?;
             renderer.init_hwnd(hwnd, screen_width, screen_height)?;
@@ -2805,45 +2775,6 @@ impl OverlayWindow {
         self.toolbar.update_layout(sw, sh);
         self.set_toast(icon, label);
         self.request_repaint();
-    }
-
-    /// Decode every dropped file that is an image and place them cascaded
-    /// around the drop point, all selected together.
-    ///
-    /// Files that fail to decode (not an image, or an unsupported format) are
-    /// silently skipped rather than aborting the whole drop: dropping one
-    /// screenshot and one stray .txt should still place the screenshot.
-    fn drop_image_files(&mut self, drop_point: Point2D, paths: Vec<std::path::PathBuf>) {
-        if paths.is_empty() {
-            return;
-        }
-        self.ensure_draw_mode();
-        let centre = self.zoom.screen_to_canvas(drop_point);
-
-        const CASCADE: f32 = 28.0;
-        let mut ids = Vec::with_capacity(paths.len());
-        let mut failed = 0usize;
-        for (i, path) in paths.iter().enumerate() {
-            match decode_image_file(path) {
-                Some((w, h, bgra)) => {
-                    let offset = i as f32 * CASCADE;
-                    let at = Point2D::new(centre.x + offset, centre.y + offset);
-                    ids.push(self.place_image_shape(at, w, h, bgra));
-                }
-                None => failed += 1,
-            }
-        }
-
-        let label = match (ids.len(), failed) {
-            (0, _) => {
-                self.set_toast("🖼️", "Could not read that as an image");
-                return;
-            }
-            (n, 0) if n == 1 => "Dropped Image".to_string(),
-            (n, 0) => format!("Dropped {} Images", n),
-            (n, f) => format!("Dropped {} Images ({} skipped)", n, f),
-        };
-        self.finish_placing_images(ids, "🖼️", label);
     }
 
     /// Open the editor on `container`'s label, creating one if it has none.
@@ -5952,45 +5883,6 @@ impl OverlayWindow {
                     LRESULT(0)
                 }
 
-                WM_DROPFILES => {
-                    use std::os::windows::ffi::OsStringExt;
-                    use windows::Win32::UI::Shell::HDROP;
-                    let hdrop = HDROP(wparam.0 as *mut std::ffi::c_void);
-
-                    let mut pt = POINT::default();
-                    let _ = DragQueryPoint(hdrop, &mut pt);
-                    let drop_point = Point2D::new(
-                        this.px_to_dip(pt.x as f32),
-                        this.px_to_dip(pt.y as f32),
-                    );
-
-                    // 0xFFFFFFFF as the index asks for the file count instead
-                    // of a path.
-                    let count = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
-                    let mut paths = Vec::with_capacity(count as usize);
-                    for i in 0..count {
-                        // First call with no buffer to size it; DragQueryFileW
-                        // returns the character count, not including the null
-                        // terminator MAX_PATH-style APIs usually imply.
-                        let len = DragQueryFileW(hdrop, i, None) as usize;
-                        if len == 0 {
-                            continue;
-                        }
-                        let mut buf = vec![0u16; len + 1];
-                        let written = DragQueryFileW(hdrop, i, Some(&mut buf)) as usize;
-                        if written == 0 {
-                            continue;
-                        }
-                        paths.push(std::path::PathBuf::from(std::ffi::OsString::from_wide(
-                            &buf[..written],
-                        )));
-                    }
-                    DragFinish(hdrop);
-
-                    this.drop_image_files(drop_point, paths);
-                    LRESULT(0)
-                }
-
                 windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                     let _ = Rc::from_raw(raw_ptr);
@@ -6000,58 +5892,5 @@ impl OverlayWindow {
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::decode_image_file;
-
-    fn temp_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("zoomify_overlay_test_{}", tag));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn test_decode_image_file_round_trips_dimensions_and_swaps_to_bgra() {
-        // Four distinct, fully-saturated corners: if red and blue ever land
-        // in the wrong channel, or a row gets flipped, this catches it.
-        let mut img = image::RgbaImage::new(2, 2);
-        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255])); // top-left: red
-        img.put_pixel(1, 0, image::Rgba([0, 255, 0, 255])); // top-right: green
-        img.put_pixel(0, 1, image::Rgba([0, 0, 255, 255])); // bottom-left: blue
-        img.put_pixel(1, 1, image::Rgba([10, 20, 30, 255])); // bottom-right: distinct
-
-        let dir = temp_dir("decode_roundtrip");
-        let path = dir.join("test.png");
-        img.save(&path).unwrap();
-
-        let (w, h, bgra) = decode_image_file(&path).expect("a real PNG must decode");
-        assert_eq!((w, h), (2, 2));
-        assert_eq!(bgra.len(), 2 * 2 * 4);
-
-        // Row-major, BGRA: pixel (0,0) is red in RGBA, so B=0, G=0, R=255.
-        assert_eq!(&bgra[0..4], &[0, 0, 255, 255], "top-left should be BGR-swapped red");
-        assert_eq!(&bgra[4..8], &[0, 255, 0, 255], "top-right green is symmetric either way");
-        assert_eq!(&bgra[8..12], &[255, 0, 0, 255], "bottom-left should be BGR-swapped blue");
-        assert_eq!(&bgra[12..16], &[30, 20, 10, 255], "bottom-right proves the swap, not a coincidence");
-    }
-
-    #[test]
-    fn test_decode_image_file_rejects_a_file_that_is_not_an_image() {
-        let dir = temp_dir("decode_garbage");
-        // Named like a PNG, so a naive extension-trusting reader would try
-        // and panic on it; the magic-byte sniff must refuse it instead.
-        let path = dir.join("not_really.png");
-        std::fs::write(&path, b"this is not image data, just text").unwrap();
-        assert!(decode_image_file(&path).is_none());
-    }
-
-    #[test]
-    fn test_decode_image_file_returns_none_for_a_missing_path() {
-        let dir = temp_dir("decode_missing");
-        assert!(decode_image_file(&dir.join("nope.png")).is_none());
     }
 }

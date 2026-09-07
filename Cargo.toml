@@ -43,6 +43,6 @@ windows = { version = "0.62.2", features = [
 windows-core = "0.62"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 windows-numerics = "0.3"
