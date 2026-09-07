@@ -4,7 +4,7 @@ use crate::shapes::{
     normalize_rect, points_to_bezier_segments, pressure_width_factor, selection_handle_points,
 };
 use crate::types::{
-    ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserRipple, LaserTrailPoint, Point2D, Shape,
+    ArrowHead, ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserRipple, LaserTrailPoint, Point2D, Shape,
     StrokePattern, TextCardStyle, TextEditorState,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -26,6 +26,9 @@ impl D2DRenderer {
         rt: &ID2D1RenderTarget,
         shape: &Shape,
         bg_bitmap: Option<&ID2D1Bitmap>,
+        // Scales every colour's alpha. It lives on the Annotation because it
+        // applies to all shapes equally and none of them care what it is.
+        opacity: f32,
     ) {
         unsafe {
             match shape {
@@ -47,7 +50,7 @@ impl D2DRenderer {
                     } else {
                         *width
                     };
-                    let col = color.to_d2d_color(alpha);
+                    let col = color.to_d2d_color((alpha) * opacity);
 
                     // A pen stroke carries a pressure per point, so it is drawn
                     // segment by segment with a width that follows the press.
@@ -123,7 +126,7 @@ impl D2DRenderer {
                     width,
                     pattern,
                 } => {
-                    let col = color.to_d2d_color(1.0);
+                    let col = color.to_d2d_color((1.0) * opacity);
                     if let Some(brush) = self.solid_brush(rt, &col) {
                         let p0 = v2(start.x, start.y);
                         let p1 = v2(end.x, end.y);
@@ -139,8 +142,9 @@ impl D2DRenderer {
                     width,
                     style,
                     pattern,
+                    head,
                 } => {
-                    let col = color.to_d2d_color(1.0);
+                    let col = color.to_d2d_color((1.0) * opacity);
                     if let Some(brush) = self.solid_brush(rt, &col) {
                         let length = start.distance(end);
                         let (head_len, half_width) = arrow_head_size(*width, length);
@@ -151,8 +155,14 @@ impl D2DRenderer {
                         // the tip and filling the head over it leaves the round
                         // cap poking out past the point, and swallows the head
                         // entirely once the stroke gets thick.
+                        // Only a filled head hides the shaft's end. An open,
+                        // circle or bar head would leave a visible gap if the
+                        // shaft stopped short, so for those it runs to the tip.
+                        let hides_shaft =
+                            matches!(head, ArrowHead::Triangle | ArrowHead::Diamond);
+                        let inset = if hides_shaft { head_len } else { 0.0 };
                         if let Some((s, e)) =
-                            arrow_shaft(*start, *end, head_len, head_at_start, true)
+                            arrow_shaft(*start, *end, inset, head_at_start, true)
                         {
                             let stroke_style = self.get_stroke_style(*pattern);
                             rt.DrawLine(
@@ -167,15 +177,81 @@ impl D2DRenderer {
                         let fill_head = |from: Point2D, to: Point2D| {
                             let (tip, left, right) =
                                 arrow_head_points(from, to, head_len, half_width);
-                            if let Ok(path) = self.factory.CreatePathGeometry()
-                                && let Ok(sink) = path.Open()
-                            {
-                                sink.BeginFigure(v2(tip.x, tip.y), D2D1_FIGURE_BEGIN_FILLED);
-                                sink.AddLine(v2(left.x, left.y));
-                                sink.AddLine(v2(right.x, right.y));
-                                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-                                let _ = sink.Close();
-                                rt.FillGeometry(&path, &brush, None);
+                            let filled = |pts: &[Point2D]| {
+                                if let Ok(path) = self.factory.CreatePathGeometry()
+                                    && let Ok(sink) = path.Open()
+                                {
+                                    sink.BeginFigure(
+                                        v2(pts[0].x, pts[0].y),
+                                        D2D1_FIGURE_BEGIN_FILLED,
+                                    );
+                                    for p in &pts[1..] {
+                                        sink.AddLine(v2(p.x, p.y));
+                                    }
+                                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                                    let _ = sink.Close();
+                                    rt.FillGeometry(&path, &brush, None);
+                                }
+                            };
+                            match head {
+                                ArrowHead::Triangle => filled(&[tip, left, right]),
+                                ArrowHead::Open => {
+                                    // Two strokes to the tip, leaving it open.
+                                    rt.DrawLine(
+                                        v2(left.x, left.y),
+                                        v2(tip.x, tip.y),
+                                        &brush,
+                                        *width,
+                                        None,
+                                    );
+                                    rt.DrawLine(
+                                        v2(right.x, right.y),
+                                        v2(tip.x, tip.y),
+                                        &brush,
+                                        *width,
+                                        None,
+                                    );
+                                }
+                                ArrowHead::Circle => {
+                                    // Set back from the tip by its own radius,
+                                    // so the disc ends where a point would.
+                                    let r = half_width * 0.8;
+                                    let ux = tip.x - (left.x + right.x) * 0.5;
+                                    let uy = tip.y - (left.y + right.y) * 0.5;
+                                    let len = (ux * ux + uy * uy).sqrt().max(0.001);
+                                    let c = D2D1_ELLIPSE {
+                                        point: v2(tip.x - ux / len * r, tip.y - uy / len * r),
+                                        radiusX: r,
+                                        radiusY: r,
+                                    };
+                                    rt.FillEllipse(&c, &brush);
+                                }
+                                ArrowHead::Diamond => {
+                                    let mid = Point2D::new(
+                                        (left.x + right.x) * 0.5,
+                                        (left.y + right.y) * 0.5,
+                                    );
+                                    let back = Point2D::new(
+                                        mid.x - (tip.x - mid.x),
+                                        mid.y - (tip.y - mid.y),
+                                    );
+                                    filled(&[tip, left, back, right]);
+                                }
+                                ArrowHead::Bar => {
+                                    rt.DrawLine(
+                                        v2(
+                                            tip.x + (left.x - right.x) * 0.5,
+                                            tip.y + (left.y - right.y) * 0.5,
+                                        ),
+                                        v2(
+                                            tip.x - (left.x - right.x) * 0.5,
+                                            tip.y - (left.y - right.y) * 0.5,
+                                        ),
+                                        &brush,
+                                        *width * 1.3,
+                                        None,
+                                    );
+                                }
                             }
                         };
 
@@ -228,7 +304,7 @@ impl D2DRenderer {
                     // Fill if requested
                     match fill {
                         FillMode::Tinted => {
-                            let fill_col = color.to_d2d_color(0.22);
+                            let fill_col = color.to_d2d_color((0.22) * opacity);
                             if let Some(fbrush) = self.solid_brush(rt, &fill_col) {
                                 if *rounded {
                                     rt.FillRoundedRectangle(&rrect, &fbrush);
@@ -238,7 +314,7 @@ impl D2DRenderer {
                             }
                         }
                         FillMode::Solid => {
-                            let fill_col = color.to_d2d_color(1.0);
+                            let fill_col = color.to_d2d_color((1.0) * opacity);
                             if let Some(fbrush) = self.solid_brush(rt, &fill_col) {
                                 if *rounded {
                                     rt.FillRoundedRectangle(&rrect, &fbrush);
@@ -251,7 +327,7 @@ impl D2DRenderer {
                     }
 
                     // Stroke border
-                    let col = color.to_d2d_color(1.0);
+                    let col = color.to_d2d_color((1.0) * opacity);
                     if let Some(brush) = self.solid_brush(rt, &col) {
                         let stroke_style = self.get_stroke_style(*pattern);
                         if *rounded {
@@ -284,13 +360,13 @@ impl D2DRenderer {
 
                     match fill {
                         FillMode::Tinted => {
-                            let fill_col = color.to_d2d_color(0.22);
+                            let fill_col = color.to_d2d_color((0.22) * opacity);
                             if let Some(fbrush) = self.solid_brush(rt, &fill_col) {
                                 rt.FillEllipse(&ellipse, &fbrush);
                             }
                         }
                         FillMode::Solid => {
-                            let fill_col = color.to_d2d_color(1.0);
+                            let fill_col = color.to_d2d_color((1.0) * opacity);
                             if let Some(fbrush) = self.solid_brush(rt, &fill_col) {
                                 rt.FillEllipse(&ellipse, &fbrush);
                             }
@@ -298,7 +374,7 @@ impl D2DRenderer {
                         FillMode::None => {}
                     }
 
-                    let col = color.to_d2d_color(1.0);
+                    let col = color.to_d2d_color((1.0) * opacity);
                     if let Some(brush) = self.solid_brush(rt, &col) {
                         let stroke_style = self.get_stroke_style(*pattern);
                         rt.DrawEllipse(&ellipse, &brush, *width, Some(stroke_style));
@@ -315,7 +391,7 @@ impl D2DRenderer {
                     card_style,
                     font_family,
                 } => {
-                    let col = color.to_d2d_color(1.0);
+                    let col = color.to_d2d_color((1.0) * opacity);
                     let text_utf16: Vec<u16> = text.encode_utf16().collect();
                     if let Ok(custom_format) =
                         self.get_custom_text_format(*font_size, *is_bold, *is_italic, *font_family)
@@ -429,14 +505,14 @@ impl D2DRenderer {
                     stroke_width,
                     pattern,
                 } => {
-                    let col = color.to_d2d_color(1.0);
+                    let col = color.to_d2d_color((1.0) * opacity);
                     let border_w = stroke_width.max(1.0);
                     let border_brush = self.solid_brush(rt, &col);
 
                     let fill_brush = match fill {
                         FillMode::None => None,
                         FillMode::Tinted => {
-                            let fill_col = color.to_d2d_color(0.30);
+                            let fill_col = color.to_d2d_color((0.30) * opacity);
                             self.solid_brush(rt, &fill_col)
                         }
                         FillMode::Solid => self.solid_brush(rt, &col),
@@ -705,6 +781,7 @@ impl D2DRenderer {
         // A label on a line needs a chip behind it, or the line strikes
         // straight through the words.
         rides_on: bool,
+        opacity: f32,
     ) {
         unsafe {
             let Shape::Text {
@@ -759,7 +836,7 @@ impl D2DRenderer {
             else {
                 return;
             };
-            let Some(brush) = self.solid_brush(rt, &color.to_d2d_color(1.0)) else {
+            let Some(brush) = self.solid_brush(rt, &color.to_d2d_color((1.0) * opacity)) else {
                 return;
             };
             let utf16: Vec<u16> = text.encode_utf16().collect();

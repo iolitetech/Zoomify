@@ -566,6 +566,8 @@ impl D2DRenderer {
                     ("Ctrl+D / Ctrl+[ ]", "Duplicate / send back / bring front"),
                     ("Drag arrow end", "Re-anchor it, or drop in space to detach"),
                     ("Ctrl+Alt+Arrows", "Align selection (C/M: centre, H/V: spread)"),
+                    ("Ctrl+Shift+Up/Dn", "Fade selection in / out"),
+                    ("Ctrl+E", "Cycle arrowhead shape"),
                     ("P", "Pen (freehand with Bezier smoothing)"),
                     ("K", "Laser Pointer (glowing fading trail)"),
                     ("X", "Eraser (drag to delete strokes)"),

@@ -693,7 +693,7 @@ impl D2DRenderer {
                     if a.container.is_some() {
                         continue;
                     }
-                    self.render_single_shape(rt, &a.shape, bg_bitmap);
+                    self.render_single_shape(rt, &a.shape, bg_bitmap, a.opacity);
                 }
                 for a in shapes {
                     if let Some(cid) = a.container
@@ -701,12 +701,12 @@ impl D2DRenderer {
                     {
                         let bounds = crate::shapes::shape_bounds(&owner.shape);
                         let rides = crate::shapes::label_rides_on_shape(&owner.shape);
-                        self.render_contained_text(rt, &a.shape, bounds, rides);
+                        self.render_contained_text(rt, &a.shape, bounds, rides, a.opacity);
                     }
                 }
 
                 if let Some(shape) = active_shape {
-                    self.render_single_shape(rt, shape, bg_bitmap);
+                    self.render_single_shape(rt, shape, bg_bitmap, 1.0);
                     if snap_guides {
                         self.render_drawing_snap_guides(rt, shape);
                     }
@@ -1069,7 +1069,7 @@ impl D2DRenderer {
                             if a.container.is_some() {
                                 continue;
                             }
-                            self.render_single_shape(&dc_rt, &a.shape, bg_bmp.as_ref());
+                            self.render_single_shape(&dc_rt, &a.shape, bg_bmp.as_ref(), a.opacity);
                         }
                         for a in shapes {
                             if let Some(cid) = a.container
@@ -1077,12 +1077,12 @@ impl D2DRenderer {
                             {
                                 let bounds = crate::shapes::shape_bounds(&owner.shape);
                                 let rides = crate::shapes::label_rides_on_shape(&owner.shape);
-                                self.render_contained_text(&dc_rt, &a.shape, bounds, rides);
+                                self.render_contained_text(&dc_rt, &a.shape, bounds, rides, a.opacity);
                             }
                         }
 
                         if let Some(shape) = active_shape {
-                            self.render_single_shape(&dc_rt, shape, bg_bmp.as_ref());
+                            self.render_single_shape(&dc_rt, shape, bg_bmp.as_ref(), 1.0);
                         }
 
                         if let Some(editor) = text_input {

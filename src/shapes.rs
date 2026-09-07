@@ -1102,7 +1102,7 @@ pub fn resize_shape(shape: &mut Shape, from: (f32, f32, f32, f32), to: (f32, f32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ArrowStyle, BadgeShape, TextCardStyle, TextFontFamily};
+    use crate::types::{ArrowHead, ArrowStyle, BadgeShape, TextCardStyle, TextFontFamily};
 
     #[test]
     fn test_normalize_rect() {
@@ -1271,6 +1271,7 @@ mod tests {
             color: ColorPreset::Red,
             width: 2.0,
             style: ArrowStyle::Single,
+            head: ArrowHead::default(),
             pattern: StrokePattern::Solid,
         }
     }

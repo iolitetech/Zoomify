@@ -42,7 +42,7 @@ use crate::shapes::{
 };
 use crate::types::{
     AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, BlurToolSettings,
-    Annotation, CanvasBackground, ColorPickerState, ColorPreset, DragKind, DrawTool, FillMode,
+    Annotation, ArrowHead, CanvasBackground, ColorPickerState, ColorPreset, DragKind, DrawTool, FillMode,
     FluentAction,
     FluentToolbarState,
     HistoryAction, LaserRipple, LaserTrailPoint, LoupeState, MinimapState, Point2D, Shape,
@@ -1327,6 +1327,15 @@ impl OverlayWindow {
                         .push(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↩️", "Restored Erased Shape");
                 }
+                HistoryAction::SetOpacity { items } => {
+                    for (id, before, _) in &items {
+                        if let Some(a) = self.shapes.iter_mut().find(|a| a.id == *id) {
+                            a.opacity = *before;
+                        }
+                    }
+                    self.redo_history.push(HistoryAction::SetOpacity { items });
+                    self.set_toast("↩️", "Undo Opacity");
+                }
                 HistoryAction::Reorder { id, from, to } => {
                     if let Some(now) = self.shapes.iter().position(|a| a.id == id) {
                         let a = self.shapes.remove(now);
@@ -1397,6 +1406,15 @@ impl OverlayWindow {
                     self.undo_history
                         .push(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↪️", "Re-erased Shape");
+                }
+                HistoryAction::SetOpacity { items } => {
+                    for (id, _, after) in &items {
+                        if let Some(a) = self.shapes.iter_mut().find(|a| a.id == *id) {
+                            a.opacity = *after;
+                        }
+                    }
+                    self.undo_history.push(HistoryAction::SetOpacity { items });
+                    self.set_toast("↪️", "Redo Opacity");
                 }
                 HistoryAction::Reorder { id, from, to } => {
                     if let Some(now) = self.shapes.iter().position(|a| a.id == id) {
@@ -2091,6 +2109,73 @@ impl OverlayWindow {
         self.request_repaint();
     }
 
+    /// Step the selection's opacity, recording it as one undo entry.
+    ///
+    /// Opacity is not part of the shape, so it rides on its own history
+    /// variant rather than TransformShapes.
+    fn adjust_opacity(&mut self, delta: f32) {
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let mut items: Vec<(ShapeId, f32, f32)> = Vec::new();
+        for id in ids {
+            let Some(index) = self.annotation_index(id) else {
+                continue;
+            };
+            let before = self.shapes[index].opacity;
+            // A shape at zero would be invisible and unfindable, so the floor
+            // keeps it faint rather than gone.
+            let after = (before + delta).clamp(0.1, 1.0);
+            if (after - before).abs() < 0.001 {
+                continue;
+            }
+            self.shapes[index].opacity = after;
+            items.push((id, before, after));
+        }
+        if items.is_empty() {
+            return;
+        }
+        let shown = items[0].2;
+        self.undo_history.push(HistoryAction::SetOpacity { items });
+        self.redo_history.clear();
+        self.set_toast("◑", format!("Opacity {:.0}%", shown * 100.0));
+        self.request_repaint();
+    }
+
+    /// Cycle the arrowhead shape on every selected arrow.
+    fn cycle_arrow_head(&mut self) {
+        let ids = self.selected_ids();
+        let mut items: Vec<(ShapeId, Shape, Shape)> = Vec::new();
+        let mut shown = None;
+        for id in ids {
+            let Some(index) = self.annotation_index(id) else {
+                continue;
+            };
+            let before = self.shapes[index].shape.clone();
+            let mut after = before.clone();
+            if let Shape::Arrow { head, .. } = &mut after {
+                *head = head.next();
+                shown = Some(*head);
+            } else {
+                continue;
+            }
+            self.shapes[index].shape = after.clone();
+            items.push((id, before, after));
+        }
+        if items.is_empty() {
+            self.set_toast("◑", "Select an arrow first");
+            return;
+        }
+        self.undo_history
+            .push(HistoryAction::TransformShapes { items });
+        self.redo_history.clear();
+        if let Some(h) = shown {
+            self.set_toast("➤", format!("Arrowhead: {}", h.name()));
+        }
+        self.request_repaint();
+    }
+
     // Stacking and duplication
 
     /// Move the selection to the front or the back of the stack.
@@ -2737,6 +2822,7 @@ impl OverlayWindow {
                 color: self.current_color,
                 width: self.arrow_settings.stroke_width,
                 style: self.arrow_settings.style,
+                head: ArrowHead::default(),
                 pattern: self.arrow_settings.pattern,
             },
             DrawTool::Rectangle => Shape::Rectangle {
@@ -3957,6 +4043,7 @@ impl OverlayWindow {
                                 color: this.current_color,
                                 width: this.stroke_width,
                                 style: this.arrow_style,
+                                head: ArrowHead::default(),
                                 pattern: this.stroke_pattern,
                             }
                         } else if is_shift && !is_ctrl {
@@ -4495,8 +4582,11 @@ impl OverlayWindow {
                             this.request_repaint();
                             return LRESULT(0);
                         }
+                        // Ctrl+arrows are align and Ctrl+Shift+arrows are
+                        // opacity, both handled elsewhere; a plain arrow nudges.
                         let step = if is_shift { 10.0 } else { 1.0 };
                         let nudge = match key {
+                            _ if is_ctrl => None,
                             k if k == VK_LEFT.0 as i32 => Some((-step, 0.0)),
                             k if k == VK_RIGHT.0 as i32 => Some((step, 0.0)),
                             k if k == VK_UP.0 as i32 => Some((0.0, -step)),
@@ -4579,6 +4669,17 @@ impl OverlayWindow {
                             }
                             k if k == 'D' as i32 => {
                                 this.duplicate_selection();
+                            }
+                            // Ctrl+Shift+Up/Down fades the selection; Ctrl+E
+                            // cycles the arrowhead.
+                            k if k == VK_UP.0 as i32 && is_shift => {
+                                this.adjust_opacity(0.1);
+                            }
+                            k if k == VK_DOWN.0 as i32 && is_shift => {
+                                this.adjust_opacity(-0.1);
+                            }
+                            k if k == 'E' as i32 => {
+                                this.cycle_arrow_head();
                             }
                             // Ctrl+] / Ctrl+[ restack, as in most editors.
                             k if k == 0xDD => {

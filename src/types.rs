@@ -257,6 +257,42 @@ impl StrokePattern {
     }
 }
 
+/// The shape of an arrow's head, independent of `ArrowStyle`, which says
+/// which *ends* carry one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ArrowHead {
+    #[default]
+    Triangle,
+    /// Two strokes meeting at the tip, leaving the point open.
+    Open,
+    Circle,
+    Diamond,
+    /// A perpendicular bar, for a plain terminator.
+    Bar,
+}
+
+impl ArrowHead {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Triangle => Self::Open,
+            Self::Open => Self::Circle,
+            Self::Circle => Self::Diamond,
+            Self::Diamond => Self::Bar,
+            Self::Bar => Self::Triangle,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Triangle => "Solid",
+            Self::Open => "Open",
+            Self::Circle => "Circle",
+            Self::Diamond => "Diamond",
+            Self::Bar => "Bar",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArrowStyle {
     Single,
@@ -411,6 +447,16 @@ pub struct Annotation {
     pub start_bound: Option<ShapeId>,
     #[serde(default)]
     pub end_bound: Option<ShapeId>,
+    /// 0..=1, multiplied into every colour this annotation draws with.
+    ///
+    /// It sits here rather than on each `Shape` variant because it applies to
+    /// all of them equally and none of them care what it is.
+    #[serde(default = "full_opacity")]
+    pub opacity: f32,
+}
+
+fn full_opacity() -> f32 {
+    1.0
 }
 
 impl Annotation {
@@ -421,6 +467,7 @@ impl Annotation {
             container: None,
             start_bound: None,
             end_bound: None,
+            opacity: 1.0,
         }
     }
 
@@ -457,6 +504,8 @@ pub enum Shape {
         width: f32,
         style: ArrowStyle,
         pattern: StrokePattern,
+        #[serde(default)]
+        head: ArrowHead,
     },
     Rectangle {
         start: Point2D,
@@ -742,6 +791,11 @@ pub enum HistoryAction {
         id: ShapeId,
         from: usize,
         to: usize,
+    },
+    /// Opacity is not part of the shape, so it gets its own entry rather than
+    /// riding on TransformShapes.
+    SetOpacity {
+        items: Vec<(ShapeId, f32, f32)>,
     },
     Clear(Vec<Annotation>),
     /// A move or resize applied to already-committed shapes. Addressed by id
