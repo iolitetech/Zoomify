@@ -568,6 +568,7 @@ impl D2DRenderer {
                     ("Ctrl+Alt+Arrows", "Align selection (C/M: centre, H/V: spread)"),
                     ("Ctrl+Shift+Up/Dn", "Fade selection in / out"),
                     ("Ctrl+E", "Cycle arrowhead shape"),
+                    ("Drag line middle", "Bow it into a curve"),
                     ("P", "Pen (freehand with Bezier smoothing)"),
                     ("K", "Laser Pointer (glowing fading trail)"),
                     ("X", "Eraser (drag to delete strokes)"),

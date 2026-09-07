@@ -35,7 +35,8 @@ use crate::renderer::D2DRenderer;
 use crate::shapes::{
     ARROW_BINDING_GAP, AlignTo, align_offsets, distribute_offsets, SELECTION_HANDLE_SIZE, SELECTION_HANDLE_SLOP, SNAP_TOLERANCE_DIP,
     SnapGuide, can_bind_arrow, can_contain_text,
-    collect_anchors, container_height_for, handle_at, label_rides_on_shape, normalize_rect,
+    collect_anchors, container_height_for, curve_from_handle, curve_handle, handle_at,
+    label_rides_on_shape, normalize_rect,
     push_pressure,
     recognize_smart_shape, resolve_arrow_ends, with_arrow_ends, resize_shape, resized_bounds, shape_bounds, shape_intersects_circle,
     snap_point, snap_to_angle, snap_to_square, snap_translation, translate_shape,
@@ -1533,15 +1534,33 @@ impl OverlayWindow {
     /// `None` for anything else, which is what makes the renderer fall back to
     /// the eight-grip bounding box.
     pub fn selection_endpoints_screen(&self) -> Option<((f32, f32), (f32, f32))> {
+        let (s, e, _) = self.selection_line_grips()?;
+        Some(((s.0, s.1), (e.0, e.1)))
+    }
+
+    /// The bow handle of a singly-selected line, in screen DIPs.
+    pub fn selection_bow_screen(&self) -> Option<(f32, f32)> {
+        self.selection_line_grips().map(|(_, _, b)| b)
+    }
+
+    /// Start, end and bow handles of a singly-selected line or arrow.
+    fn selection_line_grips(&self) -> Option<((f32, f32), (f32, f32), (f32, f32))> {
         let id = self.selection.as_ref()?.only()?;
         let a = self.annotation(id)?;
-        let (s, e) = match &a.shape {
-            Shape::Line { start, end, .. } | Shape::Arrow { start, end, .. } => (*start, *end),
+        let (s, e, curve) = match &a.shape {
+            Shape::Line {
+                start, end, curve, ..
+            }
+            | Shape::Arrow {
+                start, end, curve, ..
+            } => (*start, *end, *curve),
             _ => return None,
         };
+        let bow = curve_handle(s, e, curve);
         let s = self.zoom.canvas_to_screen(s);
         let e = self.zoom.canvas_to_screen(e);
-        Some(((s.x, s.y), (e.x, e.y)))
+        let b = self.zoom.canvas_to_screen(bow);
+        Some(((s.x, s.y), (e.x, e.y), (b.x, b.y)))
     }
 
     /// Which end of the selected line sits under `screen_pt`, if either.
@@ -1610,12 +1629,21 @@ impl OverlayWindow {
     fn select_press(&mut self, screen_pt: Point2D, canvas_pt: Point2D, additive: bool) -> bool {
         // A grip on the current selection wins over picking a new shape,
         // because grips sit outside the shape's own outline.
-        // A line's own ends win over any bounding box, since they sit inside it.
+        // A line's own grips win over any bounding box, since they sit inside it.
         if !additive
             && let Some(is_start) = self.endpoint_at(screen_pt)
         {
             self.begin_drag(DragKind::Endpoint(is_start), canvas_pt);
             return true;
+        }
+        if !additive
+            && let Some((bx, by)) = self.selection_bow_screen()
+        {
+            let reach = SELECTION_HANDLE_SIZE * 0.5 + SELECTION_HANDLE_SLOP;
+            if (screen_pt.x - bx).abs() <= reach && (screen_pt.y - by).abs() <= reach {
+                self.begin_drag(DragKind::Bow, canvas_pt);
+                return true;
+            }
         }
         if !additive
             && let Some(screen_bounds) = self.selection_bounds_screen()
@@ -1716,6 +1744,27 @@ impl OverlayWindow {
                     .map(|(id, s)| {
                         let mut u = s.clone();
                         translate_shape(&mut u, dx, dy);
+                        (*id, u)
+                    })
+                    .collect()
+            }
+            DragKind::Bow => {
+                self.snap_guides.clear();
+                originals
+                    .iter()
+                    .map(|(id, s)| {
+                        let mut u = s.clone();
+                        match &mut u {
+                            Shape::Line {
+                                start, end, curve, ..
+                            }
+                            | Shape::Arrow {
+                                start, end, curve, ..
+                            } => {
+                                *curve = curve_from_handle(*start, *end, canvas_pt);
+                            }
+                            _ => {}
+                        }
                         (*id, u)
                     })
                     .collect()
@@ -2847,6 +2896,7 @@ impl OverlayWindow {
                 color: self.current_color,
                 width: self.line_settings.stroke_width,
                 pattern: self.line_settings.pattern,
+                curve: 0.0,
             },
             DrawTool::Arrow => Shape::Arrow {
                 start: canvas_pt,
@@ -2855,6 +2905,7 @@ impl OverlayWindow {
                 width: self.arrow_settings.stroke_width,
                 style: self.arrow_settings.style,
                 head: ArrowHead::default(),
+                curve: 0.0,
                 pattern: self.arrow_settings.pattern,
             },
             DrawTool::Rectangle => Shape::Rectangle {
@@ -3276,6 +3327,11 @@ impl OverlayWindow {
                         },
                         if this.current_tool == DrawTool::Select {
                             this.selection_endpoints_screen()
+                        } else {
+                            None
+                        },
+                        if this.current_tool == DrawTool::Select {
+                            this.selection_bow_screen()
                         } else {
                             None
                         },
@@ -4082,6 +4138,7 @@ impl OverlayWindow {
                                 width: this.stroke_width,
                                 style: this.arrow_style,
                                 head: ArrowHead::default(),
+                                curve: 0.0,
                                 pattern: this.stroke_pattern,
                             }
                         } else if is_shift && !is_ctrl {
@@ -4091,6 +4148,7 @@ impl OverlayWindow {
                                 color: this.current_color,
                                 width: this.stroke_width,
                                 pattern: this.stroke_pattern,
+                                curve: 0.0,
                             }
                         } else if is_ctrl && !is_shift {
                             Shape::Rectangle {

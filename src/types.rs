@@ -510,6 +510,10 @@ pub enum Shape {
         color: ColorPreset,
         width: f32,
         pattern: StrokePattern,
+        /// How far the middle bows off the straight chord, in canvas units.
+        /// Zero is a straight line; the sign picks which side it bows to.
+        #[serde(default)]
+        curve: f32,
     },
     Arrow {
         start: Point2D,
@@ -520,6 +524,10 @@ pub enum Shape {
         pattern: StrokePattern,
         #[serde(default)]
         head: ArrowHead,
+        /// How far the middle bows off the straight chord, in canvas units.
+        /// Zero is a straight arrow; the sign picks which side it bows to.
+        #[serde(default)]
+        curve: f32,
     },
     Rectangle {
         start: Point2D,
@@ -853,6 +861,8 @@ impl SelectionHandle {
 pub enum DragKind {
     Move,
     Resize(SelectionHandle),
+    /// Dragging the middle of a line to bow it.
+    Bow,
     /// Dragging one end of a line or arrow. `true` for the start.
     ///
     /// A line has no meaningful interior to scale, so its ends are grabbed

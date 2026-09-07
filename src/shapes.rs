@@ -105,13 +105,24 @@ pub fn shape_intersects_circle(shape: &Shape, center: Point2D, radius: f32) -> b
             false
         }
         Shape::Line {
-            start, end, width, ..
+            start,
+            end,
+            width,
+            curve,
+            ..
         }
         | Shape::Arrow {
-            start, end, width, ..
+            start,
+            end,
+            width,
+            curve,
+            ..
         } => {
             let threshold = radius + *width / 2.0;
-            point_to_segment_distance(center, *start, *end) <= threshold
+            // Walk the arc; on a straight line this is the single chord.
+            let pts = sample_curve(*start, *end, *curve);
+            pts.windows(2)
+                .any(|w| point_to_segment_distance(center, w[0], w[1]) <= threshold)
         }
         Shape::Rectangle {
             start, end, width, ..
@@ -241,6 +252,7 @@ pub fn recognize_smart_shape(
                 color,
                 width: stroke_width,
                 pattern: StrokePattern::Solid,
+                curve: 0.0,
             });
         }
     }
@@ -392,6 +404,102 @@ pub fn distribute_offsets(boxes: &[(f32, f32, f32, f32)], horizontal: bool) -> V
         let delta = cursor - key(b);
         out[*i] = if horizontal { (delta, 0.0) } else { (0.0, delta) };
         cursor += size(b) + gap;
+    }
+    out
+}
+
+// Curved lines
+//
+// One number describes the bow: how far the middle sits off the straight
+// chord. That is enough for the arcs people actually draw between boxes, and
+// it stays a single draggable handle rather than a polyline to manage.
+
+/// How many segments a curve is sampled into for drawing and hit-testing.
+pub const CURVE_SAMPLES: usize = 24;
+
+/// The quadratic control point that bows a chord by `curve`.
+///
+/// A quadratic sits at half the control's offset at its midpoint, so the
+/// control goes twice as far out as the bow the caller asked for.
+pub fn curve_control(start: Point2D, end: Point2D, curve: f32) -> Point2D {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    let mid = Point2D::new((start.x + end.x) * 0.5, (start.y + end.y) * 0.5);
+    if len < 0.001 {
+        return mid;
+    }
+    let (px, py) = (-dy / len, dx / len);
+    Point2D::new(mid.x + px * curve * 2.0, mid.y + py * curve * 2.0)
+}
+
+/// A point on the quadratic at `t` in 0..=1.
+pub fn quad_point(p0: Point2D, c: Point2D, p1: Point2D, t: f32) -> Point2D {
+    let u = 1.0 - t;
+    Point2D::new(
+        u * u * p0.x + 2.0 * u * t * c.x + t * t * p1.x,
+        u * u * p0.y + 2.0 * u * t * c.y + t * t * p1.y,
+    )
+}
+
+/// The curve as a polyline. A straight line is just its two ends.
+pub fn sample_curve(start: Point2D, end: Point2D, curve: f32) -> Vec<Point2D> {
+    if curve.abs() < 0.01 {
+        return vec![start, end];
+    }
+    let c = curve_control(start, end, curve);
+    (0..=CURVE_SAMPLES)
+        .map(|i| quad_point(start, c, end, i as f32 / CURVE_SAMPLES as f32))
+        .collect()
+}
+
+/// Where the bow handle sits: the actual midpoint of the curve.
+pub fn curve_handle(start: Point2D, end: Point2D, curve: f32) -> Point2D {
+    if curve.abs() < 0.01 {
+        return Point2D::new((start.x + end.x) * 0.5, (start.y + end.y) * 0.5);
+    }
+    quad_point(start, curve_control(start, end, curve), end, 0.5)
+}
+
+/// The bow that would put the curve's midpoint under `at`.
+///
+/// Signed, so dragging through the chord flips the curve to the other side
+/// rather than stopping flat.
+pub fn curve_from_handle(start: Point2D, end: Point2D, at: Point2D) -> f32 {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 0.001 {
+        return 0.0;
+    }
+    let (px, py) = (-dy / len, dx / len);
+    let mid = Point2D::new((start.x + end.x) * 0.5, (start.y + end.y) * 0.5);
+    (at.x - mid.x) * px + (at.y - mid.y) * py
+}
+
+/// Trim a polyline to `keep` units short of its end, for an arrow head.
+pub fn trim_polyline_end(points: &[Point2D], keep: f32) -> Vec<Point2D> {
+    if keep <= 0.0 || points.len() < 2 {
+        return points.to_vec();
+    }
+    let mut out = points.to_vec();
+    let mut budget = keep;
+    while out.len() >= 2 {
+        let last = out[out.len() - 1];
+        let prev = out[out.len() - 2];
+        let seg = last.distance(&prev);
+        if seg > budget {
+            // Land partway along this segment.
+            let t = (seg - budget) / seg;
+            let n = out.len();
+            out[n - 1] = Point2D::new(
+                prev.x + (last.x - prev.x) * t,
+                prev.y + (last.y - prev.y) * t,
+            );
+            return out;
+        }
+        budget -= seg;
+        out.pop();
     }
     out
 }
@@ -672,11 +780,12 @@ pub struct SnapGuide {
 pub fn anchor_points(shape: &Shape) -> Vec<Point2D> {
     match shape {
         Shape::Stroke { .. } => Vec::new(),
-        Shape::Line { start, end, .. } | Shape::Arrow { start, end, .. } => vec![
-            *start,
-            *end,
-            Point2D::new((start.x + end.x) * 0.5, (start.y + end.y) * 0.5),
-        ],
+        Shape::Line {
+            start, end, curve, ..
+        }
+        | Shape::Arrow {
+            start, end, curve, ..
+        } => vec![*start, *end, curve_handle(*start, *end, *curve)],
         Shape::StepBadge { center, radius, .. } => vec![
             *center,
             Point2D::new(center.x - radius, center.y),
@@ -914,9 +1023,34 @@ pub fn shape_bounds(shape: &Shape) -> (f32, f32, f32, f32) {
             }
             (l - half, t - half, r + half, b + half)
         }
-        Shape::Line { start, end, width, .. } | Shape::Arrow { start, end, width, .. } => {
-            let (l, t, r, b) = normalize_rect(*start, *end);
+        Shape::Line {
+            start,
+            end,
+            width,
+            curve,
+            ..
+        }
+        | Shape::Arrow {
+            start,
+            end,
+            width,
+            curve,
+            ..
+        } => {
+            // A bowed line reaches outside the box its ends describe, so the
+            // arc is what gets measured.
+            let pts = sample_curve(*start, *end, *curve);
             let half = width * 0.5;
+            let mut l = f32::MAX;
+            let mut t = f32::MAX;
+            let mut r = f32::MIN;
+            let mut b = f32::MIN;
+            for p in &pts {
+                l = l.min(p.x);
+                t = t.min(p.y);
+                r = r.max(p.x);
+                b = b.max(p.y);
+            }
             (l - half, t - half, r + half, b + half)
         }
         Shape::Rectangle { start, end, width, .. } | Shape::Ellipse { start, end, width, .. } => {
@@ -1157,6 +1291,7 @@ mod tests {
             color: ColorPreset::Red,
             width: 4.0,
             pattern: StrokePattern::Solid,
+            curve: 0.0,
         };
         // Circle right on the line
         assert!(shape_intersects_circle(
@@ -1272,8 +1407,107 @@ mod tests {
             width: 2.0,
             style: ArrowStyle::Single,
             head: ArrowHead::default(),
+            curve: 0.0,
             pattern: StrokePattern::Solid,
         }
+    }
+
+    #[test]
+    fn test_a_zero_bow_is_just_the_two_ends() {
+        let a = Point2D::new(0.0, 0.0);
+        let b = Point2D::new(100.0, 0.0);
+        assert_eq!(sample_curve(a, b, 0.0), vec![a, b]);
+        assert_eq!(curve_handle(a, b, 0.0), Point2D::new(50.0, 0.0));
+    }
+
+    #[test]
+    fn test_the_bow_handle_sits_where_the_curve_actually_is() {
+        // The control point goes twice as far out as the bow, because a
+        // quadratic only reaches halfway to it at its midpoint.
+        let a = Point2D::new(0.0, 0.0);
+        let b = Point2D::new(100.0, 0.0);
+        let h = curve_handle(a, b, 30.0);
+        assert!((h.x - 50.0).abs() < 0.01);
+        assert!((h.y.abs() - 30.0).abs() < 0.01, "handle at {:?}", h);
+    }
+
+    #[test]
+    fn test_dragging_the_handle_round_trips_to_the_same_bow() {
+        let a = Point2D::new(10.0, 20.0);
+        let b = Point2D::new(210.0, 60.0);
+        for want in [-80.0f32, -5.0, 12.0, 45.0] {
+            let h = curve_handle(a, b, want);
+            let got = curve_from_handle(a, b, h);
+            assert!((got - want).abs() < 0.01, "{} -> {}", want, got);
+        }
+    }
+
+    #[test]
+    fn test_dragging_through_the_chord_flips_the_bow() {
+        // Signed, so a curve can be pulled to the other side rather than
+        // flattening out and refusing to go further.
+        let a = Point2D::new(0.0, 0.0);
+        let b = Point2D::new(100.0, 0.0);
+        let up = curve_from_handle(a, b, Point2D::new(50.0, -20.0));
+        let down = curve_from_handle(a, b, Point2D::new(50.0, 20.0));
+        assert!(up * down < 0.0, "{} and {} should differ in sign", up, down);
+    }
+
+    #[test]
+    fn test_a_bowed_line_reaches_outside_its_endpoints_box() {
+        let straight = Shape::Line {
+            start: Point2D::new(0.0, 0.0),
+            end: Point2D::new(100.0, 0.0),
+            color: ColorPreset::Red,
+            width: 0.0,
+            pattern: StrokePattern::Solid,
+            curve: 0.0,
+        };
+        let bowed = Shape::Line {
+            start: Point2D::new(0.0, 0.0),
+            end: Point2D::new(100.0, 0.0),
+            color: ColorPreset::Red,
+            width: 0.0,
+            pattern: StrokePattern::Solid,
+            curve: 40.0,
+        };
+        let sb = shape_bounds(&straight);
+        let bb = shape_bounds(&bowed);
+        assert!((sb.3 - sb.1).abs() < 0.01, "straight box should be flat");
+        // The arc bulges about `curve` off the chord, so the box grows to suit.
+        assert!(bb.3 - bb.1 > 35.0, "bowed box is {:?}", bb);
+    }
+
+    #[test]
+    fn test_hit_testing_follows_the_arc_not_the_chord() {
+        let bowed = Shape::Arrow {
+            start: Point2D::new(0.0, 0.0),
+            end: Point2D::new(100.0, 0.0),
+            color: ColorPreset::Red,
+            width: 2.0,
+            style: ArrowStyle::Single,
+            pattern: StrokePattern::Solid,
+            head: ArrowHead::Triangle,
+            curve: 40.0,
+        };
+        // On the arc's apex: a hit.
+        assert!(shape_intersects_circle(&bowed, Point2D::new(50.0, 40.0), 6.0));
+        // On the straight chord, where the line no longer is: a miss.
+        assert!(!shape_intersects_circle(&bowed, Point2D::new(50.0, 0.0), 6.0));
+    }
+
+    #[test]
+    fn test_trimming_a_polyline_shortens_it_from_the_end() {
+        let pts = vec![
+            Point2D::new(0.0, 0.0),
+            Point2D::new(50.0, 0.0),
+            Point2D::new(100.0, 0.0),
+        ];
+        let cut = trim_polyline_end(&pts, 30.0);
+        let last = cut.last().unwrap();
+        assert!((last.x - 70.0).abs() < 0.01, "ends at {:?}", last);
+        // Trimming past the whole thing leaves nothing to draw, not garbage.
+        assert!(trim_polyline_end(&pts, 500.0).len() < 2);
     }
 
     #[test]
@@ -1544,6 +1778,7 @@ mod tests {
             color: ColorPreset::Red,
             width: 1.0,
             pattern: StrokePattern::Solid,
+            curve: 0.0,
         };
         // A line can carry a label, but the label sits on it, not inside it.
         assert!(can_contain_text(&line));
@@ -1631,6 +1866,7 @@ mod tests {
             color: ColorPreset::Red,
             width: 2.0,
             pattern: StrokePattern::Solid,
+            curve: 0.0,
         };
         let pts = anchor_points(&s);
         assert_eq!(pts.len(), 3);
@@ -1896,6 +2132,7 @@ mod tests {
                 color: ColorPreset::Red,
                 width: 5.0,
                 pattern: StrokePattern::Solid,
+                curve: 0.0,
             },
             Shape::Blur {
                 start: Point2D::new(10.0, 10.0),

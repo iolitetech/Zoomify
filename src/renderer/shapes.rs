@@ -1,7 +1,8 @@
 use super::{D2DRenderer, v2};
 use crate::shapes::{
     SELECTION_HANDLE_SIZE, arrow_head_points, arrow_head_size, arrow_shaft, contained_text_origin,
-    normalize_rect, points_to_bezier_segments, pressure_width_factor, selection_handle_points,
+    normalize_rect, points_to_bezier_segments, pressure_width_factor, sample_curve,
+    selection_handle_points, trim_polyline_end,
 };
 use crate::types::{
     ArrowHead, ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserRipple, LaserTrailPoint, Point2D, Shape,
@@ -14,7 +15,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-    D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1RenderTarget,
+    D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1Brush, ID2D1RenderTarget, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
@@ -125,13 +126,28 @@ impl D2DRenderer {
                     color,
                     width,
                     pattern,
+                    curve,
                 } => {
                     let col = color.to_d2d_color((1.0) * opacity);
                     if let Some(brush) = self.solid_brush(rt, &col) {
-                        let p0 = v2(start.x, start.y);
-                        let p1 = v2(end.x, end.y);
                         let stroke_style = self.get_stroke_style(*pattern);
-                        rt.DrawLine(p0, p1, &brush, *width, Some(stroke_style));
+                        if curve.abs() < 0.01 {
+                            rt.DrawLine(
+                                v2(start.x, start.y),
+                                v2(end.x, end.y),
+                                &brush,
+                                *width,
+                                Some(stroke_style),
+                            );
+                        } else {
+                            self.stroke_polyline(
+                                rt,
+                                &sample_curve(*start, *end, *curve),
+                                &brush,
+                                *width,
+                                Some(stroke_style),
+                            );
+                        }
                     }
                 }
 
@@ -143,6 +159,7 @@ impl D2DRenderer {
                     style,
                     pattern,
                     head,
+                    curve,
                 } => {
                     let col = color.to_d2d_color((1.0) * opacity);
                     if let Some(brush) = self.solid_brush(rt, &col) {
@@ -160,18 +177,33 @@ impl D2DRenderer {
                         // shaft stopped short, so for those it runs to the tip.
                         let hides_shaft =
                             matches!(head, ArrowHead::Triangle | ArrowHead::Diamond);
-                        let inset = if hides_shaft { head_len } else { 0.0 };
-                        if let Some((s, e)) =
-                            arrow_shaft(*start, *end, inset, head_at_start, true)
-                        {
-                            let stroke_style = self.get_stroke_style(*pattern);
-                            rt.DrawLine(
-                                v2(s.x, s.y),
-                                v2(e.x, e.y),
-                                &brush,
-                                *width,
-                                Some(stroke_style),
-                            );
+                        let inset = if hides_shaft { head_len * 0.92 } else { 0.0 };
+                        let stroke_style = self.get_stroke_style(*pattern);
+                        if curve.abs() < 0.01 {
+                            if let Some((s, e)) =
+                                arrow_shaft(*start, *end, head_len, head_at_start, true)
+                            {
+                                rt.DrawLine(
+                                    v2(s.x, s.y),
+                                    v2(e.x, e.y),
+                                    &brush,
+                                    *width,
+                                    Some(stroke_style),
+                                );
+                            }
+                        } else {
+                            // Trim along the arc rather than the chord, or the
+                            // shaft would stop in the wrong place on a deep bow.
+                            let pts = sample_curve(*start, *end, *curve);
+                            let pts = trim_polyline_end(&pts, inset);
+                            let pts = if head_at_start {
+                                let mut r: Vec<Point2D> = pts.into_iter().rev().collect();
+                                r = trim_polyline_end(&r, inset);
+                                r.into_iter().rev().collect()
+                            } else {
+                                pts
+                            };
+                            self.stroke_polyline(rt, &pts, &brush, *width, Some(stroke_style));
                         }
 
                         let fill_head = |from: Point2D, to: Point2D| {
@@ -255,9 +287,17 @@ impl D2DRenderer {
                             }
                         };
 
-                        fill_head(*start, *end);
+                        // A bowed arrow's head follows the tangent where the
+                        // curve actually arrives, not the chord between ends.
+                        let (aim_end, aim_start) = if curve.abs() < 0.01 {
+                            (*start, *end)
+                        } else {
+                            let pts = sample_curve(*start, *end, *curve);
+                            (pts[pts.len() - 2], pts[1])
+                        };
+                        fill_head(aim_end, *end);
                         if head_at_start {
-                            fill_head(*end, *start);
+                            fill_head(aim_start, *start);
                         }
 
                         // Dimension style: perpendicular ticks at both ends.
@@ -939,6 +979,34 @@ impl D2DRenderer {
         }
     }
 
+    /// Stroke a polyline as one path, so joins are smooth and a dash pattern
+    /// runs continuously instead of restarting at every segment.
+    pub(super) unsafe fn stroke_polyline(
+        &self,
+        rt: &ID2D1RenderTarget,
+        pts: &[Point2D],
+        brush: &ID2D1Brush,
+        width: f32,
+        stroke: Option<&ID2D1StrokeStyle>,
+    ) {
+        unsafe {
+            if pts.len() < 2 {
+                return;
+            }
+            if let Ok(path) = self.factory.CreatePathGeometry()
+                && let Ok(sink) = path.Open()
+            {
+                sink.BeginFigure(v2(pts[0].x, pts[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
+                for p in &pts[1..] {
+                    sink.AddLine(v2(p.x, p.y));
+                }
+                sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                let _ = sink.Close();
+                rt.DrawGeometry(&path, brush, width, stroke);
+            }
+        }
+    }
+
     /// Round grips on the two ends of a selected line or arrow.
     ///
     /// A line has no interior to scale, so a bounding box would offer eight
@@ -949,6 +1017,8 @@ impl D2DRenderer {
         rt: &ID2D1RenderTarget,
         a: (f32, f32),
         b: (f32, f32),
+        // The bow handle, drawn smaller so it does not read as a third end.
+        bow: Option<(f32, f32)>,
     ) {
         unsafe {
             let accent = D2D1_COLOR_F {
@@ -970,6 +1040,21 @@ impl D2DRenderer {
                 b: 0.0,
                 a: 0.45,
             });
+            if let Some((bx, by)) = bow {
+                let br = SELECTION_HANDLE_SIZE * 0.42;
+                let ring = D2D1_ELLIPSE {
+                    point: v2(bx, by),
+                    radiusX: br,
+                    radiusY: br,
+                };
+                if let Some(h) = &halo {
+                    rt.DrawEllipse(&ring, h, 2.5, None);
+                }
+                if let Some(e) = &edge {
+                    rt.FillEllipse(&ring, e);
+                }
+            }
+
             let r = SELECTION_HANDLE_SIZE * 0.62;
             for (x, y) in [a, b] {
                 let ring = D2D1_ELLIPSE {

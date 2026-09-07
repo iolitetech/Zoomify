@@ -593,6 +593,7 @@ impl D2DRenderer {
         snap_guides_screen: &[(f32, f32, f32, f32, bool)],
         marquee_screen: Option<(f32, f32, f32, f32)>,
         selection_endpoints: Option<((f32, f32), (f32, f32))>,
+        selection_bow: Option<(f32, f32)>,
     ) {
         let rt = match &self.render_target {
             Some(rt) => rt,
@@ -768,7 +769,7 @@ impl D2DRenderer {
             if mode == AppMode::Draw || mode == AppMode::StaticZoom {
                 // A line offers its ends; everything else offers a box.
                 if let Some((a, b)) = selection_endpoints {
-                    self.render_endpoint_grips(rt, a, b);
+                    self.render_endpoint_grips(rt, a, b, selection_bow);
                 } else if let Some(sb) = selection_screen_bounds {
                     self.render_selection(rt, sb);
                 }
