@@ -461,6 +461,12 @@ pub struct Annotation {
     pub start_bound: Option<ShapeId>,
     #[serde(default)]
     pub end_bound: Option<ShapeId>,
+    /// Which group this belongs to, if any. Members are selected together.
+    ///
+    /// Reuses ShapeId for its ids, so a group can never collide with an
+    /// annotation or with another group.
+    #[serde(default)]
+    pub group: Option<ShapeId>,
     /// 0..=1, multiplied into every colour this annotation draws with.
     ///
     /// It sits here rather than on each `Shape` variant because it applies to
@@ -481,6 +487,7 @@ impl Annotation {
             container: None,
             start_bound: None,
             end_bound: None,
+            group: None,
             opacity: 1.0,
         }
     }
@@ -814,6 +821,10 @@ pub enum HistoryAction {
         from: usize,
         to: usize,
     },
+    /// Grouping is not part of the shape either.
+    SetGroup {
+        items: Vec<(ShapeId, Option<ShapeId>, Option<ShapeId>)>,
+    },
     /// Opacity is not part of the shape, so it gets its own entry rather than
     /// riding on TransformShapes.
     SetOpacity {
@@ -892,6 +903,16 @@ impl Selection {
     pub fn single(id: ShapeId) -> Self {
         Self {
             ids: vec![id],
+            drag: None,
+            grab: Point2D::default(),
+            originals: Vec::new(),
+            original_bounds: (0.0, 0.0, 0.0, 0.0),
+        }
+    }
+
+    pub fn many(ids: Vec<ShapeId>) -> Self {
+        Self {
+            ids,
             drag: None,
             grab: Point2D::default(),
             originals: Vec::new(),

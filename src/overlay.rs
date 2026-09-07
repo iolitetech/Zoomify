@@ -1328,6 +1328,15 @@ impl OverlayWindow {
                         .push(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↩️", "Restored Erased Shape");
                 }
+                HistoryAction::SetGroup { items } => {
+                    for (id, before, _) in &items {
+                        if let Some(a) = self.shapes.iter_mut().find(|a| a.id == *id) {
+                            a.group = *before;
+                        }
+                    }
+                    self.redo_history.push(HistoryAction::SetGroup { items });
+                    self.set_toast("↩️", "Undo Grouping");
+                }
                 HistoryAction::SetOpacity { items } => {
                     for (id, before, _) in &items {
                         if let Some(a) = self.shapes.iter_mut().find(|a| a.id == *id) {
@@ -1407,6 +1416,15 @@ impl OverlayWindow {
                     self.undo_history
                         .push(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↪️", "Re-erased Shape");
+                }
+                HistoryAction::SetGroup { items } => {
+                    for (id, _, after) in &items {
+                        if let Some(a) = self.shapes.iter_mut().find(|a| a.id == *id) {
+                            a.group = *after;
+                        }
+                    }
+                    self.undo_history.push(HistoryAction::SetGroup { items });
+                    self.set_toast("↪️", "Redo Grouping");
                 }
                 HistoryAction::SetOpacity { items } => {
                     for (id, _, after) in &items {
@@ -1669,6 +1687,7 @@ impl OverlayWindow {
 
         match hit {
             Some(id) => {
+                let family = self.travelling_with(id);
                 let already = self
                     .selection
                     .as_ref()
@@ -1687,11 +1706,17 @@ impl OverlayWindow {
                         return true;
                     }
                     match &mut self.selection {
-                        Some(sel) => sel.ids.push(id),
-                        None => self.selection = Some(Selection::single(id)),
+                        Some(sel) => {
+                            for f in family {
+                                if !sel.ids.contains(&f) {
+                                    sel.ids.push(f);
+                                }
+                            }
+                        }
+                        None => self.selection = Some(Selection::many(family)),
                     }
                 } else if !already {
-                    self.selection = Some(Selection::single(id));
+                    self.selection = Some(Selection::many(family));
                 }
                 self.begin_drag(DragKind::Move, canvas_pt);
                 true
@@ -1868,6 +1893,14 @@ impl OverlayWindow {
                     })
                     .map(|s| s.id)
                     .collect();
+                let mut hits = hits;
+                for id in hits.clone() {
+                    for f in self.travelling_with(id) {
+                        if !hits.contains(&f) {
+                            hits.push(f);
+                        }
+                    }
+                }
                 if !hits.is_empty() {
                     let n = hits.len();
                     self.selection = Some(Selection {
@@ -2222,6 +2255,68 @@ impl OverlayWindow {
         if let Some(h) = shown {
             self.set_toast("➤", format!("Arrowhead: {}", h.name()));
         }
+        self.request_repaint();
+    }
+
+    /// Everything that travels with `id`: its group, or just itself.
+    ///
+    /// Also pulls in a container's label, so grabbing a box never leaves its
+    /// words behind.
+    fn travelling_with(&self, id: ShapeId) -> Vec<ShapeId> {
+        let group = self.annotation(id).and_then(|a| a.group);
+        let mut out: Vec<ShapeId> = match group {
+            Some(g) => self
+                .shapes
+                .iter()
+                .filter(|a| a.group == Some(g))
+                .map(|a| a.id)
+                .collect(),
+            None => vec![id],
+        };
+        for base in out.clone() {
+            if let Some(label) = self.label_of(base)
+                && !out.contains(&label.id)
+            {
+                out.push(label.id);
+            }
+        }
+        out
+    }
+
+    /// Bind the selection together, or take it apart.
+    fn set_grouping(&mut self, grouped: bool) {
+        let ids = self.selected_ids();
+        if grouped && ids.len() < 2 {
+            self.set_toast("🔗", "Select two or more to group");
+            return;
+        }
+        let new_group = if grouped { Some(ShapeId::fresh()) } else { None };
+        let mut items: Vec<(ShapeId, Option<ShapeId>, Option<ShapeId>)> = Vec::new();
+        for id in &ids {
+            let Some(index) = self.annotation_index(*id) else {
+                continue;
+            };
+            let before = self.shapes[index].group;
+            if before == new_group {
+                continue;
+            }
+            self.shapes[index].group = new_group;
+            items.push((*id, before, new_group));
+        }
+        if items.is_empty() {
+            return;
+        }
+        let n = items.len();
+        self.undo_history.push(HistoryAction::SetGroup { items });
+        self.redo_history.clear();
+        self.set_toast(
+            "🔗",
+            if grouped {
+                format!("Grouped {}", n)
+            } else {
+                "Ungrouped".to_string()
+            },
+        );
         self.request_repaint();
     }
 
@@ -4776,6 +4871,12 @@ impl OverlayWindow {
                             }
                             k if k == 'E' as i32 => {
                                 this.cycle_arrow_head();
+                            }
+                            k if k == 'G' as i32 && is_shift => {
+                                this.set_grouping(false);
+                            }
+                            k if k == 'G' as i32 => {
+                                this.set_grouping(true);
                             }
                             // Ctrl+] / Ctrl+[ restack, as in most editors.
                             k if k == 0xDD => {
