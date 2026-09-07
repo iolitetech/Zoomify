@@ -58,6 +58,11 @@ struct AppContext {
 
 const TRAY_HOST_CLASS: PCWSTR = w!("ZoomifyTrayHostClass");
 
+/// Posted to ourselves once the tray icon is up, to build the screen-capture
+/// pipeline before the user first asks for it. Activating the WinRT capture
+/// class costs over 100ms, which is otherwise paid on the first Ctrl+2.
+const WM_PREWARM_CAPTURE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 500;
+
 /// Drives Live Zoom's smooth pan. Only runs while a session is active - it used
 /// to tick at 62 Hz for the entire life of the process.
 const TIMER_ID_LIVE_ZOOM_PAN: usize = 1;
@@ -358,6 +363,15 @@ unsafe extern "system" fn tray_wnd_proc(
                 LRESULT(0)
             }
 
+            WM_PREWARM_CAPTURE => {
+                if config::AppConfig::load().use_graphics_capture {
+                    let mut pt = windows::Win32::Foundation::POINT::default();
+                    let _ = windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
+                    capture_wgc::prewarm(pt.x, pt.y);
+                }
+                LRESULT(0)
+            }
+
             settings_window::WM_SETTINGS_APPLIED => {
                 let cfg = config::AppConfig::load();
                 capture::set_use_graphics_capture(cfg.use_graphics_capture);
@@ -494,6 +508,15 @@ Choose different combos in Settings (Ctrl+,).",
 
         let app_ctx_ptr = Box::into_raw(app_ctx);
         SetWindowLongPtrW(tray_hwnd, GWLP_USERDATA, app_ctx_ptr as isize);
+
+        // Warm the capture pipeline now that the app is visibly up, rather
+        // than making the first overlay wait for it.
+        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+            Some(tray_hwnd),
+            WM_PREWARM_CAPTURE,
+            WPARAM(0),
+            LPARAM(0),
+        );
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {

@@ -10,6 +10,7 @@
 //! entry point returns `Option`, and `capture.rs` falls back to BitBlt.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
@@ -37,6 +38,23 @@ use windows::core::{Interface, Result};
 // session wants the same one; it is only ever touched from the UI thread.
 thread_local! {
     static DEVICE: RefCell<Option<Devices>> = const { RefCell::new(None) };
+}
+
+/// Everything for one monitor that survives between captures.
+///
+/// Activating `GraphicsCaptureItem` and building the item is ~110ms — an order
+/// of magnitude more than the actual grab — so it is built once per monitor and
+/// kept. Only the session is per-capture, because a session left running keeps
+/// the GPU compositing frames for a capture nobody asked for.
+struct Rig {
+    item: GraphicsCaptureItem,
+    pool: Direct3D11CaptureFramePool,
+    signal: CaptureSignal,
+    size: SizeInt32,
+}
+
+thread_local! {
+    static RIGS: RefCell<HashMap<isize, Rig>> = RefCell::new(HashMap::new());
 }
 
 struct Devices {
@@ -97,6 +115,20 @@ fn drop_devices() {
     DEVICE.with(|cell| {
         *cell.borrow_mut() = None;
     });
+    // The rigs belong to that device and are useless without it.
+    RIGS.with(|cell| cell.borrow_mut().clear());
+}
+
+/// Build the device and the capture rig ahead of time.
+///
+/// Called once the tray icon is up, so the first capture the user actually
+/// asks for does not pay the ~130ms of WinRT activation and rig construction.
+pub fn prewarm(x: i32, y: i32) {
+    if !is_supported() {
+        return;
+    }
+    // A full throwaway capture warms every path, session included.
+    let _ = capture_monitor_at(x, y);
 }
 
 /// Grab the monitor containing `(x, y)` and return it as top-down BGRA along
@@ -123,57 +155,87 @@ fn capture_monitor(
     monitor: HMONITOR,
 ) -> Result<(u32, u32, Vec<u8>, i32, i32)> {
     unsafe {
-        let interop: IGraphicsCaptureItemInterop =
-            windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-        let item: GraphicsCaptureItem = interop.CreateForMonitor(monitor)?;
-        let size: SizeInt32 = item.Size()?;
-        if size.Width <= 0 || size.Height <= 0 {
-            return Err(windows::core::Error::from_thread());
-        }
+        // The rig is cached per monitor; only the session below is per-capture.
+        let (pool, item, waiter) = RIGS.with(|cell| -> Result<_> {
+            let mut rigs = cell.borrow_mut();
+            let key = monitor.0 as isize;
 
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-            &devices.winrt,
-            DirectXPixelFormat::B8G8R8A8UIntNormalized,
-            // One buffer: this is a one-shot grab, not a running stream.
-            1,
-            size,
-        )?;
+            // A resolution change invalidates the pool's buffer size.
+            if let Some(rig) = rigs.get(&key) {
+                let current = rig.item.Size()?;
+                if current.Width != rig.size.Width || current.Height != rig.size.Height {
+                    rigs.remove(&key);
+                }
+            }
+
+            if !rigs.contains_key(&key) {
+                let interop: IGraphicsCaptureItemInterop =
+                    windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
+                let item: GraphicsCaptureItem = interop.CreateForMonitor(monitor)?;
+                let size: SizeInt32 = item.Size()?;
+                if size.Width <= 0 || size.Height <= 0 {
+                    return Err(windows::core::Error::from_thread());
+                }
+                let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
+                    &devices.winrt,
+                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                    // One buffer: this is a one-shot grab, not a running stream.
+                    1,
+                    size,
+                )?;
+
+                // FrameArrived is what wakes us; a bare poll loop can spin for
+                // the whole timeout on a desktop that is not changing. Handler
+                // and event are registered once, with the pool.
+                let signal = CaptureSignal::new()?;
+                let waiter = signal.clone_handle();
+                pool.FrameArrived(&TypedEventHandler::<
+                    Direct3D11CaptureFramePool,
+                    windows::core::IInspectable,
+                >::new(move |_, _| {
+                    waiter.set();
+                    Ok(())
+                }))?;
+
+                rigs.insert(
+                    key,
+                    Rig {
+                        item,
+                        pool,
+                        signal,
+                        size,
+                    },
+                );
+            }
+
+            let rig = rigs.get(&key).ok_or_else(windows::core::Error::from_thread)?;
+            Ok((rig.pool.clone(), rig.item.clone(), rig.signal.clone_handle()))
+        })?;
+
+        // A reused pool can still be holding the previous grab. Drain it and
+        // clear the event, or this capture could hand back a stale desktop.
+        while pool.TryGetNextFrame().is_ok() {}
+        waiter.reset();
+
         let session = pool.CreateCaptureSession(&item)?;
-
         // The cursor is drawn by the overlay itself, and the capture border is
         // a recording affordance that would end up baked into the snapshot.
         // Both are best-effort: older builds do not have the setters.
         let _ = session.SetIsCursorCaptureEnabled(false);
         let _ = session.SetIsBorderRequired(false);
 
-        // FrameArrived is what wakes us; a bare poll loop can spin for the
-        // whole timeout on a desktop that is not changing.
-        let signal = CaptureSignal::new()?;
-        let waiter = signal.clone_handle();
-        pool.FrameArrived(&TypedEventHandler::<
-            Direct3D11CaptureFramePool,
-            windows::core::IInspectable,
-        >::new(move |_, _| {
-            waiter.set();
-            Ok(())
-        }))?;
-
         session.StartCapture()?;
         // A desktop that is not changing still produces one frame on start, but
         // cap the wait so a refusing capture cannot hang the overlay.
-        signal.wait(600);
+        waiter.wait(600);
 
         let frame = pool.TryGetNextFrame();
-        // Stop capturing before touching the texture: the session holds the
-        // frame pool alive and we want it torn down on every exit path.
+        // Stop capturing before touching the texture; the pool itself is kept.
         let _ = session.Close();
 
         let frame = match frame {
             Ok(f) => f,
-            Err(e) => {
-                let _ = pool.Close();
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         };
 
         let surface = frame.Surface()?;
@@ -217,7 +279,6 @@ fn capture_monitor(
             );
         }
         devices.context.Unmap(&staging, 0);
-        let _ = pool.Close();
 
         // WGC frames are already premultiplied-opaque for the desktop, but the
         // alpha channel comes back as whatever the compositor left there; the
@@ -263,13 +324,6 @@ impl CaptureSignal {
     fn clone_handle(&self) -> SignalHandle {
         SignalHandle(self.handle)
     }
-
-    /// Returns true if a frame arrived within `timeout_ms`.
-    fn wait(&self, timeout_ms: u32) -> bool {
-        use windows::Win32::Foundation::WAIT_OBJECT_0;
-        use windows::Win32::System::Threading::WaitForSingleObject;
-        unsafe { WaitForSingleObject(self.handle, timeout_ms) == WAIT_OBJECT_0 }
-    }
 }
 
 impl Drop for CaptureSignal {
@@ -296,6 +350,22 @@ impl SignalHandle {
         unsafe {
             let _ = SetEvent(self.0);
         }
+    }
+
+    /// Clear the event before a capture, so a wait cannot be satisfied by the
+    /// previous one.
+    fn reset(&self) {
+        use windows::Win32::System::Threading::ResetEvent;
+        unsafe {
+            let _ = ResetEvent(self.0);
+        }
+    }
+
+    /// Returns true if a frame arrived within `timeout_ms`.
+    fn wait(&self, timeout_ms: u32) -> bool {
+        use windows::Win32::Foundation::WAIT_OBJECT_0;
+        use windows::Win32::System::Threading::WaitForSingleObject;
+        unsafe { WaitForSingleObject(self.0, timeout_ms) == WAIT_OBJECT_0 }
     }
 }
 
