@@ -1,7 +1,7 @@
 use super::{D2DRenderer, v2};
 use crate::shapes::{
-    SELECTION_HANDLE_SIZE, calculate_arrow_head, contained_text_origin, normalize_rect,
-    points_to_bezier_segments, pressure_width_factor, selection_handle_points,
+    SELECTION_HANDLE_SIZE, arrow_head_points, arrow_head_size, arrow_shaft, contained_text_origin,
+    normalize_rect, points_to_bezier_segments, pressure_width_factor, selection_handle_points,
 };
 use crate::types::{
     ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserRipple, LaserTrailPoint, Point2D, Shape,
@@ -142,61 +142,62 @@ impl D2DRenderer {
                 } => {
                     let col = color.to_d2d_color(1.0);
                     if let Some(brush) = self.solid_brush(rt, &col) {
-                        let p0 = v2(start.x, start.y);
-                        let p1 = v2(end.x, end.y);
-                        let stroke_style = self.get_stroke_style(*pattern);
-                        rt.DrawLine(p0, p1, &brush, *width, Some(stroke_style));
+                        let length = start.distance(end);
+                        let (head_len, half_width) = arrow_head_size(*width, length);
+                        let head_at_start = *style == ArrowStyle::Double
+                            || *style == ArrowStyle::Dimension;
 
-                        let head_len = (*width * 5.0 + 12.0).clamp(16.0, 48.0);
-
-                        // Draw arrow head at end
-                        let (tip, left, right) = calculate_arrow_head(*start, *end, head_len);
-                        if let Ok(path) = self.factory.CreatePathGeometry()
-                            && let Ok(sink) = path.Open()
+                        // The shaft stops where the head begins. Running it to
+                        // the tip and filling the head over it leaves the round
+                        // cap poking out past the point, and swallows the head
+                        // entirely once the stroke gets thick.
+                        if let Some((s, e)) =
+                            arrow_shaft(*start, *end, head_len, head_at_start, true)
                         {
-                            sink.BeginFigure(v2(tip.x, tip.y), D2D1_FIGURE_BEGIN_FILLED);
-                            sink.AddLine(v2(left.x, left.y));
-                            sink.AddLine(v2(right.x, right.y));
-                            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-                            let _ = sink.Close();
-                            rt.FillGeometry(&path, &brush, None);
+                            let stroke_style = self.get_stroke_style(*pattern);
+                            rt.DrawLine(
+                                v2(s.x, s.y),
+                                v2(e.x, e.y),
+                                &brush,
+                                *width,
+                                Some(stroke_style),
+                            );
                         }
 
-                        // If Double or Dimension: also draw arrow head at start
-                        if *style == ArrowStyle::Double || *style == ArrowStyle::Dimension {
-                            let (tip2, left2, right2) =
-                                calculate_arrow_head(*end, *start, head_len);
-                            if let Ok(path2) = self.factory.CreatePathGeometry()
-                                && let Ok(sink2) = path2.Open()
+                        let fill_head = |from: Point2D, to: Point2D| {
+                            let (tip, left, right) =
+                                arrow_head_points(from, to, head_len, half_width);
+                            if let Ok(path) = self.factory.CreatePathGeometry()
+                                && let Ok(sink) = path.Open()
                             {
-                                sink2.BeginFigure(v2(tip2.x, tip2.y), D2D1_FIGURE_BEGIN_FILLED);
-                                sink2.AddLine(v2(left2.x, left2.y));
-                                sink2.AddLine(v2(right2.x, right2.y));
-                                sink2.EndFigure(D2D1_FIGURE_END_CLOSED);
-                                let _ = sink2.Close();
-                                rt.FillGeometry(&path2, &brush, None);
+                                sink.BeginFigure(v2(tip.x, tip.y), D2D1_FIGURE_BEGIN_FILLED);
+                                sink.AddLine(v2(left.x, left.y));
+                                sink.AddLine(v2(right.x, right.y));
+                                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                                let _ = sink.Close();
+                                rt.FillGeometry(&path, &brush, None);
                             }
+                        };
+
+                        fill_head(*start, *end);
+                        if head_at_start {
+                            fill_head(*end, *start);
                         }
 
-                        // If Dimension: draw perpendicular end-caps (ticks)
-                        if *style == ArrowStyle::Dimension {
-                            let dx = end.x - start.x;
-                            let dy = end.y - start.y;
-                            let len = (dx * dx + dy * dy).sqrt();
-                            if len > 1.0 {
-                                let perp_x = -dy / len;
-                                let perp_y = dx / len;
-                                let tick_h = head_len * 0.9;
-
-                                let s_top =
-                                    v2(start.x + perp_x * tick_h, start.y + perp_y * tick_h);
-                                let s_bot =
-                                    v2(start.x - perp_x * tick_h, start.y - perp_y * tick_h);
-                                rt.DrawLine(s_top, s_bot, &brush, *width * 1.2, None);
-
-                                let e_top = v2(end.x + perp_x * tick_h, end.y + perp_y * tick_h);
-                                let e_bot = v2(end.x - perp_x * tick_h, end.y - perp_y * tick_h);
-                                rt.DrawLine(e_top, e_bot, &brush, *width * 1.2, None);
+                        // Dimension style: perpendicular ticks at both ends.
+                        if *style == ArrowStyle::Dimension && length > 1.0 {
+                            let ux = (end.x - start.x) / length;
+                            let uy = (end.y - start.y) / length;
+                            let (px, py) = (-uy, ux);
+                            let tick = half_width * 1.1;
+                            for p in [start, end] {
+                                rt.DrawLine(
+                                    v2(p.x + px * tick, p.y + py * tick),
+                                    v2(p.x - px * tick, p.y - py * tick),
+                                    &brush,
+                                    *width * 1.2,
+                                    None,
+                                );
                             }
                         }
                     }

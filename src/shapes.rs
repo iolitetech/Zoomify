@@ -35,47 +35,6 @@ pub fn snap_to_square(start: Point2D, current: Point2D) -> Point2D {
     }
 }
 
-pub fn calculate_arrow_head(
-    start: Point2D,
-    end: Point2D,
-    head_length: f32,
-) -> (Point2D, Point2D, Point2D) {
-    let dx = end.x - start.x;
-    let dy = end.y - start.y;
-    let length = (dx * dx + dy * dy).sqrt();
-
-    if length < 2.0 {
-        return (end, end, end);
-    }
-
-    let ux = dx / length;
-    let uy = dy / length;
-
-    let max_head = (length * 0.5).max(1.0);
-    let actual_head_len = head_length.clamp(6.0, 48.0).min(max_head);
-    let head_angle: f32 = 28.0f32.to_radians();
-
-    let base_x = end.x - ux * actual_head_len;
-    let base_y = end.y - uy * actual_head_len;
-
-    let perp_x = -uy;
-    let perp_y = ux;
-
-    let half_width = actual_head_len * head_angle.tan();
-
-    let left = Point2D {
-        x: base_x + perp_x * half_width,
-        y: base_y + perp_y * half_width,
-    };
-
-    let right = Point2D {
-        x: base_x - perp_x * half_width,
-        y: base_y - perp_y * half_width,
-    };
-
-    (end, left, right)
-}
-
 pub fn normalize_rect(p1: Point2D, p2: Point2D) -> (f32, f32, f32, f32) {
     let left = p1.x.min(p2.x);
     let top = p1.y.min(p2.y);
@@ -351,6 +310,82 @@ pub fn recognize_smart_shape(
     }
 
     None
+}
+
+// ─────────────────────── Arrow proportions ───────────────────────
+//
+// The head has to stay recognisably wider than the shaft at every stroke
+// width, and the shaft has to stop where the head begins. Drawing the shaft
+// all the way to the tip and filling a fixed-size head over it looks fine at
+// 2px and turns into a rounded bar with two fins by 36px.
+
+/// Head length and half-width for a stroke of `width` on an arrow of `length`.
+pub fn arrow_head_size(width: f32, length: f32) -> (f32, f32) {
+    // Grow with the stroke, but never eat more than part of a short arrow.
+    let head_len = (width * 4.0 + 10.0).clamp(12.0, 120.0).min(length * 0.45);
+    // A head narrower than about twice the shaft stops reading as a head.
+    let half_width = (head_len * 0.42).max(width * 1.15);
+    // ...but that floor can outrun the length cap on a short, thick arrow and
+    // leave a head wider than it is long, which is a fin rather than a point.
+    // Keeping the aspect sane wins over honouring the length cap; the shaft
+    // simply disappears, which is the honest rendering of that shape.
+    let head_len = head_len.max(half_width * 1.2);
+    (head_len, half_width)
+}
+
+/// The three points of an arrow head pointing from `from` to `to`.
+pub fn arrow_head_points(
+    from: Point2D,
+    to: Point2D,
+    head_len: f32,
+    half_width: f32,
+) -> (Point2D, Point2D, Point2D) {
+    let dx = to.x - from.x;
+    let dy = to.y - from.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 0.001 {
+        return (to, to, to);
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let base = Point2D::new(to.x - ux * head_len, to.y - uy * head_len);
+    // Perpendicular, for the two flanks.
+    let (px, py) = (-uy, ux);
+    (
+        to,
+        Point2D::new(base.x + px * half_width, base.y + py * half_width),
+        Point2D::new(base.x - px * half_width, base.y - py * half_width),
+    )
+}
+
+/// Where the shaft should run, pulled back from whichever ends carry a head.
+///
+/// `None` when the arrow is all head and no shaft, which is what a very short
+/// or very thick one becomes.
+pub fn arrow_shaft(
+    start: Point2D,
+    end: Point2D,
+    head_len: f32,
+    head_at_start: bool,
+    head_at_end: bool,
+) -> Option<(Point2D, Point2D)> {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 0.001 {
+        return None;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    // Stop just inside the head so the two overlap rather than seam.
+    let inset = head_len * 0.92;
+    let from_t = if head_at_start { inset } else { 0.0 };
+    let to_t = len - if head_at_end { inset } else { 0.0 };
+    if to_t - from_t < 0.5 {
+        return None;
+    }
+    Some((
+        Point2D::new(start.x + ux * from_t, start.y + uy * from_t),
+        Point2D::new(start.x + ux * to_t, start.y + uy * to_t),
+    ))
 }
 
 // ─────────────────────── Arrow binding ───────────────────────
@@ -1000,28 +1035,7 @@ mod tests {
         assert!((snapped.x - 100.5).abs() < 1.0);
     }
 
-    #[test]
-    fn test_calculate_arrow_head() {
-        let start = Point2D::new(0.0, 0.0);
-        let end = Point2D::new(100.0, 0.0);
-        let (tip, left, right) = calculate_arrow_head(start, end, 20.0);
-        assert_eq!(tip.x, 100.0);
-        assert_eq!(tip.y, 0.0);
-        assert!(left.x < 100.0);
-        assert!(right.x < 100.0);
-        assert!(left.y != right.y);
-    }
 
-    #[test]
-    fn test_calculate_short_arrow_head() {
-        let start = Point2D::new(0.0, 0.0);
-        let end = Point2D::new(10.0, 0.0);
-        let (tip, left, right) = calculate_arrow_head(start, end, 20.0);
-        assert_eq!(tip.x, 10.0);
-        assert_eq!(tip.y, 0.0);
-        assert!(left.x >= start.x);
-        assert!(right.x >= start.x);
-    }
 
     #[test]
     fn test_bezier_smoothing() {
@@ -1161,6 +1175,93 @@ mod tests {
             style: ArrowStyle::Single,
             pattern: StrokePattern::Solid,
         }
+    }
+
+    #[test]
+    fn test_arrow_head_is_always_wider_than_its_shaft() {
+        // This is what broke before: past about 8px the head stopped growing
+        // while the shaft kept fattening, until it read as a bar with fins.
+        for width in [1.0, 2.0, 6.0, 12.0, 22.0, 36.0] {
+            let (head_len, half_width) = arrow_head_size(width, 600.0);
+            assert!(
+                half_width * 2.0 > width * 2.0,
+                "width {}: head {} vs shaft {}",
+                width,
+                half_width * 2.0,
+                width
+            );
+            assert!(head_len > width, "width {}: head length {}", width, head_len);
+        }
+    }
+
+    #[test]
+    fn test_arrow_head_stays_a_fraction_of_a_short_arrow() {
+        // At an ordinary stroke width the length cap holds.
+        let (head_len, _) = arrow_head_size(6.0, 60.0);
+        assert!(head_len <= 60.0 * 0.45 + 0.01, "{}", head_len);
+    }
+
+    #[test]
+    fn test_a_stubby_arrow_keeps_a_pointed_head_over_the_length_cap() {
+        // 36px of stroke on a 14px arrow cannot satisfy both the length cap
+        // and a head that is longer than it is wide. The head wins: a fin is
+        // not an arrow, and the shaft simply vanishes.
+        let (head_len, half_width) = arrow_head_size(36.0, 14.0);
+        assert!(head_len > half_width, "fin: {} x {}", head_len, half_width);
+        assert!(head_len > 14.0 * 0.45);
+    }
+
+    #[test]
+    fn test_shaft_stops_short_of_the_tip() {
+        let s = Point2D::new(0.0, 0.0);
+        let e = Point2D::new(400.0, 0.0);
+        let (head_len, _) = arrow_head_size(12.0, 400.0);
+        let (a, b) = arrow_shaft(s, e, head_len, false, true).unwrap();
+        assert_eq!(a, s);
+        // It ends before the point, so the round cap cannot poke out past it.
+        assert!(b.x < e.x - head_len * 0.8, "shaft ends at {:?}", b);
+    }
+
+    #[test]
+    fn test_shaft_is_pulled_back_at_both_ends_for_a_double_arrow() {
+        let s = Point2D::new(0.0, 0.0);
+        let e = Point2D::new(400.0, 0.0);
+        let (head_len, _) = arrow_head_size(6.0, 400.0);
+        let (a, b) = arrow_shaft(s, e, head_len, true, true).unwrap();
+        assert!(a.x > 0.0 && b.x < 400.0);
+        assert!((a.x - (400.0 - b.x)).abs() < 0.01, "asymmetric: {:?} {:?}", a, b);
+    }
+
+    #[test]
+    fn test_an_arrow_too_short_for_a_shaft_is_head_only() {
+        let s = Point2D::new(0.0, 0.0);
+        let e = Point2D::new(14.0, 0.0);
+        let (head_len, _) = arrow_head_size(36.0, 14.0);
+        // Nothing sensible left to draw as a shaft; the head stands alone
+        // rather than the shaft being drawn backwards.
+        assert!(arrow_shaft(s, e, head_len, true, true).is_none());
+    }
+
+    #[test]
+    fn test_head_points_straddle_the_line_and_meet_at_the_tip() {
+        let (tip, left, right) = arrow_head_points(
+            Point2D::new(0.0, 0.0),
+            Point2D::new(100.0, 0.0),
+            20.0,
+            8.0,
+        );
+        assert_eq!(tip, Point2D::new(100.0, 0.0));
+        // Base sits one head-length back, flanks symmetric about the axis.
+        assert!((left.x - 80.0).abs() < 0.01 && (right.x - 80.0).abs() < 0.01);
+        assert!((left.y + right.y).abs() < 0.01);
+        assert!((left.y.abs() - 8.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_head_points_are_degenerate_for_a_zero_length_arrow() {
+        let p = Point2D::new(5.0, 5.0);
+        let (tip, left, right) = arrow_head_points(p, p, 20.0, 8.0);
+        assert_eq!((tip, left, right), (p, p, p));
     }
 
     #[test]
