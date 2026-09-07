@@ -3112,6 +3112,105 @@ impl OverlayWindow {
         }
     }
 
+    /// `Ctrl+J`: flatten the annotation layer to a standalone SVG next to
+    /// the PNG snapshots, background screenshot included as a raster layer
+    /// underneath the vector shapes.
+    ///
+    /// Unlike `save_snapshot`/`copy_screen_to_clipboard` this reads straight
+    /// from `self.shapes` rather than going through `get_composite_capture`:
+    /// there is no D2D render target involved, so `export_scale` has nothing
+    /// to apply to — shapes are vector paths at native resolution regardless.
+    pub fn export_svg(&mut self) {
+        let mut text_layout: std::collections::HashMap<ShapeId, (f32, f32)> =
+            std::collections::HashMap::new();
+        for a in &self.shapes {
+            let Shape::Text {
+                text,
+                font_size,
+                is_bold,
+                is_italic,
+                font_family,
+                ..
+            } = &a.shape
+            else {
+                continue;
+            };
+            let wrap = if let Some(cid) = a.container {
+                if let Some(owner) = self.shapes.iter().find(|o| o.id == cid) {
+                    if label_rides_on_shape(&owner.shape) {
+                        f32::MAX
+                    } else {
+                        let bounds = shape_bounds(&owner.shape);
+                        ((bounds.2 - bounds.0) - TextEditorState::CONTAINER_PADDING * 2.0).max(24.0)
+                    }
+                } else {
+                    f32::MAX
+                }
+            } else {
+                f32::MAX
+            };
+            let size = self.renderer.measure_text_block(
+                text,
+                *font_size,
+                *is_bold,
+                *is_italic,
+                *font_family,
+                wrap,
+            );
+            text_layout.insert(a.id, size);
+        }
+
+        let bg_pixels = self.background_capture.as_ref().map(|c| c.pixels.as_slice());
+        let (bg_px_w, bg_px_h) = self
+            .background_capture
+            .as_ref()
+            .map(|c| (c.width, c.height))
+            .unwrap_or((0, 0));
+
+        let svg = crate::svg_export::build_svg(&crate::svg_export::SvgExportInput {
+            logical_w: self.logical_w(),
+            logical_h: self.logical_h(),
+            zoom_level: self.zoom.level,
+            view_x: self.zoom.view_x,
+            view_y: self.zoom.view_y,
+            bg_type: self.background_type,
+            bg_pixels,
+            bg_px_w,
+            bg_px_h,
+            dpi_scale: self.dpi_scale(),
+            shapes: &self.shapes,
+            text_layout: &text_layout,
+        });
+
+        let dir = crate::session::pictures_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_toast("❌", format!("Cannot open Pictures folder: {}", e));
+            return;
+        }
+        let stamp = unsafe {
+            let t = windows::Win32::System::SystemInformation::GetLocalTime();
+            format!(
+                "{:04}{:02}{:02}-{:02}{:02}{:02}",
+                t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+            )
+        };
+        let mut path = dir.join(format!("Zoomify_{}.svg", stamp));
+        let mut n = 2;
+        while path.exists() && n < 1000 {
+            path = dir.join(format!("Zoomify_{}_{}.svg", stamp, n));
+            n += 1;
+        }
+        let name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "annotations.svg".to_string());
+
+        match std::fs::write(&path, svg) {
+            Ok(()) => self.set_toast("🖋️", format!("Saved {}", name)),
+            Err(e) => self.set_toast("❌", format!("SVG save failed: {}", e)),
+        }
+    }
+
     // ─────────────────────── Snapping ───────────────────────
 
     /// Snap tolerance in canvas units. The constant is in screen DIPs, so
@@ -5149,6 +5248,9 @@ impl OverlayWindow {
                             }
                             k if k == 'V' as i32 => {
                                 this.paste_image_from_clipboard();
+                            }
+                            k if k == 'J' as i32 => {
+                                this.export_svg();
                             }
                             // Ctrl+Shift+Up/Down fades the selection; Ctrl+E
                             // cycles the arrowhead; Ctrl+Shift+E cycles the

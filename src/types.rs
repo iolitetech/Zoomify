@@ -640,7 +640,11 @@ impl ImagePixels {
 }
 
 /// Minimal base64, so image bytes survive a JSON round trip.
-mod b64 {
+///
+/// `pub(crate)` rather than private: the SVG/PDF exporters reuse `encode` to
+/// embed raster data (pasted images, mosaic blur patches) without a second
+/// implementation.
+pub(crate) mod b64 {
     const ALPHABET: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

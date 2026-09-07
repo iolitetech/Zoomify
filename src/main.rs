@@ -12,6 +12,7 @@ mod renderer;
 mod session;
 mod settings_window;
 mod shapes;
+mod svg_export;
 mod tray;
 mod types;
 

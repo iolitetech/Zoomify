@@ -41,6 +41,7 @@ return in an annotation tool. F is an architecture change to the overlay.
 | Select and arrowhead sub-bars | `d06ee3c`/`bf4afe0` |
 | Paste an image from the clipboard (`Shape::Image`, CF_DIB/CF_BITMAP) | `1568186` |
 | Export above screen resolution (`Ctrl+Shift+E`, 1x/2x/3x) | `627a2f2` |
+| SVG export (`Ctrl+J`) — vector shapes over a raster background layer | _pending_ |
 
 ### Design decisions worth not re-litigating
 
@@ -148,12 +149,11 @@ rather than one flat string.
 
 ## D. Export & interop — **in progress**
 
-Clipboard paste and export-above-screen-resolution are done (see Shipped
-above). Remaining:
+Clipboard paste, export-above-screen-resolution and SVG export are done (see
+Shipped above). Remaining:
 
 | Item | Effort |
 |---|---|
-| SVG export | **M** — makes the vector work reusable elsewhere |
 | PDF export | **M** |
 
 Drag-and-drop from Explorer/a browser was built and deliberately removed —
