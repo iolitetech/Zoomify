@@ -150,6 +150,9 @@ pub struct OverlayWindow {
     /// Alignment feedback for the snap currently in effect, in canvas space.
     /// Whether shapes snap to each other at all; Alt overrides per gesture.
     pub snap_to_shapes: bool,
+    /// Multiplier for saved/copied images: 1x, 2x or 3x native screen pixels.
+    /// Cycled with `Ctrl+Shift+E`.
+    pub export_scale: u32,
     pub snap_guides: Vec<SnapGuide>,
     /// Cached anchors of every shape except the one being drawn or dragged,
     /// rebuilt when a gesture starts rather than on every mouse move.
@@ -394,6 +397,7 @@ impl OverlayWindow {
                 pen_pressure: None,
                 pen_active: false,
                 snap_to_shapes: cfg.snap_to_shapes,
+                export_scale: cfg.export_scale.clamp(1, 3),
                 snap_guides: Vec::new(),
                 snap_anchors: Vec::new(),
                 selection: None,
@@ -962,6 +966,7 @@ impl OverlayWindow {
             BadgeSize::ExtraLarge => "ExtraLarge".to_string(),
             BadgeSize::Medium => "Medium".to_string(),
         };
+        cfg.export_scale = self.export_scale;
         cfg.save();
     }
 
@@ -2329,6 +2334,18 @@ impl OverlayWindow {
         self.request_repaint();
     }
 
+    /// Cycle the multiplier applied to saved/copied images: 1x → 2x → 3x → 1x.
+    /// Persisted on overlay exit like every other setting here, not per-press.
+    fn cycle_export_scale(&mut self) {
+        self.export_scale = match self.export_scale {
+            1 => 2,
+            2 => 3,
+            _ => 1,
+        };
+        self.set_toast("🔍", format!("Export scale: {}x", self.export_scale));
+        self.request_repaint();
+    }
+
     /// Cycle the arrowhead shape on every selected arrow.
     fn cycle_arrow_head(&mut self) {
         let ids = self.selected_ids();
@@ -2886,6 +2903,7 @@ impl OverlayWindow {
             self.active_shape.as_ref(),
             text_input,
             include_spotlight,
+            self.export_scale as f32,
         )
     }
 
@@ -2897,7 +2915,14 @@ impl OverlayWindow {
         // Previously a failed copy was silent, so the user had no idea the
         // clipboard still held whatever was there before.
         if copy_bgra_to_clipboard(composite.width, composite.height, &composite.pixels) {
-            self.set_toast("📋", "Copied Screen + Drawings to Clipboard!");
+            if self.export_scale > 1 {
+                self.set_toast(
+                    "📋",
+                    format!("Copied Screen + Drawings to Clipboard! ({}x)", self.export_scale),
+                );
+            } else {
+                self.set_toast("📋", "Copied Screen + Drawings to Clipboard!");
+            }
         } else {
             self.set_toast("❌", "Clipboard busy — copy failed, try again");
         }
@@ -3076,7 +3101,13 @@ impl OverlayWindow {
             .unwrap_or_else(|| "screenshot.png".to_string());
 
         match composite.save_png(&path.to_string_lossy()) {
-            Ok(()) => self.set_toast("💾", format!("Saved {}", name)),
+            Ok(()) => {
+                if self.export_scale > 1 {
+                    self.set_toast("💾", format!("Saved {} ({}x)", name, self.export_scale));
+                } else {
+                    self.set_toast("💾", format!("Saved {}", name));
+                }
+            }
             Err(e) => self.set_toast("❌", format!("Save failed: {}", e)),
         }
     }
@@ -5120,14 +5151,18 @@ impl OverlayWindow {
                                 this.paste_image_from_clipboard();
                             }
                             // Ctrl+Shift+Up/Down fades the selection; Ctrl+E
-                            // cycles the arrowhead.
+                            // cycles the arrowhead; Ctrl+Shift+E cycles the
+                            // export resolution multiplier.
                             k if k == VK_UP.0 as i32 && is_shift => {
                                 this.adjust_opacity(0.1);
                             }
                             k if k == VK_DOWN.0 as i32 && is_shift => {
                                 this.adjust_opacity(-0.1);
                             }
-                            k if k == 'E' as i32 => {
+                            k if k == 'E' as i32 && is_shift => {
+                                this.cycle_export_scale();
+                            }
+                            k if k == 'E' as i32 && !is_shift => {
                                 this.cycle_arrow_head();
                             }
                             k if k == 'G' as i32 && is_shift => {

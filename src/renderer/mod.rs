@@ -939,12 +939,22 @@ impl D2DRenderer {
         active_shape: Option<&Shape>,
         text_input: Option<&TextEditorState>,
         include_spotlight: bool,
+        supersample: f32,
     ) -> Option<ScreenCapture> {
         if width == 0 || height == 0 {
             return None;
         }
 
-        // The DIB is physical pixels; drawing happens in DIPs.
+        // The DIB is physical pixels; drawing happens in DIPs. `width`/`height`
+        // stay the *native* screen-capture size (the background bitmap is this
+        // size, always). The output DIB — what actually gets saved/copied — is
+        // scaled up by `supersample`: Direct2D re-renders every vector shape at
+        // that higher DPI, and the native background bitmap is bilinearly
+        // upscaled into it by the existing DrawBitmap call below.
+        let supersample = supersample.max(1.0);
+        let out_w = ((width as f32) * supersample).round().max(1.0) as u32;
+        let out_h = ((height as f32) * supersample).round().max(1.0) as u32;
+        let render_dpi = self.dpi * supersample;
         let scale = self.dpi / 96.0;
         let logical_w = width as f32 / scale;
         let logical_h = height as f32 / scale;
@@ -964,12 +974,12 @@ impl D2DRenderer {
             let bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: width as i32,
-                    biHeight: -(height as i32), // Negative height = top-down DIB
+                    biWidth: out_w as i32,
+                    biHeight: -(out_h as i32), // Negative height = top-down DIB
                     biPlanes: 1,
                     biBitCount: 32,
                     biCompression: BI_RGB.0,
-                    biSizeImage: width * height * 4,
+                    biSizeImage: out_w * out_h * 4,
                     biXPelsPerMeter: 0,
                     biYPelsPerMeter: 0,
                     biClrUsed: 0,
@@ -1009,13 +1019,14 @@ impl D2DRenderer {
                     let rect = windows::Win32::Foundation::RECT {
                         left: 0,
                         top: 0,
-                        right: width as i32,
-                        bottom: height as i32,
+                        right: out_w as i32,
+                        bottom: out_h as i32,
                     };
                     if dc_rt.BindDC(mem_dc, &rect).is_ok() {
-                        // Same DPI as the on-screen target so DIP coordinates map
-                        // onto these physical pixels exactly as they do on screen.
-                        dc_rt.SetDpi(self.dpi, self.dpi);
+                        // Same DPI as the on-screen target (times any export
+                        // supersample) so DIP coordinates map onto these physical
+                        // pixels exactly as they do on screen, just denser.
+                        dc_rt.SetDpi(render_dpi, render_dpi);
                         dc_rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                         dc_rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
                         dc_rt.BeginDraw();
@@ -1161,7 +1172,7 @@ impl D2DRenderer {
 
                         let _ = dc_rt.EndDraw(None, None);
 
-                        let total_bytes = (width * height * 4) as usize;
+                        let total_bytes = (out_w * out_h * 4) as usize;
                         let mut pixels = vec![0u8; total_bytes];
                         std::ptr::copy_nonoverlapping(
                             bits_ptr as *const u8,
@@ -1181,8 +1192,8 @@ impl D2DRenderer {
                         return Some(ScreenCapture {
                             x: screen_x,
                             y: screen_y,
-                            width,
-                            height,
+                            width: out_w,
+                            height: out_h,
                             pixels,
                         });
                     }

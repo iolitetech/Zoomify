@@ -620,6 +620,7 @@ impl D2DRenderer {
                     ("Ctrl+C / Ctrl+S", "Copy screen / Save snapshot"),
                     ("Ctrl+Shift+S / Ctrl+O", "Save / load annotation session"),
                     ("Ctrl+V", "Paste an image from the clipboard"),
+                    ("Ctrl+Shift+E", "Cycle export scale (1x/2x/3x)"),
                     ("E / Delete", "Clear canvas (undoable)"),
                     ("Esc / Right-Click", "Return to Pan mode / Exit overlay"),
                 ];

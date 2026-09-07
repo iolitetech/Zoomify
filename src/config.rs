@@ -118,6 +118,10 @@ fn default_recent_colors() -> Vec<String> {
     Vec::new()
 }
 
+fn default_export_scale() -> u32 {
+    1
+}
+
 fn default_hk_static_zoom() -> HotkeyBinding {
     HotkeyBinding::new(0x0002, '1' as u32)
 }
@@ -187,6 +191,11 @@ pub struct AppConfig {
     /// and dragging. Hold Alt to suppress it for one gesture.
     #[serde(default = "default_snap_to_shapes")]
     pub snap_to_shapes: bool,
+    /// Multiplier applied to saved/copied images: 1x, 2x or 3x the screen's
+    /// native pixels. Vector content (shapes, strokes, text) renders sharp at
+    /// any multiplier; the captured background is upscaled to match.
+    #[serde(default = "default_export_scale")]
+    pub export_scale: u32,
     #[serde(default = "default_hk_static_zoom")]
     pub hotkey_static_zoom: HotkeyBinding,
     #[serde(default = "default_hk_draw")]
@@ -226,6 +235,7 @@ impl Default for AppConfig {
             session_keep_last: default_session_keep_last(),
             use_graphics_capture: default_graphics_capture(),
             snap_to_shapes: default_snap_to_shapes(),
+            export_scale: default_export_scale(),
             hotkey_static_zoom: default_hk_static_zoom(),
             hotkey_draw: default_hk_draw(),
             hotkey_spotlight: default_hk_spotlight(),
