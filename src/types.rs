@@ -1182,6 +1182,11 @@ impl LoupeState {
     }
 }
 
+/// How far past the screen edge `ZoomState::clamp_viewport_infinite` lets
+/// Draw mode pan, in whole screens each direction. Not truly unbounded — see
+/// that method's doc comment for why a generous bound reads the same as one.
+const INFINITE_CANVAS_SCREENS: f32 = 4.0;
+
 #[derive(Debug, Clone)]
 pub struct ZoomState {
     pub level: f32,
@@ -1213,7 +1218,12 @@ impl Default for ZoomState {
 
 impl ZoomState {
     pub fn screen_to_canvas(&self, screen_pt: Point2D) -> Point2D {
-        if self.level <= 1.001 {
+        // Not zoomed and not panned is the overwhelmingly common case, and
+        // every mode but Draw's infinite-canvas gesture keeps view_x/y at 0
+        // whenever level drops back to 1 — so this still short-circuits for
+        // them exactly as before. Only a pure pan (level == 1, view_x/y set)
+        // needs the plain-translation branch below.
+        if self.level <= 1.001 && self.view_x == 0.0 && self.view_y == 0.0 {
             screen_pt
         } else {
             Point2D {
@@ -1224,7 +1234,7 @@ impl ZoomState {
     }
 
     pub fn canvas_to_screen(&self, canvas_pt: Point2D) -> Point2D {
-        if self.level <= 1.001 {
+        if self.level <= 1.001 && self.view_x == 0.0 && self.view_y == 0.0 {
             canvas_pt
         } else {
             Point2D {
@@ -1244,6 +1254,23 @@ impl ZoomState {
         self.target_view_y = self.target_view_y.clamp(0.0, max_y);
         self.view_x = self.view_x.clamp(0.0, max_x);
         self.view_y = self.view_y.clamp(0.0, max_y);
+    }
+
+    /// Like `clamp_viewport`, but for Draw mode's infinite-canvas pan on a
+    /// Whiteboard/Blackboard background. `clamp_viewport`'s bound is
+    /// `screen_w - view_w`, which is exactly 0 at native (1x) zoom — the
+    /// point of this feature is panning past the screen edge at 1x, so that
+    /// bound has to go. Bounded to a few screens out in each direction
+    /// rather than truly unbounded, so it still reads as "infinite" in
+    /// practice without ever risking float precision at the drawing scale
+    /// this app works at.
+    pub fn clamp_viewport_infinite(&mut self, screen_w: f32, screen_h: f32) {
+        let margin_x = screen_w * INFINITE_CANVAS_SCREENS;
+        let margin_y = screen_h * INFINITE_CANVAS_SCREENS;
+        self.target_view_x = self.target_view_x.clamp(-margin_x, margin_x);
+        self.target_view_y = self.target_view_y.clamp(-margin_y, margin_y);
+        self.view_x = self.view_x.clamp(-margin_x, margin_x);
+        self.view_y = self.view_y.clamp(-margin_y, margin_y);
     }
 
     pub fn update_target_from_cursor(
@@ -1315,8 +1342,25 @@ impl ZoomState {
         self.view_y = self.target_view_y;
     }
 
-    pub fn tick_smooth_pan(&mut self, lerp: f32, screen_w: f32, screen_h: f32) -> bool {
-        self.clamp_viewport(screen_w, screen_h);
+    /// `infinite` picks which clamp bounds the eased view: the ordinary
+    /// screen-bound one, or the generous infinite-canvas one for a Draw-mode
+    /// pan on a Whiteboard/Blackboard. This runs every animation tick
+    /// regardless of what triggered the last view change, so it has to
+    /// agree with whichever clamp the gesture itself used — otherwise the
+    /// screen-bound clamp (0 range at native zoom) snaps an infinite-canvas
+    /// pan straight back to the origin the very next tick.
+    pub fn tick_smooth_pan(
+        &mut self,
+        lerp: f32,
+        screen_w: f32,
+        screen_h: f32,
+        infinite: bool,
+    ) -> bool {
+        if infinite {
+            self.clamp_viewport_infinite(screen_w, screen_h);
+        } else {
+            self.clamp_viewport(screen_w, screen_h);
+        }
         let dx = self.target_view_x - self.view_x;
         let dy = self.target_view_y - self.view_y;
         let dl = self.target_level - self.level;
@@ -2772,6 +2816,86 @@ mod tests {
         assert_eq!(zoom.level, 2.0);
         assert_eq!(zoom.view_x, 480.0); // 960 - 960/2
         assert_eq!(zoom.view_y, 270.0); // 540 - 540/2
+    }
+
+    #[test]
+    fn test_the_no_op_shortcut_still_applies_at_rest() {
+        // level == 1 and no pan: both conversions must stay pure identity,
+        // exactly as before the infinite-canvas pan existed.
+        let zoom = ZoomState::default();
+        let p = Point2D::new(123.0, 456.0);
+        assert_eq!(zoom.screen_to_canvas(p), p);
+        assert_eq!(zoom.canvas_to_screen(p), p);
+    }
+
+    #[test]
+    fn test_a_pure_pan_at_native_zoom_is_a_plain_translation() {
+        // Infinite-canvas panning: level stays 1, only view_x/y move. This is
+        // exactly the case the old `level <= 1.001` shortcut used to swallow.
+        let zoom = ZoomState {
+            view_x: 300.0,
+            view_y: -150.0,
+            ..Default::default()
+        };
+        let screen_pt = Point2D::new(400.0, 200.0);
+        let canvas_pt = zoom.screen_to_canvas(screen_pt);
+        assert_eq!(canvas_pt.x, 700.0); // 300 + 400/1
+        assert_eq!(canvas_pt.y, 50.0); // -150 + 200/1
+
+        let roundtrip = zoom.canvas_to_screen(canvas_pt);
+        assert_eq!(roundtrip.x, 400.0);
+        assert_eq!(roundtrip.y, 200.0);
+    }
+
+    #[test]
+    fn test_infinite_clamp_allows_panning_well_past_the_screen_but_not_forever() {
+        let mut zoom = ZoomState {
+            target_view_x: 500.0,
+            target_view_y: -500.0,
+            view_x: 500.0,
+            view_y: -500.0,
+            ..Default::default()
+        };
+        // Well within a few screens out: the ordinary clamp would have
+        // pinned this to 0 at native zoom, the infinite one leaves it alone.
+        zoom.clamp_viewport_infinite(1920.0, 1080.0);
+        assert_eq!(zoom.view_x, 500.0);
+        assert_eq!(zoom.view_y, -500.0);
+
+        // Far enough out that even the generous bound has to catch it.
+        zoom.target_view_x = 99_999.0;
+        zoom.view_x = 99_999.0;
+        zoom.clamp_viewport_infinite(1920.0, 1080.0);
+        assert!(zoom.view_x < 99_999.0);
+        assert!(zoom.view_x <= 1920.0 * INFINITE_CANVAS_SCREENS);
+    }
+
+    #[test]
+    fn test_smooth_pan_tick_must_use_the_infinite_clamp_or_it_snaps_straight_back() {
+        // A regression test for the actual bug: the animation timer calls
+        // tick_smooth_pan every tick regardless of what set view_x/y last.
+        // At native zoom the ordinary clamp's range is 0, so if this ever
+        // ticks with infinite=false while panned, it silently erases the
+        // pan on the very next animation frame - it did exactly that before
+        // `infinite` existed, and this pins the fix in place.
+        let mut panned = ZoomState {
+            target_view_x: 300.0,
+            view_x: 300.0,
+            ..Default::default()
+        };
+        panned.tick_smooth_pan(1.0, 1920.0, 1080.0, true);
+        assert_eq!(panned.view_x, 300.0, "infinite=true must leave a native-zoom pan alone");
+
+        let mut panned2 = ZoomState {
+            target_view_x: 300.0,
+            view_x: 300.0,
+            ..Default::default()
+        };
+        panned2.tick_smooth_pan(1.0, 1920.0, 1080.0, false);
+        assert_eq!(
+            panned2.view_x, 0.0,
+            "infinite=false keeps the screen-bound clamp for every other mode"
+        );
     }
 
     #[test]

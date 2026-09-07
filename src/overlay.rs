@@ -4029,7 +4029,9 @@ impl OverlayWindow {
                         if this.mode == AppMode::StaticZoom || this.mode == AppMode::Draw {
                             let sw = this.logical_w();
                             let sh = this.logical_h();
-                            if this.zoom.tick_smooth_pan(0.35, sw, sh) {
+                            let infinite = this.mode == AppMode::Draw
+                                && this.background_type != CanvasBackground::Transparent;
+                            if this.zoom.tick_smooth_pan(0.35, sw, sh, infinite) {
                                 needs_paint = true;
                             }
                         }
@@ -4231,6 +4233,38 @@ impl OverlayWindow {
                         this.minimap.is_hovered = false;
                     }
 
+                    // Middle-mouse-drag pan/infinite-canvas gesture. Checked
+                    // ahead of every tool-specific canvas handler below (the
+                    // Select tool's own drag-the-shape handling especially)
+                    // since it's a distinct, exclusive gesture on its own
+                    // button that has to win regardless of which tool is
+                    // active — previously it lived after the Select-tool
+                    // block and so silently did nothing whenever Select was
+                    // the current tool, caught while probing this feature.
+                    if this.zoom.is_dragging {
+                        let z = this.zoom.level.max(1.0);
+                        let dx = (screen_pt.x - this.zoom.drag_start_mouse.x) / z;
+                        let dy = (screen_pt.y - this.zoom.drag_start_mouse.y) / z;
+                        this.zoom.target_view_x = this.zoom.drag_start_view.x - dx;
+                        this.zoom.target_view_y = this.zoom.drag_start_view.y - dy;
+                        // Whiteboard/Blackboard in Draw mode is the
+                        // infinite-canvas gesture: no wall at the screen
+                        // edge, just a generous bound. Everything else
+                        // (StaticZoom, or a live screen capture with nothing
+                        // to show past its own edge) keeps the old clamp.
+                        if this.mode == AppMode::Draw
+                            && this.background_type != CanvasBackground::Transparent
+                        {
+                            this.zoom.clamp_viewport_infinite(sw, sh);
+                        } else {
+                            this.zoom.clamp_viewport(sw, sh);
+                        }
+                        this.zoom.view_x = this.zoom.target_view_x;
+                        this.zoom.view_y = this.zoom.target_view_y;
+                        this.request_repaint();
+                        return LRESULT(0);
+                    }
+
                     // Laser pointer tracking
                     if this.current_tool == DrawTool::LaserPointer {
                         this.laser_pos = Some(canvas_pt);
@@ -4319,19 +4353,6 @@ impl OverlayWindow {
                         && !this.zoom.is_dragging
                     {
                         this.zoom.update_target_from_cursor(x, y, sw, sh);
-                        this.request_repaint();
-                        return LRESULT(0);
-                    }
-
-                    if this.zoom.is_dragging {
-                        let z = this.zoom.level.max(1.0);
-                        let dx = (screen_pt.x - this.zoom.drag_start_mouse.x) / z;
-                        let dy = (screen_pt.y - this.zoom.drag_start_mouse.y) / z;
-                        this.zoom.target_view_x = this.zoom.drag_start_view.x - dx;
-                        this.zoom.target_view_y = this.zoom.drag_start_view.y - dy;
-                        this.zoom.clamp_viewport(sw, sh);
-                        this.zoom.view_x = this.zoom.target_view_x;
-                        this.zoom.view_y = this.zoom.target_view_y;
                         this.request_repaint();
                         return LRESULT(0);
                     }
@@ -5720,6 +5741,15 @@ impl OverlayWindow {
                                 } else {
                                     CanvasBackground::Whiteboard
                                 };
+                            // A live screen capture has nothing to show past
+                            // its own edge, so an infinite-canvas pan left
+                            // over from Whiteboard/Blackboard would render as
+                            // a wrongly-shifted screenshot instead. Toggling
+                            // background always starts the view fresh.
+                            this.zoom.view_x = 0.0;
+                            this.zoom.view_y = 0.0;
+                            this.zoom.target_view_x = 0.0;
+                            this.zoom.target_view_y = 0.0;
                             this.current_color = ColorPreset::Red;
                             this.set_toast("⚪", "Whiteboard");
                             this.request_repaint();
@@ -5732,6 +5762,10 @@ impl OverlayWindow {
                                 } else {
                                     CanvasBackground::Blackboard
                                 };
+                            this.zoom.view_x = 0.0;
+                            this.zoom.view_y = 0.0;
+                            this.zoom.target_view_x = 0.0;
+                            this.zoom.target_view_y = 0.0;
                             this.current_color = ColorPreset::White;
                             this.set_toast("⚫", "Blackboard");
                             this.request_repaint();

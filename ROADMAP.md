@@ -44,6 +44,7 @@ return in an annotation tool. F is an architecture change to the overlay.
 | SVG export (`Ctrl+J`) — vector shapes over a raster background layer | `1cdd81c` |
 | PDF export (`Ctrl+P`) — single-page, no external crate | `6ac9654` |
 | Multiple boards to tab between (`Ctrl+T`/`Ctrl+W`, `Ctrl+Shift+[`/`]`) | `1021bde` |
+| Infinite canvas — pan a Whiteboard/Blackboard past the screen edge | `PENDING` |
 
 ### Design decisions worth not re-litigating
 
@@ -167,11 +168,11 @@ and what a real fix would actually require.
 | Item | Effort |
 |---|---|
 | Multiple boards / pages to tab between | **shipped**, see above |
+| Infinite canvas past screen bounds | **shipped**, see above |
 | Eyedropper — pick a colour off the screen | **S** |
 | First-run onboarding | **S** |
 | Toolbar customisation (which tools show) | **M** — see the crowding constraint |
 | Command palette (`Ctrl+K`) | **M** |
-| Infinite canvas past screen bounds | **M** |
 | Rebindable in-overlay keys | **M** |
 
 Boards are in-memory only — not part of a saved session file. Each board
@@ -180,6 +181,20 @@ capture, zoom, current tool/colour, selection) is shared, so switching feels
 like flipping to a fresh sheet mid-presentation rather than reopening the
 app. `Ctrl+W` on the last remaining board is a no-op rather than clearing
 it — `E`/Delete already does that job explicitly.
+
+Infinite canvas is a Draw-mode-only gesture (middle-mouse-drag) on a
+Whiteboard/Blackboard background — a live screen capture has nothing to
+show past its own edge, so that background keeps the old screen-bound
+clamp. Bounded to 4 screens out in each direction rather than truly
+unbounded, which reads the same as infinite at the scale this app draws at
+without risking float precision. Scoped out for now: zooming (mouse wheel)
+while panned past the screen re-clamps the view back within bounds instead
+of anchoring seamlessly — zoom always "belongs" to the physical screen;
+only the pan gesture is unbounded. Caught and fixed a real bug in the
+process: the animation timer's smooth-pan tick called the screen-bound
+clamp unconditionally, silently snapping any native-zoom pan back to the
+origin one frame after it was set — `tick_smooth_pan` now takes an
+`infinite` flag so it agrees with whichever clamp the gesture itself used.
 
 ## F. Multi-monitor
 

@@ -697,14 +697,24 @@ impl D2DRenderer {
                 M32: 0.0,
             };
 
+            // Draw mode also panned with no zoom at all (level == 1) is the
+            // infinite-canvas gesture: dragging a whiteboard/blackboard past
+            // the screen edge rather than zooming into a captured screen.
+            // `z > 1.001` alone would miss that case since it stays 1.0.
+            // Excluded for a live screen capture: it has nothing to show
+            // past its own edge, so a leftover pan would just shift the
+            // captured bitmap off its bounds instead of doing anything useful.
+            let panning = mode == AppMode::Draw
+                && effective_bg_type != CanvasBackground::Transparent
+                && (zoom_state.view_x != 0.0 || zoom_state.view_y != 0.0);
             let z = if mode == AppMode::StaticZoom
-                || (mode == AppMode::Draw && zoom_state.level > 1.001)
+                || (mode == AppMode::Draw && (zoom_state.level > 1.001 || panning))
             {
                 zoom_state.level.max(1.0)
             } else {
                 1.0
             };
-            let canvas_matrix = if z > 1.001 {
+            let canvas_matrix = if z > 1.001 || panning {
                 Matrix3x2 {
                     M11: z,
                     M12: 0.0,
@@ -1054,7 +1064,14 @@ impl D2DRenderer {
                         dc_rt.Clear(Some(&clear_color));
 
                         let z = zoom_state.level.max(1.0);
-                        let canvas_matrix = if z > 1.001 {
+                        // A pure infinite-canvas pan (level == 1, view_x/y
+                        // nonzero) still needs the translation applied, not
+                        // just a zoom — `z > 1.001` alone misses it. Excluded
+                        // for a live screen capture, which has nothing to
+                        // show past its own edge (see render_frame's twin).
+                        let panning = bg_type != CanvasBackground::Transparent
+                            && (zoom_state.view_x != 0.0 || zoom_state.view_y != 0.0);
+                        let canvas_matrix = if z > 1.001 || panning {
                             Matrix3x2 {
                                 M11: z,
                                 M12: 0.0,

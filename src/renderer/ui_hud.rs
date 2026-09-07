@@ -614,6 +614,7 @@ impl D2DRenderer {
                     ("F3 / Ctrl+3", "Toggle Spotlight on/off"),
                     ("Space", "Toggle Pan/Zoom vs Draw mode"),
                     ("Wheel", "Zoom in / out centered at mouse"),
+                    ("Middle-drag", "Pan — past the screen edge on a slate"),
                     ("Ctrl + Wheel", "Resize Spotlight circle"),
                     ("Shift + Wheel", "Adjust brush stroke width"),
                     ("Ctrl+Z / Ctrl+Y", "Undo / Redo (with badge counter)"),
