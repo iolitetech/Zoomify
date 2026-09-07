@@ -193,7 +193,7 @@ impl D2DRenderer {
             let dim_text_brush = rt.CreateSolidColorBrush(&text_dim, None).ok();
 
             // 4. Render items
-            let mut tooltip_text: Option<(&'static str, D2D_RECT_F)> = None;
+            let mut tooltip_text: Option<(String, D2D_RECT_F)> = None;
 
             for item in &toolbar.items {
                 let is_hover = toolbar.hover_action == Some(item.action);
@@ -210,7 +210,10 @@ impl D2DRenderer {
                     _ => false,
                 };
 
-                let is_color_item = matches!(item.action, FluentAction::Color(_));
+                let is_color_item = matches!(
+                    item.action,
+                    FluentAction::Color(_) | FluentAction::OpenColorPicker
+                );
 
                 let btn_rrect = D2D1_ROUNDED_RECT {
                     rect: item.rect,
@@ -234,6 +237,74 @@ impl D2DRenderer {
 
                 // Draw button content
                 match item.action {
+                    FluentAction::OpenColorPicker => {
+                        let cx = (item.rect.left + item.rect.right) / 2.0;
+                        let cy = (item.rect.top + item.rect.bottom) / 2.0;
+                        let center = v2(cx, cy);
+                        let showing_custom = matches!(color, ColorPreset::Custom(..));
+
+                        if is_hover
+                            && let Some(hb) = self.solid_brush(
+                                rt,
+                                &D2D1_COLOR_F {
+                                    r: 1.0,
+                                    g: 1.0,
+                                    b: 1.0,
+                                    a: 0.12,
+                                },
+                            )
+                        {
+                            rt.FillEllipse(
+                                &D2D1_ELLIPSE {
+                                    point: center,
+                                    radiusX: 11.0,
+                                    radiusY: 11.0,
+                                },
+                                &hb,
+                            );
+                        }
+
+                        // Filled with the live custom colour, or hollow when a
+                        // preset is active.
+                        if showing_custom
+                            && let Some(b) = self.solid_brush(rt, &color.to_d2d_color(1.0))
+                        {
+                            rt.FillEllipse(
+                                &D2D1_ELLIPSE {
+                                    point: center,
+                                    radiusX: 7.5,
+                                    radiusY: 7.5,
+                                },
+                                &b,
+                            );
+                        }
+
+                        if let Some(b) = self.solid_brush(
+                            rt,
+                            &D2D1_COLOR_F {
+                                r: 0.85,
+                                g: 0.85,
+                                b: 0.88,
+                                a: 0.95,
+                            },
+                        ) {
+                            rt.DrawEllipse(
+                                &D2D1_ELLIPSE {
+                                    point: center,
+                                    radiusX: 7.0,
+                                    radiusY: 7.0,
+                                },
+                                &b,
+                                1.3,
+                                None,
+                            );
+                            // "+" glyph
+                            if !showing_custom {
+                                rt.DrawLine(v2(cx - 3.5, cy), v2(cx + 3.5, cy), &b, 1.6, None);
+                                rt.DrawLine(v2(cx, cy - 3.5), v2(cx, cy + 3.5), &b, 1.6, None);
+                            }
+                        }
+                    }
                     FluentAction::Color(c) => {
                         let dot_center = v2(
                             (item.rect.left + item.rect.right) / 2.0,
@@ -363,7 +434,7 @@ impl D2DRenderer {
                         }
 
                         if is_hover && !tip.is_empty() {
-                            tooltip_text = Some((tip, item.rect));
+                            tooltip_text = Some((tip.to_string(), item.rect));
                         }
                     }
                 }
@@ -379,7 +450,7 @@ impl D2DRenderer {
             }
 
             // 4.5. Render Dynamic Context Sub-Bar (if active)
-            let mut subbar_tooltip: Option<(&'static str, D2D_RECT_F)> = None;
+            let mut subbar_tooltip: Option<(String, D2D_RECT_F)> = None;
             if let Some(sb_rect) = toolbar.subbar_rect {
                 // Drop shadow
                 let sb_shadow = D2D1_ROUNDED_RECT {
@@ -551,7 +622,7 @@ impl D2DRenderer {
                     };
 
                     if is_hover && !tip.is_empty() {
-                        subbar_tooltip = Some((tip, s_item.rect));
+                        subbar_tooltip = Some((tip.to_string(), s_item.rect));
                     }
 
                     if !label.is_empty()

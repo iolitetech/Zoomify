@@ -60,11 +60,14 @@ pub enum ColorPreset {
     Cyan,
     White,
     Black,
+    /// Arbitrary sRGB chosen from the in-overlay picker.
+    Custom(u8, u8, u8),
 }
 
 impl ColorPreset {
-    pub fn to_d2d_color(self, alpha: f32) -> D2D1_COLOR_F {
-        let (r, g, b) = match self {
+    /// Straight sRGB components in 0..=1.
+    pub fn rgb_f32(self) -> (f32, f32, f32) {
+        match self {
             Self::Red => (0.95, 0.15, 0.15),
             Self::Green => (0.15, 0.85, 0.25),
             Self::Blue => (0.15, 0.55, 0.98),
@@ -74,23 +77,119 @@ impl ColorPreset {
             Self::Cyan => (0.05, 0.88, 0.95),
             Self::White => (0.98, 0.98, 0.98),
             Self::Black => (0.10, 0.10, 0.12),
-        };
+            Self::Custom(r, g, b) => {
+                (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+            }
+        }
+    }
+
+    pub fn to_d2d_color(self, alpha: f32) -> D2D1_COLOR_F {
+        let (r, g, b) = self.rgb_f32();
         D2D1_COLOR_F { r, g, b, a: alpha }
     }
 
-    pub fn name(&self) -> &'static str {
+    /// 8-bit sRGB triple, the form the picker and config round-trip through.
+    pub fn rgb_u8(self) -> (u8, u8, u8) {
+        let (r, g, b) = self.rgb_f32();
+        (
+            (r * 255.0).round() as u8,
+            (g * 255.0).round() as u8,
+            (b * 255.0).round() as u8,
+        )
+    }
+
+    pub fn name(&self) -> String {
         match self {
-            Self::Red => "Red",
-            Self::Green => "Green",
-            Self::Blue => "Blue",
-            Self::Yellow => "Yellow",
-            Self::Orange => "Orange",
-            Self::Pink => "Pink",
-            Self::Cyan => "Cyan",
-            Self::White => "White",
-            Self::Black => "Black",
+            Self::Red => "Red".to_string(),
+            Self::Green => "Green".to_string(),
+            Self::Blue => "Blue".to_string(),
+            Self::Yellow => "Yellow".to_string(),
+            Self::Orange => "Orange".to_string(),
+            Self::Pink => "Pink".to_string(),
+            Self::Cyan => "Cyan".to_string(),
+            Self::White => "White".to_string(),
+            Self::Black => "Black".to_string(),
+            Self::Custom(r, g, b) => format!("#{:02X}{:02X}{:02X}", r, g, b),
         }
     }
+
+    /// Parse the config form: a preset name, or `#RRGGBB` / `RRGGBB`.
+    pub fn from_config_str(s: &str) -> Option<Self> {
+        let t = s.trim();
+        match t.to_ascii_lowercase().as_str() {
+            "red" => return Some(Self::Red),
+            "green" => return Some(Self::Green),
+            "blue" => return Some(Self::Blue),
+            "yellow" => return Some(Self::Yellow),
+            "orange" => return Some(Self::Orange),
+            "pink" => return Some(Self::Pink),
+            "cyan" => return Some(Self::Cyan),
+            "white" => return Some(Self::White),
+            "black" => return Some(Self::Black),
+            _ => {}
+        }
+        let hex = t.strip_prefix('#').unwrap_or(t);
+        if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+            let v = u32::from_str_radix(hex, 16).ok()?;
+            return Some(Self::Custom(
+                ((v >> 16) & 0xFF) as u8,
+                ((v >> 8) & 0xFF) as u8,
+                (v & 0xFF) as u8,
+            ));
+        }
+        None
+    }
+}
+
+/// Convert HSV (h in degrees 0..360, s/v in 0..=1) to 8-bit sRGB.
+/// The picker works in HSV because that is what the hue/sat/value bars expose.
+pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let h = h.rem_euclid(360.0);
+    let s = s.clamp(0.0, 1.0);
+    let v = v.clamp(0.0, 1.0);
+
+    let c = v * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = v - c;
+
+    let (r1, g1, b1) = match h as u32 / 60 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+
+    (
+        ((r1 + m) * 255.0).round() as u8,
+        ((g1 + m) * 255.0).round() as u8,
+        ((b1 + m) * 255.0).round() as u8,
+    )
+}
+
+/// Inverse of `hsv_to_rgb`, used to seed the picker from the current color.
+pub fn rgb_to_hsv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+    let rf = r as f32 / 255.0;
+    let gf = g as f32 / 255.0;
+    let bf = b as f32 / 255.0;
+
+    let max = rf.max(gf).max(bf);
+    let min = rf.min(gf).min(bf);
+    let d = max - min;
+
+    let h = if d <= f32::EPSILON {
+        0.0
+    } else if max == rf {
+        60.0 * (((gf - bf) / d) % 6.0)
+    } else if max == gf {
+        60.0 * (((bf - rf) / d) + 2.0)
+    } else {
+        60.0 * (((rf - gf) / d) + 4.0)
+    };
+
+    let s = if max <= f32::EPSILON { 0.0 } else { d / max };
+    (h.rem_euclid(360.0), s, max)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,6 +511,100 @@ impl TextEditorState {
             self.cursor = next;
         }
     }
+
+    pub fn insert_newline(&mut self) {
+        self.insert_char('\n');
+    }
+
+    /// Byte range of the line containing `at`, excluding the terminator.
+    fn line_bounds(&self, at: usize) -> (usize, usize) {
+        let at = at.min(self.text.len());
+        let start = self.text[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let end = self.text[at..]
+            .find('\n')
+            .map(|i| at + i)
+            .unwrap_or(self.text.len());
+        (start, end)
+    }
+
+    /// Byte index `col` characters into the line starting at `start`, clamped to
+    /// `end`. Columns are counted in characters so multi-byte text lands right.
+    fn byte_at_col(&self, start: usize, end: usize, col: usize) -> usize {
+        let mut idx = start;
+        let mut seen = 0;
+        for ch in self.text[start..end].chars() {
+            if seen == col {
+                return idx;
+            }
+            idx += ch.len_utf8();
+            seen += 1;
+        }
+        end
+    }
+
+    /// Character offset of the caret within its line.
+    fn current_col(&self) -> usize {
+        let (start, _) = self.line_bounds(self.cursor);
+        self.text[start..self.cursor].chars().count()
+    }
+
+    pub fn move_up(&mut self) {
+        let (start, _) = self.line_bounds(self.cursor);
+        if start == 0 {
+            self.cursor = 0;
+            return;
+        }
+        let col = self.current_col();
+        let prev_nl = start - 1; // the newline that ended the previous line
+        let (prev_start, _) = self.line_bounds(prev_nl);
+        self.cursor = self.byte_at_col(prev_start, prev_nl, col);
+    }
+
+    pub fn move_down(&mut self) {
+        let (_, end) = self.line_bounds(self.cursor);
+        if end >= self.text.len() {
+            self.cursor = self.text.len();
+            return;
+        }
+        let col = self.current_col();
+        let next_start = end + 1; // skip the newline
+        let (_, next_end) = self.line_bounds(next_start);
+        self.cursor = self.byte_at_col(next_start, next_end, col);
+    }
+
+    pub fn move_line_start(&mut self) {
+        let (start, _) = self.line_bounds(self.cursor);
+        self.cursor = start;
+    }
+
+    pub fn move_line_end(&mut self) {
+        let (_, end) = self.line_bounds(self.cursor);
+        self.cursor = end;
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.text.split('\n').count().max(1)
+    }
+}
+
+/// Rough extent of a block of annotation text, in DIPs, with no padding.
+///
+/// Width tracks the longest line rather than the total character count, so a
+/// paragraph no longer produces an ever-widening single-line box. Callers add
+/// their own padding; the renderer prefers exact DirectWrite metrics and only
+/// falls back to this.
+pub fn measure_text_block(text: &str, font_size: f32) -> (f32, f32) {
+    let mut longest = 0usize;
+    let mut lines = 0usize;
+    for line in text.split('\n') {
+        longest = longest.max(line.chars().count());
+        lines += 1;
+    }
+    let lines = lines.max(1);
+    (
+        longest as f32 * font_size * 0.6,
+        lines as f32 * font_size * 1.25,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -614,6 +807,17 @@ impl ZoomState {
         self.target_view_y = self.view_y;
     }
 
+    pub fn center_on_canvas_point(&mut self, canvas_pt: Point2D, screen_w: f32, screen_h: f32) {
+        let z = self.level.max(1.0);
+        let view_w = screen_w / z;
+        let view_h = screen_h / z;
+        self.target_view_x = canvas_pt.x - (view_w / 2.0);
+        self.target_view_y = canvas_pt.y - (view_h / 2.0);
+        self.clamp_viewport(screen_w, screen_h);
+        self.view_x = self.target_view_x;
+        self.view_y = self.target_view_y;
+    }
+
     pub fn tick_smooth_pan(&mut self, lerp: f32, screen_w: f32, screen_h: f32) -> bool {
         self.clamp_viewport(screen_w, screen_h);
         let dx = self.target_view_x - self.view_x;
@@ -632,6 +836,293 @@ impl ZoomState {
             self.level = self.target_level;
         }
         moving
+    }
+}
+
+/// Which slider of the colour picker the pointer is currently dragging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerBar {
+    Hue,
+    Saturation,
+    Value,
+}
+
+/// In-overlay HSV colour picker, opened from the toolbar's `+` swatch.
+#[derive(Debug, Clone)]
+pub struct ColorPickerState {
+    pub open: bool,
+    pub hue: f32,
+    pub sat: f32,
+    pub val: f32,
+    pub dragging: Option<PickerBar>,
+    /// Most-recently-used custom colours, newest first; persisted to config.
+    pub recent: Vec<ColorPreset>,
+    pub panel: D2D_RECT_F,
+    pub hue_bar: D2D_RECT_F,
+    pub sat_bar: D2D_RECT_F,
+    pub val_bar: D2D_RECT_F,
+    pub preview: D2D_RECT_F,
+    pub recent_swatches: Vec<(ColorPreset, D2D_RECT_F)>,
+}
+
+pub const PICKER_MAX_RECENT: usize = 8;
+
+impl Default for ColorPickerState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            hue: 0.0,
+            sat: 0.85,
+            val: 0.95,
+            dragging: None,
+            recent: Vec::new(),
+            panel: D2D_RECT_F::default(),
+            hue_bar: D2D_RECT_F::default(),
+            sat_bar: D2D_RECT_F::default(),
+            val_bar: D2D_RECT_F::default(),
+            preview: D2D_RECT_F::default(),
+            recent_swatches: Vec::new(),
+        }
+    }
+}
+
+impl ColorPickerState {
+    /// The colour the sliders currently describe.
+    pub fn current(&self) -> ColorPreset {
+        let (r, g, b) = hsv_to_rgb(self.hue, self.sat, self.val);
+        ColorPreset::Custom(r, g, b)
+    }
+
+    /// Seed the sliders from an existing colour so opening the picker starts
+    /// from whatever is already selected.
+    pub fn seed_from(&mut self, color: ColorPreset) {
+        let (r, g, b) = color.rgb_u8();
+        let (h, s, v) = rgb_to_hsv(r, g, b);
+        self.hue = h;
+        // A greyscale seed has no meaningful hue/saturation; keep the existing
+        // hue so the bars stay usable instead of collapsing to red.
+        if s > 0.01 {
+            self.sat = s;
+        }
+        self.val = v;
+    }
+
+    pub fn push_recent(&mut self, color: ColorPreset) {
+        self.recent.retain(|c| *c != color);
+        self.recent.insert(0, color);
+        self.recent.truncate(PICKER_MAX_RECENT);
+    }
+
+    /// Lay the panel out under `anchor` (the toolbar's `+` swatch), keeping it
+    /// on screen.
+    pub fn update_layout(&mut self, anchor: D2D_RECT_F, screen_w: f32, below_y: f32) {
+        const W: f32 = 264.0;
+        const H: f32 = 150.0;
+        const PAD: f32 = 12.0;
+        const BAR_H: f32 = 16.0;
+        const BAR_GAP: f32 = 10.0;
+
+        let anchor_cx = (anchor.left + anchor.right) / 2.0;
+        let left = (anchor_cx - W / 2.0).clamp(6.0, (screen_w - W - 6.0).max(6.0));
+        let top = below_y + 6.0;
+
+        self.panel = D2D_RECT_F {
+            left,
+            top,
+            right: left + W,
+            bottom: top + H,
+        };
+
+        let bar_left = left + PAD;
+        let bar_right = left + W - PAD - 40.0; // leave room for the preview chip
+        let mut y = top + PAD;
+        let bar = |y: f32| D2D_RECT_F {
+            left: bar_left,
+            top: y,
+            right: bar_right,
+            bottom: y + BAR_H,
+        };
+
+        self.hue_bar = bar(y);
+        y += BAR_H + BAR_GAP;
+        self.sat_bar = bar(y);
+        y += BAR_H + BAR_GAP;
+        self.val_bar = bar(y);
+
+        self.preview = D2D_RECT_F {
+            left: bar_right + 10.0,
+            top: top + PAD,
+            right: left + W - PAD,
+            bottom: top + PAD + BAR_H * 3.0 + BAR_GAP * 2.0,
+        };
+
+        // Recent swatch strip along the bottom.
+        self.recent_swatches.clear();
+        let sw = 22.0;
+        let gap = 6.0;
+        let sy = self.val_bar.bottom + 14.0;
+        for (i, c) in self.recent.iter().enumerate() {
+            let sx = bar_left + i as f32 * (sw + gap);
+            if sx + sw > left + W - PAD {
+                break;
+            }
+            self.recent_swatches.push((
+                *c,
+                D2D_RECT_F {
+                    left: sx,
+                    top: sy,
+                    right: sx + sw,
+                    bottom: sy + sw,
+                },
+            ));
+        }
+    }
+
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        self.open
+            && x >= self.panel.left
+            && x <= self.panel.right
+            && y >= self.panel.top
+            && y <= self.panel.bottom
+    }
+
+    /// Which bar (if any) a point falls on, with a few px of vertical slack so
+    /// the thin sliders stay easy to grab.
+    pub fn bar_at(&self, x: f32, y: f32) -> Option<PickerBar> {
+        let hit = |r: &D2D_RECT_F| {
+            x >= r.left - 4.0 && x <= r.right + 4.0 && y >= r.top - 5.0 && y <= r.bottom + 5.0
+        };
+        if hit(&self.hue_bar) {
+            Some(PickerBar::Hue)
+        } else if hit(&self.sat_bar) {
+            Some(PickerBar::Saturation)
+        } else if hit(&self.val_bar) {
+            Some(PickerBar::Value)
+        } else {
+            None
+        }
+    }
+
+    /// Apply a pointer x-position to `bar`, as a 0..1 fraction of its width.
+    pub fn set_from_x(&mut self, bar: PickerBar, x: f32) {
+        let r = match bar {
+            PickerBar::Hue => self.hue_bar,
+            PickerBar::Saturation => self.sat_bar,
+            PickerBar::Value => self.val_bar,
+        };
+        let w = (r.right - r.left).max(1.0);
+        let t = ((x - r.left) / w).clamp(0.0, 1.0);
+        match bar {
+            PickerBar::Hue => self.hue = t * 360.0,
+            PickerBar::Saturation => self.sat = t,
+            PickerBar::Value => self.val = t,
+        }
+    }
+
+    pub fn recent_at(&self, x: f32, y: f32) -> Option<ColorPreset> {
+        self.recent_swatches.iter().find_map(|(c, r)| {
+            (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom).then_some(*c)
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MinimapState {
+    pub is_dragging: bool,
+    pub is_hovered: bool,
+    pub width: f32,
+    pub margin: f32,
+}
+
+impl Default for MinimapState {
+    fn default() -> Self {
+        Self {
+            is_dragging: false,
+            is_hovered: false,
+            width: 190.0,
+            margin: 20.0,
+        }
+    }
+}
+
+impl MinimapState {
+    /// Returns the outer card bounds in screen space: (left, top, right, bottom).
+    /// Height is dynamically calculated from screen aspect ratio.
+    pub fn get_card_bounds(&self, screen_w: f32, screen_h: f32) -> (f32, f32, f32, f32) {
+        let aspect = if screen_w > 0.0 {
+            (screen_h / screen_w).clamp(0.25, 1.5)
+        } else {
+            9.0 / 16.0
+        };
+        let card_w = self.width.clamp(120.0, 360.0);
+        let card_h = (card_w * aspect).clamp(70.0, 220.0);
+        let right = screen_w - self.margin;
+        let left = right - card_w;
+        let bottom = screen_h - self.margin;
+        let top = bottom - card_h;
+        (left, top, right, bottom)
+    }
+
+    /// Returns the inner preview rectangle (inset by 4px).
+    pub fn get_inner_preview_rect(&self, screen_w: f32, screen_h: f32) -> (f32, f32, f32, f32) {
+        let (l, t, r, b) = self.get_card_bounds(screen_w, screen_h);
+        (l + 4.0, t + 4.0, r - 4.0, b - 4.0)
+    }
+
+    /// Returns the viewport indicator rect on the minimap: (left, top, right, bottom).
+    pub fn get_viewport_rect(
+        &self,
+        screen_w: f32,
+        screen_h: f32,
+        zoom: &ZoomState,
+    ) -> (f32, f32, f32, f32) {
+        let (il, it, ir, ib) = self.get_inner_preview_rect(screen_w, screen_h);
+        let iw = (ir - il).max(1.0);
+        let ih = (ib - it).max(1.0);
+
+        let z = zoom.level.max(1.0);
+        let norm_x = if screen_w > 0.0 {
+            (zoom.view_x / screen_w).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let norm_y = if screen_h > 0.0 {
+            (zoom.view_y / screen_h).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let norm_w = (1.0 / z).clamp(0.05, 1.0);
+        let norm_h = (1.0 / z).clamp(0.05, 1.0);
+
+        let vp_l = il + norm_x * iw;
+        let vp_t = it + norm_y * ih;
+        let vp_r = (vp_l + norm_w * iw).min(ir);
+        let vp_b = (vp_t + norm_h * ih).min(ib);
+        (vp_l, vp_t, vp_r, vp_b)
+    }
+
+    /// Converts a point inside the minimap to a target canvas point.
+    pub fn minimap_pt_to_canvas_pt(
+        &self,
+        screen_w: f32,
+        screen_h: f32,
+        mouse_x: f32,
+        mouse_y: f32,
+    ) -> Point2D {
+        let (il, it, ir, ib) = self.get_inner_preview_rect(screen_w, screen_h);
+        let iw = (ir - il).max(1.0);
+        let ih = (ib - it).max(1.0);
+
+        let norm_x = ((mouse_x - il) / iw).clamp(0.0, 1.0);
+        let norm_y = ((mouse_y - it) / ih).clamp(0.0, 1.0);
+
+        Point2D::new(norm_x * screen_w, norm_y * screen_h)
+    }
+
+    /// Checks if a screen-space point is inside the minimap card bounds.
+    pub fn hit_test(&self, screen_w: f32, screen_h: f32, x: f32, y: f32) -> bool {
+        let (l, t, r, b) = self.get_card_bounds(screen_w, screen_h);
+        x >= l && x <= r && y >= t && y <= b
     }
 }
 
@@ -884,6 +1375,28 @@ impl TimerWidgetState {
     }
 }
 
+/// Shift a countdown by `delta_secs`, keeping the total duration and the time
+/// remaining consistent. Returns `(new_total_secs, new_remaining_secs)`.
+///
+/// The total is the denominator of the progress ring and the value persisted as
+/// the user's default duration, so it must stay a *duration*; overwriting it
+/// with whatever is left on the clock corrupts both.
+pub fn adjust_timer_values(total_secs: u32, remaining: f64, delta_secs: f64) -> (u32, f64) {
+    const MIN_TOTAL: f64 = 60.0;
+    const MAX_TOTAL: f64 = 24.0 * 3600.0;
+
+    let old_total = total_secs as f64;
+    let new_total = (old_total + delta_secs).clamp(MIN_TOTAL, MAX_TOTAL);
+    let applied = new_total - old_total;
+    if applied == 0.0 {
+        return (total_secs, remaining);
+    }
+
+    // Never let the clock read more than the total it counts down from.
+    let new_remaining = (remaining + applied).clamp(0.0, new_total);
+    (new_total.round() as u32, new_remaining)
+}
+
 #[derive(Debug, Clone)]
 pub struct ToastNotification {
     pub icon: &'static str,
@@ -928,6 +1441,8 @@ pub enum FluentAction {
     CycleDisplay,
     Tool(DrawTool),
     Color(ColorPreset),
+    /// The `+` swatch: opens the in-overlay HSV picker.
+    OpenColorPicker,
     Undo,
     Clear,
     Copy,
@@ -1420,7 +1935,9 @@ pub fn compute_toolbar_layout(
     for c in colors {
         item_specs.push((FluentAction::Color(c), 22.0));
     }
-    let colors_end_idx = tools_end_idx + 8;
+    // Trailing "+" swatch opens the custom colour picker.
+    item_specs.push((FluentAction::OpenColorPicker, 22.0));
+    let colors_end_idx = tools_end_idx + 9;
 
     // Actions (6 items)
     item_specs.push((FluentAction::Undo, 30.0));
@@ -1444,6 +1961,28 @@ pub fn compute_toolbar_layout(
                 total_w += spacing;
             }
         }
+    }
+
+    // The full bar is ~990 DIPs. On a narrow or heavily scaled display that
+    // overruns the screen, and only `left` was ever clamped - so the right-hand
+    // buttons (Copy, Save, Close) simply could not be reached. Shrink the whole
+    // bar to fit instead, keeping every control on screen and hit-testable.
+    let available = screen_w - 12.0;
+    let fit = if total_w > available && available > 0.0 {
+        (available / total_w).max(0.35)
+    } else {
+        1.0
+    };
+
+    let height = height * fit;
+    let pad_x = pad_x * fit;
+    let btn_pad_y = btn_pad_y * fit;
+    let grip_w = grip_w * fit;
+    let spacing = spacing * fit;
+    let divider_spacing = divider_spacing * fit;
+    let total_w = total_w * fit;
+    for spec in item_specs.iter_mut() {
+        spec.1 *= fit;
     }
 
     let left = if let Some(pos) = custom_pos {
@@ -1505,6 +2044,220 @@ pub fn compute_toolbar_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_adjust_timer_keeps_total_and_remaining_consistent() {
+        // Adding a minute extends both the total and the clock.
+        let (total, rem) = adjust_timer_values(600, 600.0, 60.0);
+        assert_eq!(total, 660);
+        assert_eq!(rem, 660.0);
+
+        // Mid-countdown: total grows, remaining grows by the same amount.
+        let (total, rem) = adjust_timer_values(600, 120.0, 60.0);
+        assert_eq!(total, 660);
+        assert_eq!(rem, 180.0);
+
+        // Regression: the total must never be replaced by the remaining time.
+        // A 10-minute timer with 2 minutes left is still a 10-minute timer.
+        let (total, _) = adjust_timer_values(600, 120.0, 0.0);
+        assert_eq!(total, 600);
+    }
+
+    #[test]
+    fn test_adjust_timer_clamps() {
+        // Total floors at one minute, so it can never reach zero and make the
+        // progress ring divide by nothing.
+        let (total, rem) = adjust_timer_values(60, 60.0, -60.0);
+        assert_eq!(total, 60);
+        assert_eq!(rem, 60.0);
+
+        // Remaining is never greater than the total.
+        let (total, rem) = adjust_timer_values(120, 120.0, -60.0);
+        assert_eq!(total, 60);
+        assert!(rem <= total as f64, "remaining {} exceeded total {}", rem, total);
+
+        // Subtracting past the end parks at zero rather than inventing overtime.
+        let (_, rem) = adjust_timer_values(600, 30.0, -60.0);
+        assert_eq!(rem, 0.0);
+
+        // Total is capped at 24h.
+        let (total, _) = adjust_timer_values(86400, 10.0, 60.0);
+        assert_eq!(total, 86400);
+    }
+
+    #[test]
+    fn test_adjust_timer_recovers_from_overtime() {
+        // Clock has run 30s past zero; adding a minute puts real time back on it.
+        let (total, rem) = adjust_timer_values(600, -30.0, 60.0);
+        assert_eq!(total, 660);
+        assert_eq!(rem, 30.0);
+        assert!(rem > 0.0, "adding time must lift the clock out of overtime");
+    }
+
+    #[test]
+    fn test_toolbar_fits_within_narrow_screens() {
+        // The full bar is ~990 DIPs wide. On anything narrower it must shrink to
+        // fit: previously only `left` was clamped, so the right-hand actions
+        // (Copy, Save, Close) fell off the screen and could not be clicked.
+        for screen_w in [1920.0_f32, 1366.0, 1024.0, 900.0, 800.0] {
+            let (bar, items, grip, _) =
+                compute_toolbar_layout(screen_w, 768.0, false, None, 1);
+
+            assert!(
+                bar.left >= 0.0 && bar.right <= screen_w,
+                "bar {}..{} escapes a {}px screen",
+                bar.left,
+                bar.right,
+                screen_w
+            );
+            assert!(grip.right <= screen_w, "grip off-screen at {}px", screen_w);
+            assert!(!items.is_empty());
+
+            for item in &items {
+                assert!(
+                    item.rect.left >= 0.0 && item.rect.right <= screen_w,
+                    "{:?} at {}..{} is unreachable on a {}px screen",
+                    item.action,
+                    item.rect.left,
+                    item.rect.right,
+                    screen_w
+                );
+                assert!(item.rect.right > item.rect.left, "item collapsed to zero width");
+            }
+
+            // The last action must stay hit-testable.
+            let last = items.last().expect("items");
+            let mid_x = (last.rect.left + last.rect.right) / 2.0;
+            let mid_y = (last.rect.top + last.rect.bottom) / 2.0;
+            let mut tb = FluentToolbarState {
+                monitor_count: 1,
+                ..Default::default()
+            };
+            tb.update_layout(screen_w, 768.0);
+            assert!(
+                tb.hit_test(mid_x, mid_y).is_some(),
+                "last toolbar item not hit-testable at {}px",
+                screen_w
+            );
+        }
+    }
+
+    #[test]
+    fn test_toolbar_unscaled_on_wide_screens() {
+        // A screen with room to spare must not shrink the bar.
+        let (wide, _, _, _) = compute_toolbar_layout(2560.0, 1440.0, false, None, 1);
+        let (fhd, _, _, _) = compute_toolbar_layout(1920.0, 1080.0, false, None, 1);
+        let wide_w = wide.right - wide.left;
+        let fhd_w = fhd.right - fhd.left;
+        assert!(
+            (wide_w - fhd_w).abs() < 0.5,
+            "bar width changed between roomy screens: {} vs {}",
+            wide_w,
+            fhd_w
+        );
+    }
+
+    #[test]
+    fn test_hsv_rgb_roundtrip() {
+        // Saturated primaries must survive a round trip exactly.
+        for (h, s, v, expect) in [
+            (0.0, 1.0, 1.0, (255u8, 0u8, 0u8)),
+            (120.0, 1.0, 1.0, (0, 255, 0)),
+            (240.0, 1.0, 1.0, (0, 0, 255)),
+            (60.0, 1.0, 1.0, (255, 255, 0)),
+        ] {
+            assert_eq!(hsv_to_rgb(h, s, v), expect, "hsv({}, {}, {})", h, s, v);
+            let (rh, rs, rv) = rgb_to_hsv(expect.0, expect.1, expect.2);
+            assert!((rh - h).abs() < 0.5, "hue {} != {}", rh, h);
+            assert!((rs - s).abs() < 0.01);
+            assert!((rv - v).abs() < 0.01);
+        }
+
+        // Arbitrary colours should round trip within rounding error.
+        for rgb in [(18u8, 200u8, 77u8), (250, 12, 190), (99, 99, 99), (0, 0, 0)] {
+            let (h, s, v) = rgb_to_hsv(rgb.0, rgb.1, rgb.2);
+            let back = hsv_to_rgb(h, s, v);
+            assert!(
+                (back.0 as i32 - rgb.0 as i32).abs() <= 1
+                    && (back.1 as i32 - rgb.1 as i32).abs() <= 1
+                    && (back.2 as i32 - rgb.2 as i32).abs() <= 1,
+                "{:?} -> hsv -> {:?}",
+                rgb,
+                back
+            );
+        }
+    }
+
+    #[test]
+    fn test_custom_color_config_roundtrip() {
+        let c = ColorPreset::Custom(0x1E, 0xC8, 0x4D);
+        assert_eq!(c.name(), "#1EC84D");
+        assert_eq!(ColorPreset::from_config_str("#1EC84D"), Some(c));
+        assert_eq!(ColorPreset::from_config_str("1ec84d"), Some(c));
+
+        // Preset names still parse, case-insensitively.
+        assert_eq!(ColorPreset::from_config_str("Pink"), Some(ColorPreset::Pink));
+        assert_eq!(ColorPreset::from_config_str("cyan"), Some(ColorPreset::Cyan));
+
+        // Junk is rejected rather than silently becoming a colour.
+        assert_eq!(ColorPreset::from_config_str("#12345"), None);
+        assert_eq!(ColorPreset::from_config_str("nope"), None);
+        assert_eq!(ColorPreset::from_config_str("#ZZZZZZ"), None);
+    }
+
+    #[test]
+    fn test_picker_bars_and_recents() {
+        let mut p = ColorPickerState {
+            open: true,
+            ..Default::default()
+        };
+        p.recent = vec![
+            ColorPreset::Custom(1, 2, 3),
+            ColorPreset::Custom(4, 5, 6),
+        ];
+        let anchor = D2D_RECT_F {
+            left: 900.0,
+            top: 12.0,
+            right: 922.0,
+            bottom: 44.0,
+        };
+        p.update_layout(anchor, 1920.0, 56.0);
+
+        assert!(p.panel.right <= 1920.0 && p.panel.left >= 0.0);
+        assert!(p.contains(p.panel.left + 5.0, p.panel.top + 5.0));
+        assert!(!p.contains(p.panel.left - 20.0, p.panel.top + 5.0));
+
+        // Dragging each bar to its far right saturates that channel.
+        p.set_from_x(PickerBar::Hue, p.hue_bar.right + 50.0);
+        assert!((p.hue - 360.0).abs() < 0.01);
+        p.set_from_x(PickerBar::Saturation, p.sat_bar.left - 50.0);
+        assert_eq!(p.sat, 0.0);
+        p.set_from_x(PickerBar::Value, (p.val_bar.left + p.val_bar.right) / 2.0);
+        assert!((p.val - 0.5).abs() < 0.02);
+
+        // Each bar is identified where it is drawn.
+        let mid = |r: D2D_RECT_F| ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        let (hx, hy) = mid(p.hue_bar);
+        assert_eq!(p.bar_at(hx, hy), Some(PickerBar::Hue));
+        let (sx, sy) = mid(p.sat_bar);
+        assert_eq!(p.bar_at(sx, sy), Some(PickerBar::Saturation));
+
+        // Recents are newest-first, de-duplicated, and capped.
+        let mut q = ColorPickerState::default();
+        for i in 0..(PICKER_MAX_RECENT as u8 + 4) {
+            q.push_recent(ColorPreset::Custom(i, 0, 0));
+        }
+        assert_eq!(q.recent.len(), PICKER_MAX_RECENT);
+        assert_eq!(q.recent[0], ColorPreset::Custom(PICKER_MAX_RECENT as u8 + 3, 0, 0));
+
+        q.push_recent(ColorPreset::Custom(0, 0, 0));
+        q.push_recent(ColorPreset::Custom(0, 0, 0));
+        assert_eq!(
+            q.recent.iter().filter(|c| **c == ColorPreset::Custom(0, 0, 0)).count(),
+            1,
+            "re-picking a colour must not duplicate it"
+        );
+    }
 
     #[test]
     fn test_point_distance() {
@@ -2112,5 +2865,149 @@ mod tests {
         let mid_x = (item.rect.left + item.rect.right) / 2.0;
         let mid_y = (item.rect.top + item.rect.bottom) / 2.0;
         assert_eq!(tb.hit_test(mid_x, mid_y), Some(FluentAction::ModeLoupe));
+    }
+
+    #[test]
+    fn test_minimap_bounds_and_aspect_ratio() {
+        let minimap = MinimapState::default();
+        let sw = 1920.0;
+        let sh = 1080.0;
+        let (l, t, r, b) = minimap.get_card_bounds(sw, sh);
+        assert_eq!(r, sw - minimap.margin);
+        assert_eq!(b, sh - minimap.margin);
+        let w = r - l;
+        let h = b - t;
+        assert!((w - 190.0).abs() < 0.01);
+        let expected_h = 190.0 * (1080.0 / 1920.0);
+        assert!((h - expected_h).abs() < 0.01);
+
+        assert!(minimap.hit_test(sw, sh, l + 10.0, t + 10.0));
+        assert!(!minimap.hit_test(sw, sh, 50.0, 50.0));
+    }
+
+    #[test]
+    fn test_minimap_viewport_and_click_mapping() {
+        let minimap = MinimapState::default();
+        let sw = 1920.0;
+        let sh = 1080.0;
+        let mut zoom = ZoomState {
+            level: 2.0,
+            view_x: 480.0,
+            view_y: 270.0,
+            ..Default::default()
+        };
+
+        let (vl, vt, vr, vb) = minimap.get_viewport_rect(sw, sh, &zoom);
+        let (il, it, ir, ib) = minimap.get_inner_preview_rect(sw, sh);
+        let iw = ir - il;
+        let ih = ib - it;
+
+        // At 2x zoom centered, viewport should occupy 50% width and 50% height, centered
+        let expected_vl = il + 0.25 * iw;
+        let expected_vt = it + 0.25 * ih;
+        assert!((vl - expected_vl).abs() < 0.5);
+        assert!((vt - expected_vt).abs() < 0.5);
+        assert!(((vr - vl) - 0.5 * iw).abs() < 0.5);
+        assert!(((vb - vt) - 0.5 * ih).abs() < 0.5);
+
+        // Click conversion test
+        let click_pt = minimap.minimap_pt_to_canvas_pt(sw, sh, il + 0.5 * iw, it + 0.5 * ih);
+        assert!((click_pt.x - 960.0).abs() < 1.0);
+        assert!((click_pt.y - 540.0).abs() < 1.0);
+
+        // Center on canvas point test
+        zoom.center_on_canvas_point(click_pt, sw, sh);
+        assert!((zoom.view_x - 480.0).abs() < 1.0);
+        assert!((zoom.view_y - 270.0).abs() < 1.0);
+    }
+    fn editor(text: &str, cursor: usize) -> TextEditorState {
+        let mut ed = TextEditorState::new(
+            Point2D::new(0.0, 0.0),
+            ColorPreset::Red,
+            22.0,
+            false,
+            false,
+            TextCardStyle::Badge,
+            TextFontFamily::SegoeUI,
+        );
+        ed.text = text.to_string();
+        ed.cursor = cursor;
+        ed
+    }
+
+    #[test]
+    fn test_editor_enter_inserts_newline_at_caret() {
+        let mut ed = editor("abcd", 2);
+        ed.insert_newline();
+        assert_eq!(ed.text, "ab\ncd");
+        assert_eq!(ed.cursor, 3);
+        assert_eq!(ed.line_count(), 2);
+    }
+
+    #[test]
+    fn test_editor_move_up_down_preserves_column() {
+        // Caret on line 2 col 3; up lands on line 1 col 3, down returns.
+        let mut ed = editor("hello\nworld\nhi", 9);
+        ed.move_up();
+        assert_eq!(ed.cursor, 3);
+        ed.move_down();
+        assert_eq!(ed.cursor, 9);
+    }
+
+    #[test]
+    fn test_editor_move_down_clamps_to_short_line() {
+        // Column 4 on a 2-char line clamps to that line's end, not past it.
+        let mut ed = editor("abcdef\nxy", 4);
+        ed.move_down();
+        assert_eq!(ed.cursor, 9); // end of "xy"
+    }
+
+    #[test]
+    fn test_editor_move_up_at_first_line_goes_to_start() {
+        let mut ed = editor("abc\ndef", 2);
+        ed.move_up();
+        assert_eq!(ed.cursor, 0);
+    }
+
+    #[test]
+    fn test_editor_move_down_at_last_line_goes_to_end() {
+        let mut ed = editor("abc\ndef", 5);
+        ed.move_down();
+        assert_eq!(ed.cursor, 7);
+    }
+
+    #[test]
+    fn test_editor_home_end_are_line_scoped() {
+        let mut ed = editor("abc\ndefgh\nij", 6);
+        ed.move_line_start();
+        assert_eq!(ed.cursor, 4);
+        ed.move_line_end();
+        assert_eq!(ed.cursor, 9);
+    }
+
+    #[test]
+    fn test_editor_column_counted_in_chars_not_bytes() {
+        // Line 1 is 3 chars but 5 bytes; the caret must land on a boundary.
+        let mut ed = editor("áéb\nxyz", 9);
+        ed.move_up();
+        assert!(ed.text.is_char_boundary(ed.cursor));
+        assert_eq!(ed.cursor, 5);
+    }
+
+    #[test]
+    fn test_measure_text_block_uses_longest_line_not_total_length() {
+        let one = measure_text_block("aaaaaaaaaa", 20.0);
+        let three = measure_text_block("aaaaaaaaaa\nbb\ncc", 20.0);
+        // Same longest line -> same width, even though the text is 3x longer.
+        assert!((one.0 - three.0).abs() < 0.01);
+        // Three lines -> three times the height.
+        assert!((three.1 - one.1 * 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_measure_text_block_empty_still_has_one_line() {
+        let (w, h) = measure_text_block("", 20.0);
+        assert_eq!(w, 0.0);
+        assert!(h > 0.0);
     }
 }

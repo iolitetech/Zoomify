@@ -9,8 +9,29 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{BOOL, s};
 
-static mut LIVE_ZOOM_HOOK: HHOOK = HHOOK(std::ptr::null_mut());
-static mut ENGINE_RAW_PTR: *mut LiveZoomEngine = std::ptr::null_mut();
+use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
+
+/// Zoom change per wheel notch.
+const ZOOM_STEP: f32 = 0.25;
+
+/// Installed hook handle. Only ever touched from the thread that owns the
+/// engine, but kept atomic so no `static mut` reference is ever formed.
+static LIVE_ZOOM_HOOK: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Whether a Live Zoom session is running, published for the hook to read.
+static LIVE_ZOOM_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Zoom change requested by the hook but not yet applied, in thousandths of a
+/// zoom step.
+///
+/// A low-level mouse hook runs on the thread that installed it, re-entering
+/// while that thread may already hold a `&mut` to the engine (or to the overlay
+/// that owns it). The hook therefore only *posts* an integer here; the owning
+/// thread drains it from its normal tick, where holding `&mut self` is sound.
+/// Reaching into the engine through a raw pointer, as this used to, aliased a
+/// mutable reference.
+static PENDING_ZOOM_MILLI: AtomicI32 = AtomicI32::new(0);
 
 unsafe extern "system" fn live_zoom_mouse_hook(
     code: i32,
@@ -18,16 +39,18 @@ unsafe extern "system" fn live_zoom_mouse_hook(
     lparam: LPARAM,
 ) -> LRESULT {
     unsafe {
-        if code >= 0 && wparam.0 as u32 == WM_MOUSEWHEEL {
+        if code >= 0
+            && wparam.0 as u32 == WM_MOUSEWHEEL
+            && LIVE_ZOOM_ACTIVE.load(Ordering::Acquire)
+        {
             let is_ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
-            if is_ctrl && !ENGINE_RAW_PTR.is_null() {
+            if is_ctrl {
                 let hook_struct = *(lparam.0 as *const MSLLHOOKSTRUCT);
-                let delta = ((hook_struct.mouseData >> 16) as i16 as f32) / 120.0;
-                let engine = &mut *ENGINE_RAW_PTR;
-                if engine.is_active {
-                    engine.adjust_zoom(delta * 0.25);
-                    return LRESULT(1);
-                }
+                let notches = ((hook_struct.mouseData >> 16) as i16 as f32) / 120.0;
+                let milli = (notches * ZOOM_STEP * 1000.0).round() as i32;
+                PENDING_ZOOM_MILLI.fetch_add(milli, Ordering::AcqRel);
+                // Swallow the wheel so the app underneath does not also zoom.
+                return LRESULT(1);
             }
         }
         CallNextHookEx(None, code, wparam, lparam)
@@ -169,13 +192,15 @@ impl LiveZoomEngine {
                     );
                 }
 
-                // Install low-level mouse wheel hook for Ctrl+Wheel zooming
-                ENGINE_RAW_PTR = self as *mut LiveZoomEngine;
-                if LIVE_ZOOM_HOOK.0.is_null()
+                // Install the low-level wheel hook for Ctrl+Wheel zooming. The
+                // hook only posts into PENDING_ZOOM_MILLI; it never touches self.
+                PENDING_ZOOM_MILLI.store(0, Ordering::Release);
+                LIVE_ZOOM_ACTIVE.store(true, Ordering::Release);
+                if LIVE_ZOOM_HOOK.load(Ordering::Acquire).is_null()
                     && let Ok(hook) =
                         SetWindowsHookExW(WH_MOUSE_LL, Some(live_zoom_mouse_hook), None, 0)
                 {
-                    LIVE_ZOOM_HOOK = hook;
+                    LIVE_ZOOM_HOOK.store(hook.0, Ordering::Release);
                 }
 
                 return true;
@@ -189,12 +214,15 @@ impl LiveZoomEngine {
             return;
         }
 
+        // Stop the hook acting before tearing anything down.
+        LIVE_ZOOM_ACTIVE.store(false, Ordering::Release);
+        PENDING_ZOOM_MILLI.store(0, Ordering::Release);
+
         unsafe {
-            if !LIVE_ZOOM_HOOK.0.is_null() {
-                let _ = UnhookWindowsHookEx(LIVE_ZOOM_HOOK);
-                LIVE_ZOOM_HOOK = HHOOK(std::ptr::null_mut());
+            let hook = LIVE_ZOOM_HOOK.swap(std::ptr::null_mut(), Ordering::AcqRel);
+            if !hook.is_null() {
+                let _ = UnhookWindowsHookEx(HHOOK(hook));
             }
-            ENGINE_RAW_PTR = std::ptr::null_mut();
 
             if let Some(set_fn) = self.mag_set_transform {
                 let _ = set_fn(1.0, 0, 0);
@@ -257,15 +285,36 @@ impl LiveZoomEngine {
         }
     }
 
-    pub fn tick_smooth_pan(&mut self, _lerp_factor: f32) {
+    /// Apply any zoom the wheel hook posted since the last tick. Runs on the
+    /// owning thread, so mutating the engine here is sound.
+    fn drain_pending_zoom(&mut self) {
+        let milli = PENDING_ZOOM_MILLI.swap(0, Ordering::AcqRel);
+        if milli != 0 {
+            self.adjust_zoom(milli as f32 / 1000.0);
+        }
+    }
+
+    pub fn tick_smooth_pan(&mut self, lerp_factor: f32) {
         if !self.is_active {
             return;
         }
 
+        self.drain_pending_zoom();
         self.update_target_from_cursor();
-        let dx = (self.target_x_offset - self.current_x_offset).abs();
-        let dy = (self.target_y_offset - self.current_y_offset).abs();
-        if dx > 0.5 || dy > 0.5 {
+
+        let dx = self.target_x_offset - self.current_x_offset;
+        let dy = self.target_y_offset - self.current_y_offset;
+
+        // Ease toward the cursor instead of snapping to it. This previously
+        // assigned target straight to current and ignored `lerp_factor`
+        // entirely, which is what made the magnified view judder.
+        if dx.abs() > 0.5 || dy.abs() > 0.5 {
+            let f = lerp_factor.clamp(0.05, 1.0);
+            self.current_x_offset += dx * f;
+            self.current_y_offset += dy * f;
+            self.apply_transform();
+        } else if dx != 0.0 || dy != 0.0 {
+            // Settle exactly so we stop issuing transforms once we arrive.
             self.current_x_offset = self.target_x_offset;
             self.current_y_offset = self.target_y_offset;
             self.apply_transform();

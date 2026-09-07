@@ -1,13 +1,15 @@
 mod shapes;
 mod ui_hud;
 mod ui_loupe;
+mod ui_minimap;
+mod ui_picker;
 mod ui_timer;
 mod ui_toolbar;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
@@ -18,27 +20,30 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_STROKE_STYLE_PROPERTIES,
     D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory,
-    ID2D1GeometryGroup, ID2D1HwndRenderTarget, ID2D1StrokeStyle,
+    ID2D1GeometryGroup, ID2D1HwndRenderTarget, ID2D1RenderTarget, ID2D1SolidColorBrush,
+    ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_LEADING, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory,
+    IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
     DeleteDC, DeleteObject, GetDC, RGBQUAD, ReleaseDC, SelectObject,
 };
-use windows::core::{Result, w};
+use windows::core::{Interface, Result, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::capture::ScreenCapture;
 use crate::types::{
-    AppMode, CanvasBackground, ColorPreset, DrawTool, FluentToolbarState, LaserRipple,
-    LaserTrailPoint, LoupeState, Point2D, Shape, SpotlightState, StrokePattern, TextEditorState,
-    TextFontFamily, TimerWidgetState, ToastNotification, ZoomState,
+    AppMode, CanvasBackground, ColorPickerState, ColorPreset, DrawTool, FluentToolbarState,
+    LaserRipple,
+    LaserTrailPoint, LoupeState, MinimapState, Point2D, Shape, SpotlightState, StrokePattern,
+    TextEditorState, TextFontFamily, TimerWidgetState, ToastNotification, ZoomState,
 };
 
 #[inline]
@@ -68,6 +73,21 @@ pub struct D2DRenderer {
     pub text_format_toast_sub: IDWriteTextFormat,
     pub text_formats_cache: RefCell<HashMap<u32, IDWriteTextFormat>>,
     pub spotlight_geometry_cache: RefCell<Option<(u32, ID2D1GeometryGroup)>>,
+    /// Solid brushes keyed by packed RGBA, alongside the render target they
+    /// belong to. Brushes are device resources, so the cache is dropped whenever
+    /// the target changes (the offscreen target used for export is a different
+    /// one) or the device is lost.
+    solid_brush_cache: RefCell<(usize, HashMap<u32, ID2D1SolidColorBrush>)>,
+    /// Window + size the HWND render target was built for, so it can be rebuilt
+    /// after the GPU device is lost (driver reset/TDR, RDP transition, mode change).
+    target_hwnd: HWND,
+    target_width: u32,
+    target_height: u32,
+    /// Display density the target is configured for (96 = 100%).
+    dpi: f32,
+    /// Set when Direct2D reports D2DERR_RECREATE_TARGET. Rendering is a `&self`
+    /// path, so the flag is drained afterwards by `recover_if_device_lost`.
+    device_lost: Cell<bool>,
 }
 
 impl D2DRenderer {
@@ -281,8 +301,46 @@ impl D2DRenderer {
                 text_format_toast_sub,
                 text_formats_cache: RefCell::new(HashMap::new()),
                 spotlight_geometry_cache: RefCell::new(None),
+                solid_brush_cache: RefCell::new((0, HashMap::new())),
+                target_hwnd: HWND::default(),
+                target_width: 0,
+                target_height: 0,
+                dpi: 96.0,
+                device_lost: Cell::new(false),
             })
         }
+    }
+
+    /// A solid brush for `color`, reused across shapes and frames.
+    ///
+    /// Every shape used to allocate its brushes from scratch on every frame,
+    /// which is a COM allocation per shape per color at 60 Hz.
+    pub(crate) fn solid_brush(
+        &self,
+        rt: &ID2D1RenderTarget,
+        color: &D2D1_COLOR_F,
+    ) -> Option<ID2D1SolidColorBrush> {
+        #[inline]
+        fn chan(v: f32) -> u32 {
+            (v.clamp(0.0, 1.0) * 255.0).round() as u32
+        }
+        let key =
+            (chan(color.r) << 24) | (chan(color.g) << 16) | (chan(color.b) << 8) | chan(color.a);
+
+        let rt_id = rt.as_raw() as usize;
+        let mut cache = self.solid_brush_cache.borrow_mut();
+        if cache.0 != rt_id {
+            // Different render target: its brushes are not usable here.
+            cache.0 = rt_id;
+            cache.1.clear();
+        }
+        if let Some(b) = cache.1.get(&key) {
+            return Some(b.clone());
+        }
+
+        let brush = unsafe { rt.CreateSolidColorBrush(color, None) }.ok()?;
+        cache.1.insert(key, brush.clone());
+        Some(brush)
     }
 
     pub fn get_stroke_style(&self, pattern: StrokePattern) -> &ID2D1StrokeStyle {
@@ -346,6 +404,43 @@ impl D2DRenderer {
         }
     }
 
+    /// Exact layout box for a (possibly multi-line) run of annotation text, in
+    /// DIPs. Falls back to the character-count estimate if DirectWrite refuses
+    /// to build a layout, so callers always get usable numbers.
+    pub fn measure_text_block(
+        &self,
+        text: &str,
+        font_size: f32,
+        is_bold: bool,
+        is_italic: bool,
+        font_family: TextFontFamily,
+    ) -> (f32, f32) {
+        let fallback = || crate::types::measure_text_block(text, font_size);
+        let Ok(format) = self.get_custom_text_format(font_size, is_bold, is_italic, font_family)
+        else {
+            return fallback();
+        };
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            // No wrapping: a line ends only where the author put a newline.
+            let Ok(layout) =
+                self.dwrite_factory
+                    .CreateTextLayout(&utf16, &format, f32::MAX / 4.0, f32::MAX / 4.0)
+            else {
+                return fallback();
+            };
+            let mut metrics = DWRITE_TEXT_METRICS::default();
+            if layout.GetMetrics(&mut metrics).is_err() {
+                return fallback();
+            }
+            // A trailing empty line has zero measured width but still needs a
+            // row, and an all-empty buffer still needs a caret-tall box.
+            let lines = metrics.lineCount.max(1) as f32;
+            let h = metrics.height.max(lines * font_size * 1.25);
+            (metrics.width.max(font_size * 0.6), h)
+        }
+    }
+
     pub fn init_hwnd(&mut self, hwnd: HWND, width: u32, height: u32) -> Result<()> {
         unsafe {
             let rt_props = D2D1_RENDER_TARGET_PROPERTIES {
@@ -372,8 +467,69 @@ impl D2DRenderer {
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
 
+            rt.SetDpi(self.dpi, self.dpi);
+
             self.render_target = Some(rt);
+            self.target_hwnd = hwnd;
+            self.target_width = width;
+            self.target_height = height;
+            self.device_lost.set(false);
             Ok(())
+        }
+    }
+
+    /// Tell Direct2D the display density so drawing coordinates are treated as
+    /// DIPs and scaled to physical pixels for us - fonts, strokes and geometry
+    /// all included. Without this the whole UI renders at 1 DIP = 1 pixel and
+    /// comes out at 80% size on a 125% display.
+    pub fn set_dpi(&mut self, dpi: u32) {
+        let dpi = (dpi.max(48) as f32).min(600.0);
+        if (dpi - self.dpi).abs() < 0.5 {
+            return;
+        }
+        self.dpi = dpi;
+        if let Some(rt) = &self.render_target {
+            unsafe { rt.SetDpi(dpi, dpi) };
+        }
+    }
+
+
+
+    /// Rebuild the render target after a lost device. Returns true once a fresh
+    /// target is live, meaning every device-dependent resource the caller owns
+    /// (bitmaps, in particular) must be recreated from it.
+    ///
+    /// If recreation fails the lost flag stays set and the next frame retries;
+    /// `render_frame` no-ops while there is no target, so this cannot spin.
+    pub fn recover_if_device_lost(&mut self) -> bool {
+        if !self.device_lost.get() {
+            return false;
+        }
+
+        // Drop the dead target before asking the factory for a new one.
+        self.render_target = None;
+        self.spotlight_geometry_cache.borrow_mut().take();
+        {
+            let mut cache = self.solid_brush_cache.borrow_mut();
+            cache.0 = 0;
+            cache.1.clear();
+        }
+
+        if self.target_hwnd.is_invalid() || self.target_width == 0 || self.target_height == 0 {
+            self.device_lost.set(false);
+            return false;
+        }
+
+        let (hwnd, w, h) = (self.target_hwnd, self.target_width, self.target_height);
+        self.init_hwnd(hwnd, w, h).is_ok()
+    }
+
+    /// Flag a lost device if this is the HRESULT Direct2D uses to report one.
+    fn note_draw_result(&self, result: windows::core::Result<()>) {
+        if let Err(e) = result
+            && e.code() == D2DERR_RECREATE_TARGET
+        {
+            self.device_lost.set(true);
         }
     }
 
@@ -381,9 +537,16 @@ impl D2DRenderer {
         if let Some(rt) = &self.render_target {
             unsafe {
                 let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U { width, height };
-                let _ = rt.Resize(&size);
+                if let Err(e) = rt.Resize(&size) {
+                    if e.code() == D2DERR_RECREATE_TARGET {
+                        self.device_lost.set(true);
+                    }
+                    return;
+                }
             }
         }
+        self.target_width = width;
+        self.target_height = height;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -414,6 +577,9 @@ impl D2DRenderer {
         laser_pos: Option<Point2D>,
         eraser_pos: Option<Point2D>,
         snap_guides: bool,
+        minimap: &MinimapState,
+        show_minimap: bool,
+        color_picker: &ColorPickerState,
     ) {
         let rt = match &self.render_target {
             Some(rt) => rt,
@@ -605,6 +771,14 @@ impl D2DRenderer {
                 self.render_loupe(rt, width, height, loupe, bg_bitmap);
             }
 
+            // ── Zoom Viewport Minimap (Radar Overview) ──
+            if show_minimap
+                && zoom_state.level > 1.05
+                && (mode == AppMode::StaticZoom || mode == AppMode::Draw)
+            {
+                self.render_minimap(rt, width, height, bg_bitmap, zoom_state, minimap);
+            }
+
             if mode != AppMode::Timer {
                 self.render_fluent_toolbar(
                     rt,
@@ -631,6 +805,8 @@ impl D2DRenderer {
                 );
             }
 
+            self.render_color_picker(rt, color_picker);
+
             if let Some(t) = toast
                 && !t.is_expired()
             {
@@ -641,7 +817,7 @@ impl D2DRenderer {
                 self.render_cheat_sheet_modal(rt, width, height);
             }
 
-            let _ = rt.EndDraw(None, None);
+            self.note_draw_result(rt.EndDraw(None, None));
         }
     }
 
@@ -664,6 +840,11 @@ impl D2DRenderer {
         if width == 0 || height == 0 {
             return None;
         }
+
+        // The DIB is physical pixels; drawing happens in DIPs.
+        let scale = self.dpi / 96.0;
+        let logical_w = width as f32 / scale;
+        let logical_h = height as f32 / scale;
 
         unsafe {
             let screen_dc = GetDC(None);
@@ -729,6 +910,9 @@ impl D2DRenderer {
                         bottom: height as i32,
                     };
                     if dc_rt.BindDC(mem_dc, &rect).is_ok() {
+                        // Same DPI as the on-screen target so DIP coordinates map
+                        // onto these physical pixels exactly as they do on screen.
+                        dc_rt.SetDpi(self.dpi, self.dpi);
                         dc_rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                         dc_rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
                         dc_rt.BeginDraw();
@@ -817,8 +1001,8 @@ impl D2DRenderer {
                             let dst_rect = D2D_RECT_F {
                                 left: 0.0,
                                 top: 0.0,
-                                right: width as f32,
-                                bottom: height as f32,
+                                right: logical_w,
+                                bottom: logical_h,
                             };
                             dc_rt.DrawBitmap(
                                 bmp,
@@ -847,8 +1031,8 @@ impl D2DRenderer {
                             dc_rt.SetTransform(&identity);
                             self.render_spotlight_mask(
                                 &dc_rt,
-                                width as f32,
-                                height as f32,
+                                logical_w,
+                                logical_h,
                                 screen_pt.x,
                                 screen_pt.y,
                                 spotlight.radius,

@@ -12,16 +12,32 @@ use windows::core::w;
 const CF_DIB: u32 = 8;
 const CF_UNICODETEXT: u32 = 13;
 
+/// `OpenClipboard` routinely fails with ERROR_ACCESS_DENIED while another
+/// process holds the clipboard open - clipboard managers and Office do this
+/// constantly. A single attempt makes copy fail at random, so retry briefly.
+fn open_clipboard_retrying() -> bool {
+    const ATTEMPTS: u32 = 10;
+    for attempt in 0..ATTEMPTS {
+        if unsafe { OpenClipboard(None) }.is_ok() {
+            return true;
+        }
+        if attempt + 1 < ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+    false
+}
+
 pub fn copy_bgra_to_clipboard(width: u32, height: u32, top_down_bgra: &[u8]) -> bool {
     if width == 0 || height == 0 || top_down_bgra.len() != (width * height * 4) as usize {
         return false;
     }
 
-    unsafe {
-        if OpenClipboard(None).is_err() {
-            return false;
-        }
+    if !open_clipboard_retrying() {
+        return false;
+    }
 
+    unsafe {
         let _ = EmptyClipboard();
 
         let header_size = std::mem::size_of::<BITMAPINFOHEADER>();
@@ -125,11 +141,11 @@ pub fn copy_bgra_to_clipboard(width: u32, height: u32, top_down_bgra: &[u8]) -> 
 }
 
 pub fn get_clipboard_text() -> Option<String> {
-    unsafe {
-        if OpenClipboard(None).is_err() {
-            return None;
-        }
+    if !open_clipboard_retrying() {
+        return None;
+    }
 
+    unsafe {
         let text = if let Ok(handle) = GetClipboardData(CF_UNICODETEXT) {
             if !handle.is_invalid() {
                 let hglobal = HGLOBAL(handle.0);

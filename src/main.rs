@@ -36,13 +36,14 @@ use windows::core::{PCWSTR, Result, w};
 use hotkeys::*;
 use overlay::OverlayWindow;
 use tray::*;
-use types::{AppMode, CanvasBackground, ColorPreset, DrawTool};
+use types::{AppMode, CanvasBackground, DrawTool};
 
 fn ensure_live_zoom_stopped(overlay: &mut OverlayWindow) {
     if overlay.live_zoom.is_active() || overlay.mode == AppMode::LiveZoom {
-        overlay.live_zoom.stop();
+        overlay.stop_live_zoom();
         overlay.mode = AppMode::Idle;
-        std::thread::sleep(std::time::Duration::from_millis(25));
+        // No sleep here: the capture path waits on DWM composition instead, so
+        // the message pump is not blocked while the overlay borrow is held.
     }
 }
 
@@ -54,6 +55,10 @@ struct AppContext {
 }
 
 const TRAY_HOST_CLASS: PCWSTR = w!("ZoomifyTrayHostClass");
+
+/// Drives Live Zoom's smooth pan. Only runs while a session is active - it used
+/// to tick at 62 Hz for the entire life of the process.
+const TIMER_ID_LIVE_ZOOM_PAN: usize = 1;
 
 unsafe extern "system" fn tray_wnd_proc(
     hwnd: HWND,
@@ -68,6 +73,14 @@ unsafe extern "system" fn tray_wnd_proc(
         }
 
         let ctx = &mut *raw_ptr;
+
+        // Explorer restarted and dropped every tray icon: claim ours back.
+        // Registered at runtime, so it cannot be a `match` arm.
+        let taskbar_created = ctx.tray.taskbar_created_msg();
+        if taskbar_created != 0 && msg == taskbar_created {
+            ctx.tray.re_add();
+            return LRESULT(0);
+        }
 
         match msg {
             WM_HOTKEY => {
@@ -105,7 +118,7 @@ unsafe extern "system" fn tray_wnd_proc(
                     }
                     HOTKEY_LIVE_ZOOM => {
                         if overlay.live_zoom.is_active() {
-                            overlay.live_zoom.stop();
+                            overlay.stop_live_zoom();
                             overlay.mode = AppMode::Idle;
                             overlay.hide_window();
                         } else {
@@ -116,10 +129,9 @@ unsafe extern "system" fn tray_wnd_proc(
                         }
                     }
                     HOTKEY_LIVE_ZOOM_IN | HOTKEY_LIVE_ZOOM_IN_PLUS => {
+                        // Only registered while a session is running.
                         if overlay.live_zoom.is_active() {
                             overlay.live_zoom.adjust_zoom(0.25);
-                        } else {
-                            overlay.enter_live_zoom();
                         }
                     }
                     HOTKEY_LIVE_ZOOM_OUT | HOTKEY_LIVE_ZOOM_OUT_MINUS => {
@@ -152,9 +164,11 @@ unsafe extern "system" fn tray_wnd_proc(
             }
 
             windows::Win32::UI::WindowsAndMessaging::WM_TIMER => {
-                let mut overlay = ctx.overlay.borrow_mut();
-                if overlay.live_zoom.is_active() {
-                    overlay.live_zoom.tick_smooth_pan(0.25);
+                if wparam.0 == TIMER_ID_LIVE_ZOOM_PAN {
+                    let mut overlay = ctx.overlay.borrow_mut();
+                    if overlay.live_zoom.is_active() {
+                        overlay.live_zoom.tick_smooth_pan(0.25);
+                    }
                 }
                 LRESULT(0)
             }
@@ -166,9 +180,28 @@ unsafe extern "system" fn tray_wnd_proc(
                 } else if event == WM_LBUTTONDBLCLK {
                     let mut overlay = ctx.overlay.borrow_mut();
                     if overlay.live_zoom.is_active() {
-                        overlay.live_zoom.stop();
+                        overlay.stop_live_zoom();
                     }
                     overlay.enter_static_zoom();
+                }
+                LRESULT(0)
+            }
+
+            overlay::WM_LIVE_ZOOM_STATE => {
+                let active = wparam.0 != 0;
+                ctx.hotkeys.set_live_zoom_hotkeys(active);
+                if active {
+                    windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                        Some(hwnd),
+                        TIMER_ID_LIVE_ZOOM_PAN,
+                        16,
+                        None,
+                    );
+                } else {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                        Some(hwnd),
+                        TIMER_ID_LIVE_ZOOM_PAN,
+                    );
                 }
                 LRESULT(0)
             }
@@ -193,7 +226,7 @@ unsafe extern "system" fn tray_wnd_proc(
                     ID_TRAY_LIVE_ZOOM => {
                         let mut overlay = ctx.overlay.borrow_mut();
                         if overlay.live_zoom.is_active() {
-                            overlay.live_zoom.stop();
+                            overlay.stop_live_zoom();
                             overlay.mode = AppMode::Idle;
                             overlay.hide_window();
                         } else {
@@ -325,23 +358,27 @@ unsafe extern "system" fn tray_wnd_proc(
 
             settings_window::WM_SETTINGS_APPLIED => {
                 let cfg = config::AppConfig::load();
-                ctx.hotkeys.reload_from_config(&cfg);
+                let failed = ctx.hotkeys.reload_from_config(&cfg);
                 let mut overlay = ctx.overlay.borrow_mut();
                 overlay.stroke_width = cfg.default_stroke_width;
                 overlay.spotlight.radius = cfg.spotlight_radius;
                 overlay.timer_seconds = cfg.timer_duration_mins * 60;
                 overlay.timer_sound_enabled = cfg.timer_sound_enabled;
-                overlay.current_color = match cfg.default_color.as_str() {
-                    "Red" => ColorPreset::Red,
-                    "Green" => ColorPreset::Green,
-                    "Blue" => ColorPreset::Blue,
-                    "Yellow" => ColorPreset::Yellow,
-                    "Orange" => ColorPreset::Orange,
-                    "Pink" => ColorPreset::Pink,
-                    "Cyan" => ColorPreset::Cyan,
-                    _ => ColorPreset::Red,
-                };
-                overlay.set_toast("⚙️", "Settings & Hotkeys Applied");
+                overlay.show_minimap = cfg.show_minimap;
+                overlay.default_zoom_level = cfg.default_zoom_level;
+                overlay.allow_monitor_cycling = cfg.allow_monitor_cycling;
+                overlay.monitor_target = cfg.monitor_target.clone();
+                overlay.current_color = config::AppConfig::parse_color(&cfg.default_color);
+                // A shortcut another app already owns fails to register; saying so
+                // beats leaving the user with a key that quietly does nothing.
+                if failed.is_empty() {
+                    overlay.set_toast("⚙️", "Settings & Hotkeys Applied");
+                } else {
+                    overlay.set_toast(
+                        "⚠️",
+                        format!("In use by another app: {}", failed.join(", ")),
+                    );
+                }
                 overlay.request_repaint();
                 LRESULT(0)
             }
@@ -416,18 +453,29 @@ fn main() -> Result<()> {
         )?;
 
         let overlay = OverlayWindow::create()?;
+        overlay.borrow_mut().set_host_hwnd(tray_hwnd);
         let settings_window = settings_window::SettingsWindow::create(tray_hwnd)?;
         let mut tray = TrayIcon::new(tray_hwnd);
         let mut hotkeys = HotkeyManager::new(tray_hwnd);
-        hotkeys.register_all();
+        let failed_hotkeys = hotkeys.register_all();
 
-        windows::Win32::UI::WindowsAndMessaging::SetTimer(Some(tray_hwnd), 1, 16, None);
-
-        // Show non-intrusive Windows tray notification balloon
-        tray.show_balloon(
-            "Zoomify is Ready!",
-            "Hotkeys:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+5: Timer\n• Ctrl+6: Loupe\n• Ctrl+,: Settings",
-        );
+        // Tray balloon is the only UI available at startup, so any hotkey
+        // conflict has to be reported here.
+        if failed_hotkeys.is_empty() {
+            tray.show_balloon(
+                "Zoomify is Ready!",
+                "Hotkeys:\n• Ctrl+1: Zoom\n• Ctrl+2: Draw\n• Ctrl+3: Spotlight\n• Ctrl+4: Live Zoom\n• Ctrl+5: Timer\n• Ctrl+6: Loupe\n• Ctrl+,: Settings",
+            );
+        } else {
+            tray.show_balloon(
+                "Zoomify: some hotkeys unavailable",
+                &format!(
+                    "Another app already owns: {}.
+Choose different combos in Settings (Ctrl+,).",
+                    failed_hotkeys.join(", ")
+                ),
+            );
+        }
 
         let app_ctx = Box::new(AppContext {
             overlay,

@@ -195,8 +195,9 @@ pub fn shape_intersects_circle(shape: &Shape, center: Point2D, radius: f32) -> b
             text,
             ..
         } => {
-            let est_width = (text.len() as f32 * font_size * 0.6).max(20.0);
-            let est_height = *font_size;
+            let (block_w, block_h) = crate::types::measure_text_block(text, *font_size);
+            let est_width = block_w.max(20.0);
+            let est_height = block_h;
             let l = origin.x;
             let t = origin.y;
             let r = l + est_width;

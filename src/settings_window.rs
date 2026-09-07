@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
@@ -32,8 +32,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
-    GetClientRect, GetSystemMetrics, GetWindowLongPtrW, IDC_ARROW, IDC_HAND, LoadCursorW,
-    PostMessageW, RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SetCursor,
+    GetClientRect, GetWindowLongPtrW, IDC_ARROW, IDC_HAND, LoadCursorW,
+    PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOW, SetCursor,
     SetForegroundWindow, SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION,
     WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
@@ -102,6 +102,8 @@ pub struct SettingsWindow {
     config: AppConfig,
     capturing_hotkey_idx: Option<usize>,
     hover_item: Option<String>,
+    /// Why the last attempted hotkey capture was rejected, shown under the list.
+    hotkey_error: Option<String>,
 }
 
 impl SettingsWindow {
@@ -120,20 +122,26 @@ impl SettingsWindow {
             RegisterClassExW(&wnd_class);
 
             let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+
+            // Open on the monitor under the cursor, at that monitor's density.
+            // Centring via SM_CXSCREEN always landed on the primary display, and
+            // a fixed pixel size rendered the window at 80% on a 125% monitor.
+            let mon = crate::monitor::MonitorManager::get_monitor_from_cursor();
+            let dpi = Self::dpi_for_point(mon.x + mon.width as i32 / 2, mon.y + mon.height as i32 / 2);
+            let scale = dpi as f32 / 96.0;
+
             let mut wr = RECT {
                 left: 0,
                 top: 0,
-                right: CLIENT_WIDTH as i32,
-                bottom: CLIENT_HEIGHT as i32,
+                right: (CLIENT_WIDTH * scale).round() as i32,
+                bottom: (CLIENT_HEIGHT * scale).round() as i32,
             };
             let _ = AdjustWindowRectEx(&mut wr, style, false, WS_EX_APPWINDOW);
             let win_w = wr.right - wr.left;
             let win_h = wr.bottom - wr.top;
 
-            let sw = GetSystemMetrics(SM_CXSCREEN);
-            let sh = GetSystemMetrics(SM_CYSCREEN);
-            let x = (sw - win_w) / 2;
-            let y = (sh - win_h) / 2;
+            let x = mon.work_x + (mon.work_width as i32 - win_w) / 2;
+            let y = mon.work_y + (mon.work_height as i32 - win_h) / 2;
 
             let hwnd = CreateWindowExW(
                 WS_EX_APPWINDOW,
@@ -250,6 +258,7 @@ impl SettingsWindow {
                 config,
                 capturing_hotkey_idx: None,
                 hover_item: None,
+                hotkey_error: None,
             }));
 
             let raw_ptr = Rc::into_raw(Rc::clone(&state));
@@ -260,6 +269,26 @@ impl SettingsWindow {
 
             Ok(state)
         }
+    }
+
+    /// Effective DPI for the monitor containing a screen point, falling back to
+    /// the system value when per-monitor lookup is unavailable.
+    fn dpi_for_point(x: i32, y: i32) -> u32 {
+        use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
+        use windows::Win32::UI::HiDpi::{MDT_EFFECTIVE_DPI, GetDpiForMonitor};
+
+        unsafe {
+            let hmon = MonitorFromPoint(
+                windows::Win32::Foundation::POINT { x, y },
+                MONITOR_DEFAULTTONEAREST,
+            );
+            let mut dx = 0u32;
+            let mut dy = 0u32;
+            if GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy).is_ok() && dx > 0 {
+                return dx;
+            }
+        }
+        96
     }
 
     fn init_render_target(&mut self) -> Result<()> {
@@ -289,6 +318,9 @@ impl SettingsWindow {
             };
 
             let rt = factory.CreateHwndRenderTarget(&rt_props, &hwnd_props)?;
+            let dpi = windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd);
+            let dpi = if dpi == 0 { 96.0 } else { dpi as f32 };
+            rt.SetDpi(dpi, dpi);
             rt.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
 
@@ -408,16 +440,15 @@ impl SettingsWindow {
 
                         if !is_mod_only {
                             let new_binding = HotkeyBinding::new(mods, key as u32);
-                            match slot {
-                                0 => this.config.hotkey_static_zoom = new_binding,
-                                1 => this.config.hotkey_draw = new_binding,
-                                2 => this.config.hotkey_spotlight = new_binding,
-                                3 => this.config.hotkey_live_zoom = new_binding,
-                                4 => this.config.hotkey_timer = new_binding,
-                                5 => this.config.hotkey_loupe = new_binding,
-                                _ => {}
+                            match this.rejection_reason(slot, &new_binding) {
+                                None => {
+                                    this.store_binding(slot, new_binding);
+                                    this.capturing_hotkey_idx = None;
+                                    this.hotkey_error = None;
+                                }
+                                // Stay in capture mode so the user can try again.
+                                Some(msg) => this.hotkey_error = Some(msg),
                             }
-                            this.capturing_hotkey_idx = None;
                             this.request_repaint();
                             return LRESULT(0);
                         }
@@ -433,6 +464,72 @@ impl SettingsWindow {
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
         }
+    }
+
+    const HOTKEY_SLOT_NAMES: [&str; 6] = [
+        "Static Freeze Zoom",
+        "Draw Mode",
+        "Spotlight Flashlight",
+        "Live Zoom",
+        "Presentation Timer",
+        "Magnifier Loupe Lens",
+    ];
+
+    fn binding_for_slot(&self, slot: usize) -> &HotkeyBinding {
+        match slot {
+            0 => &self.config.hotkey_static_zoom,
+            1 => &self.config.hotkey_draw,
+            2 => &self.config.hotkey_spotlight,
+            3 => &self.config.hotkey_live_zoom,
+            4 => &self.config.hotkey_timer,
+            _ => &self.config.hotkey_loupe,
+        }
+    }
+
+    fn store_binding(&mut self, slot: usize, b: HotkeyBinding) {
+        match slot {
+            0 => self.config.hotkey_static_zoom = b,
+            1 => self.config.hotkey_draw = b,
+            2 => self.config.hotkey_spotlight = b,
+            3 => self.config.hotkey_live_zoom = b,
+            4 => self.config.hotkey_timer = b,
+            5 => self.config.hotkey_loupe = b,
+            _ => {}
+        }
+    }
+
+    /// Reject bindings the OS would accept but the user would regret: a bare key
+    /// (registered globally, it swallows that key desktop-wide) or a combo already
+    /// claimed by another action (the second RegisterHotKey silently fails, leaving
+    /// a dead shortcut with no feedback).
+    fn rejection_reason(&self, slot: usize, candidate: &HotkeyBinding) -> Option<String> {
+        if !candidate.has_modifier() {
+            return Some(format!(
+                "\"{}\" needs a modifier (Ctrl, Alt, Shift or Win)",
+                candidate.format_display()
+            ));
+        }
+
+        if *candidate == crate::config::RESERVED_SETTINGS_HOTKEY {
+            return Some("Ctrl + , is reserved for opening Settings".to_string());
+        }
+
+        let bindings: [&HotkeyBinding; 6] = [
+            self.binding_for_slot(0),
+            self.binding_for_slot(1),
+            self.binding_for_slot(2),
+            self.binding_for_slot(3),
+            self.binding_for_slot(4),
+            self.binding_for_slot(5),
+        ];
+        if let Some(other) = crate::config::conflicting_slot(&bindings, slot, candidate) {
+            return Some(format!(
+                "{} is already assigned to \"{}\"",
+                candidate.format_display(),
+                Self::HOTKEY_SLOT_NAMES[other]
+            ));
+        }
+        None
     }
 
     fn update_hover(&mut self, x: f32, y: f32) {
@@ -491,9 +588,9 @@ impl SettingsWindow {
                     }
                 }
                 SettingsTab::Canvas => {
-                    // Zoom stepper [-] [+]
+                    // 1. Zoom stepper [-] [+]
                     let cy1 = 78.0;
-                    if y >= cy1 + 21.0 && y <= cy1 + 53.0 {
+                    if y >= cy1 + 18.0 && y <= cy1 + 50.0 {
                         if x >= 566.0 && x <= 598.0 {
                             self.hover_item = Some("zoom_minus".to_string());
                             return;
@@ -502,9 +599,15 @@ impl SettingsWindow {
                             return;
                         }
                     }
-                    // Stroke width stepper [-] [+]
-                    let cy2 = 160.0;
-                    if y >= cy2 + 21.0 && y <= cy2 + 53.0 {
+                    // 2. Zoom Minimap toggle switch
+                    let cy2 = 154.0;
+                    if x >= 620.0 && x <= 685.0 && y >= cy2 + 16.0 && y <= cy2 + 52.0 {
+                        self.hover_item = Some("canvas_minimap_toggle".to_string());
+                        return;
+                    }
+                    // 3. Stroke width stepper [-] [+]
+                    let cy3 = 230.0;
+                    if y >= cy3 + 18.0 && y <= cy3 + 50.0 {
                         if x >= 566.0 && x <= 598.0 {
                             self.hover_item = Some("stroke_minus".to_string());
                             return;
@@ -513,9 +616,9 @@ impl SettingsWindow {
                             return;
                         }
                     }
-                    // Color swatches
-                    let cy3 = 242.0;
-                    let chip_y = cy3 + 54.0;
+                    // 4. Color swatches
+                    let cy4 = 306.0;
+                    let chip_y = cy4 + 58.0;
                     for c in 0..7 {
                         let cx = 236.0 + (c as f32 * 42.0);
                         if (x - cx).powi(2) + (y - chip_y).powi(2) <= 16.0 * 16.0 {
@@ -576,6 +679,7 @@ impl SettingsWindow {
                     _ => SettingsTab::Timer,
                 };
                 self.capturing_hotkey_idx = None;
+                self.hotkey_error = None;
                 self.request_repaint();
                 return;
             }
@@ -587,6 +691,7 @@ impl SettingsWindow {
                 // Restore Defaults
                 self.config = AppConfig::default();
                 self.capturing_hotkey_idx = None;
+                self.hotkey_error = None;
                 self.request_repaint();
                 return;
             } else if x >= 485.0 && x <= 575.0 {
@@ -620,6 +725,7 @@ impl SettingsWindow {
                         } else {
                             self.capturing_hotkey_idx = Some(i);
                         }
+                        self.hotkey_error = None;
                         self.request_repaint();
                         return;
                     }
@@ -657,8 +763,9 @@ impl SettingsWindow {
             }
 
             SettingsTab::Canvas => {
+                // 1. Zoom stepper [-] [+]
                 let cy1 = 78.0;
-                if y >= cy1 + 21.0 && y <= cy1 + 53.0 {
+                if y >= cy1 + 18.0 && y <= cy1 + 50.0 {
                     if x >= 566.0 && x <= 598.0 {
                         self.config.default_zoom_level =
                             (self.config.default_zoom_level - 0.25).clamp(1.25, 5.0);
@@ -672,8 +779,17 @@ impl SettingsWindow {
                     }
                 }
 
-                let cy2 = 160.0;
-                if y >= cy2 + 21.0 && y <= cy2 + 53.0 {
+                // 2. Zoom Minimap toggle switch
+                let cy2 = 154.0;
+                if x >= 620.0 && x <= 685.0 && y >= cy2 + 16.0 && y <= cy2 + 52.0 {
+                    self.config.show_minimap = !self.config.show_minimap;
+                    self.request_repaint();
+                    return;
+                }
+
+                // 3. Stroke width stepper [-] [+]
+                let cy3 = 230.0;
+                if y >= cy3 + 18.0 && y <= cy3 + 50.0 {
                     if x >= 566.0 && x <= 598.0 {
                         self.config.default_stroke_width =
                             (self.config.default_stroke_width - 1.0).clamp(1.0, 24.0);
@@ -687,8 +803,9 @@ impl SettingsWindow {
                     }
                 }
 
-                let cy3 = 242.0;
-                let chip_y = cy3 + 54.0;
+                // 4. Color swatches
+                let cy4 = 306.0;
+                let chip_y = cy4 + 58.0;
                 let colors = ["Red", "Green", "Blue", "Yellow", "Orange", "Pink", "Cyan"];
                 for (c, &name) in colors.iter().enumerate() {
                     let cx = 236.0 + (c as f32 * 42.0);
@@ -742,10 +859,13 @@ impl SettingsWindow {
     }
 
     fn render(&mut self) {
+        // Clone the COM handle so `self` stays free for the recovery step below.
         let rt = match self.render_target.as_ref() {
-            Some(rt) => rt,
+            Some(rt) => rt.clone(),
             None => return,
         };
+        let rt = &rt;
+        let mut device_lost = false;
 
         unsafe {
             rt.BeginDraw();
@@ -970,7 +1090,20 @@ impl SettingsWindow {
             // Footer Buttons
             self.render_footer_buttons(rt);
 
-            let _ = rt.EndDraw(None, None);
+            if let Err(e) = rt.EndDraw(None, None)
+                && e.code() == D2DERR_RECREATE_TARGET
+            {
+                device_lost = true;
+            }
+        }
+
+        // A lost GPU device leaves the target permanently dead; rebuild it or
+        // the settings window renders nothing until the app restarts.
+        if device_lost {
+            self.render_target = None;
+            if self.init_render_target().is_ok() {
+                self.request_repaint();
+            }
         }
     }
 
@@ -1190,6 +1323,27 @@ impl SettingsWindow {
             let utf16: Vec<u16> = btn_text.encode_utf16().collect();
             if let Ok(b) = rt.CreateSolidColorBrush(&text_primary, None) {
                 draw_text(rt, &utf16, &self.format_button, &btn_rect, &b);
+            }
+        }
+
+        // Rejected-binding banner, sits between the last card and the footer.
+        if let Some(err) = &self.hotkey_error {
+            let warn = D2D1_COLOR_F {
+                r: 1.0,
+                g: 0.42,
+                b: 0.38,
+                a: 1.0,
+            };
+            let msg = format!("⚠  {}", err);
+            let utf16: Vec<u16> = msg.encode_utf16().collect();
+            let tr = D2D_RECT_F {
+                left: 220.0,
+                top: 486.0,
+                right: 700.0,
+                bottom: 502.0,
+            };
+            if let Ok(b) = rt.CreateSolidColorBrush(&warn, None) {
+                draw_text(rt, &utf16, &self.format_desc, &tr, &b);
             }
         }
     }
@@ -1423,7 +1577,7 @@ impl SettingsWindow {
             left: 205.0,
             top: cy1,
             right: 700.0,
-            bottom: cy1 + 72.0,
+            bottom: cy1 + 68.0,
         };
         let r1 = D2D1_ROUNDED_RECT {
             rect: c1,
@@ -1439,9 +1593,9 @@ impl SettingsWindow {
         if let Ok(b) = rt.CreateSolidColorBrush(&text_primary, None) {
             let tr = D2D_RECT_F {
                 left: 220.0,
-                top: cy1 + 14.0,
+                top: cy1 + 12.0,
                 right: 550.0,
-                bottom: cy1 + 34.0,
+                bottom: cy1 + 32.0,
             };
             draw_text(
                 rt,
@@ -1454,13 +1608,13 @@ impl SettingsWindow {
         if let Ok(b) = rt.CreateSolidColorBrush(&text_secondary, None) {
             let tr = D2D_RECT_F {
                 left: 220.0,
-                top: cy1 + 38.0,
+                top: cy1 + 34.0,
                 right: 550.0,
-                bottom: cy1 + 58.0,
+                bottom: cy1 + 54.0,
             };
             draw_text(
                 rt,
-                w!("Starting scale factor when activating Static Zoom").as_wide(),
+                w!("Starting scale factor when activating Static Freeze Zoom").as_wide(),
                 &self.format_desc,
                 &tr,
                 &b,
@@ -1469,19 +1623,19 @@ impl SettingsWindow {
         self.render_stepper(
             rt,
             566.0,
-            cy1 + 20.0,
+            cy1 + 18.0,
             &format!("{:.2}x", self.config.default_zoom_level),
             "zoom_minus",
             "zoom_plus",
         );
 
-        // 2. Default Stroke Width
-        let cy2 = 160.0;
+        // 2. Zoom Viewport Minimap (Radar Overview)
+        let cy2 = 154.0;
         let c2 = D2D_RECT_F {
             left: 205.0,
             top: cy2,
             right: 700.0,
-            bottom: cy2 + 72.0,
+            bottom: cy2 + 68.0,
         };
         let r2 = D2D1_ROUNDED_RECT {
             rect: c2,
@@ -1497,13 +1651,13 @@ impl SettingsWindow {
         if let Ok(b) = rt.CreateSolidColorBrush(&text_primary, None) {
             let tr = D2D_RECT_F {
                 left: 220.0,
-                top: cy2 + 14.0,
-                right: 550.0,
-                bottom: cy2 + 34.0,
+                top: cy2 + 12.0,
+                right: 590.0,
+                bottom: cy2 + 32.0,
             };
             draw_text(
                 rt,
-                w!("Default Drawing Stroke Width").as_wide(),
+                w!("Zoom Minimap (Radar Overview)").as_wide(),
                 &self.format_section,
                 &tr,
                 &b,
@@ -1512,34 +1666,28 @@ impl SettingsWindow {
         if let Ok(b) = rt.CreateSolidColorBrush(&text_secondary, None) {
             let tr = D2D_RECT_F {
                 left: 220.0,
-                top: cy2 + 38.0,
-                right: 550.0,
-                bottom: cy2 + 58.0,
+                top: cy2 + 34.0,
+                right: 590.0,
+                bottom: cy2 + 54.0,
             };
             draw_text(
                 rt,
-                w!("Pen, arrow, and shape line thickness in pixels").as_wide(),
+                w!("Display miniature screen preview in corner when zoomed in to track viewport")
+                    .as_wide(),
                 &self.format_desc,
                 &tr,
                 &b,
             );
         }
-        self.render_stepper(
-            rt,
-            566.0,
-            cy2 + 20.0,
-            &format!("{:.0} px", self.config.default_stroke_width),
-            "stroke_minus",
-            "stroke_plus",
-        );
+        self.render_toggle_switch(rt, 636.0, cy2 + 23.0, self.config.show_minimap);
 
-        // 3. Default Pen Color (height 94px)
-        let cy3 = 242.0;
+        // 3. Default Stroke Width
+        let cy3 = 230.0;
         let c3 = D2D_RECT_F {
             left: 205.0,
             top: cy3,
             right: 700.0,
-            bottom: cy3 + 94.0,
+            bottom: cy3 + 68.0,
         };
         let r3 = D2D1_ROUNDED_RECT {
             rect: c3,
@@ -1556,8 +1704,66 @@ impl SettingsWindow {
             let tr = D2D_RECT_F {
                 left: 220.0,
                 top: cy3 + 12.0,
-                right: 500.0,
+                right: 550.0,
                 bottom: cy3 + 32.0,
+            };
+            draw_text(
+                rt,
+                w!("Default Drawing Stroke Width").as_wide(),
+                &self.format_section,
+                &tr,
+                &b,
+            );
+        }
+        if let Ok(b) = rt.CreateSolidColorBrush(&text_secondary, None) {
+            let tr = D2D_RECT_F {
+                left: 220.0,
+                top: cy3 + 34.0,
+                right: 550.0,
+                bottom: cy3 + 54.0,
+            };
+            draw_text(
+                rt,
+                w!("Pen, arrow, and shape line thickness in pixels").as_wide(),
+                &self.format_desc,
+                &tr,
+                &b,
+            );
+        }
+        self.render_stepper(
+            rt,
+            566.0,
+            cy3 + 18.0,
+            &format!("{:.0} px", self.config.default_stroke_width),
+            "stroke_minus",
+            "stroke_plus",
+        );
+
+        // 4. Default Pen Color (height 86px)
+        let cy4 = 306.0;
+        let c4 = D2D_RECT_F {
+            left: 205.0,
+            top: cy4,
+            right: 700.0,
+            bottom: cy4 + 86.0,
+        };
+        let r4 = D2D1_ROUNDED_RECT {
+            rect: c4,
+            radiusX: 7.0,
+            radiusY: 7.0,
+        };
+        if let Ok(b) = rt.CreateSolidColorBrush(&card_bg, None) {
+            rt.FillRoundedRectangle(&r4, &b);
+        }
+        if let Ok(b) = rt.CreateSolidColorBrush(&card_border, None) {
+            rt.DrawRoundedRectangle(&r4, &b, 1.0, None);
+        }
+        if let Ok(b) = rt.CreateSolidColorBrush(&text_primary, None) {
+            let tr = D2D_RECT_F {
+                left: 220.0,
+                top: cy4 + 10.0,
+                right: 500.0,
+                bottom: cy4 + 30.0,
             };
             draw_text(
                 rt,
@@ -1572,9 +1778,9 @@ impl SettingsWindow {
             let utf16: Vec<u16> = label.encode_utf16().collect();
             let tr = D2D_RECT_F {
                 left: 220.0,
-                top: cy3 + 32.0,
+                top: cy4 + 30.0,
                 right: 500.0,
-                bottom: cy3 + 48.0,
+                bottom: cy4 + 46.0,
             };
             draw_text(rt, &utf16, &self.format_desc, &tr, &b);
         }
@@ -1645,7 +1851,7 @@ impl SettingsWindow {
             ),
         ];
 
-        let chip_y = cy3 + 66.0;
+        let chip_y = cy4 + 58.0;
         for (c, (name, col)) in colors.iter().enumerate() {
             let cx = 236.0 + (c as f32 * 42.0);
             let is_selected = self.config.default_color.eq_ignore_ascii_case(name);
@@ -1672,16 +1878,16 @@ impl SettingsWindow {
             }
         }
 
-        // 4. Helper Pro Tip Card
-        let cy4 = 346.0;
-        let c4 = D2D_RECT_F {
+        // 5. Helper Pro Tip Card
+        let cy5 = 400.0;
+        let c5 = D2D_RECT_F {
             left: 205.0,
-            top: cy4,
+            top: cy5,
             right: 700.0,
-            bottom: cy4 + 72.0,
+            bottom: cy5 + 68.0,
         };
-        let r4 = D2D1_ROUNDED_RECT {
-            rect: c4,
+        let r5 = D2D1_ROUNDED_RECT {
+            rect: c5,
             radiusX: 7.0,
             radiusY: 7.0,
         };
@@ -1698,10 +1904,10 @@ impl SettingsWindow {
             a: 1.0,
         };
         if let Ok(b) = rt.CreateSolidColorBrush(&tip_bg, None) {
-            rt.FillRoundedRectangle(&r4, &b);
+            rt.FillRoundedRectangle(&r5, &b);
         }
         if let Ok(b) = rt.CreateSolidColorBrush(&tip_border, None) {
-            rt.DrawRoundedRectangle(&r4, &b, 1.0, None);
+            rt.DrawRoundedRectangle(&r5, &b, 1.0, None);
         }
         let accent_text = D2D1_COLOR_F {
             r: 0.35,
@@ -1712,13 +1918,13 @@ impl SettingsWindow {
         if let Ok(b) = rt.CreateSolidColorBrush(&accent_text, None) {
             let tr = D2D_RECT_F {
                 left: 220.0,
-                top: cy4 + 14.0,
+                top: cy5 + 10.0,
                 right: 685.0,
-                bottom: cy4 + 34.0,
+                bottom: cy5 + 28.0,
             };
             draw_text(
                 rt,
-                w!("💡 Quick Drawing Shortcuts").as_wide(),
+                w!("💡 Quick Drawing & Radar Shortcuts").as_wide(),
                 &self.format_section,
                 &tr,
                 &b,
@@ -1727,13 +1933,13 @@ impl SettingsWindow {
         if let Ok(b) = rt.CreateSolidColorBrush(&text_secondary, None) {
             let tr = D2D_RECT_F {
                 left: 220.0,
-                top: cy4 + 38.0,
+                top: cy5 + 32.0,
                 right: 685.0,
-                bottom: cy4 + 58.0,
+                bottom: cy5 + 56.0,
             };
             draw_text(
                 rt,
-                w!("While drawing, press R, G, B, Y, O, P, C to change pen colors instantly")
+                w!("Press R, G, B, Y, O, P, C for colors. Press M to toggle Radar Minimap. Ctrl+Z to undo.")
                     .as_wide(),
                 &self.format_desc,
                 &tr,

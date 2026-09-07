@@ -34,15 +34,23 @@ use crate::shapes::{
 };
 use crate::types::{
     AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, BlurToolSettings,
-    CanvasBackground, ColorPreset, DrawTool, FillMode, FluentAction, FluentToolbarState,
-    HistoryAction, LaserRipple, LaserTrailPoint, LoupeState, Point2D, Shape, ShapeToolSettings,
-    SpotlightState, StepBadgeToolSettings, StrokePattern, StrokeToolSettings, TextCardStyle,
-    TextEditorState, TextFontFamily, TextToolSettings, TimerAction, TimerWidgetState,
-    ToastNotification, ZoomState,
+    CanvasBackground, ColorPickerState, ColorPreset, DrawTool, FillMode, FluentAction,
+    FluentToolbarState,
+    HistoryAction, LaserRipple, LaserTrailPoint, LoupeState, MinimapState, Point2D, Shape,
+    ShapeToolSettings, SpotlightState, StepBadgeToolSettings, StrokePattern, StrokeToolSettings,
+    TextCardStyle, TextEditorState, TextFontFamily, TextToolSettings, TimerAction,
+    TimerWidgetState, ToastNotification, ZoomState,
 };
 
 const OVERLAY_CLASS_NAME: PCWSTR = w!("ZoomifyFullscreenOverlay");
 const TIMER_ID_ANIMATION: usize = 1001;
+
+/// Upper bound on laser trail points held at once.
+const MAX_LASER_TRAIL_POINTS: usize = 160;
+
+/// Posted to the tray host window whenever a Live Zoom session starts (wparam 1)
+/// or stops (wparam 0), so the host can claim / release the Ctrl+Up/Down/+/- keys.
+pub const WM_LIVE_ZOOM_STATE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 400;
 
 unsafe extern "system" {
     fn MessageBeep(utype: u32) -> i32;
@@ -50,12 +58,22 @@ unsafe extern "system" {
 
 pub struct OverlayWindow {
     pub hwnd: HWND,
+    /// Tray host window that owns the global hotkeys; notified on Live Zoom state changes.
+    pub host_hwnd: HWND,
     pub renderer: D2DRenderer,
     pub mode: AppMode,
     pub background_capture: Option<ScreenCapture>,
     pub background_bitmap: Option<ID2D1Bitmap>,
     pub background_type: CanvasBackground,
     pub zoom: ZoomState,
+    pub minimap: MinimapState,
+    pub show_minimap: bool,
+    /// Zoom factor applied when entering Static Zoom / Live Zoom (Canvas settings).
+    pub default_zoom_level: f32,
+    /// When false, the display-cycling command is refused (General settings).
+    pub allow_monitor_cycling: bool,
+    /// Which display the overlay targets: "cursor" (default) or "primary".
+    pub monitor_target: String,
     pub spotlight: SpotlightState,
     pub loupe: LoupeState,
     pub was_shifted_during_draw: bool,
@@ -95,6 +113,7 @@ pub struct OverlayWindow {
     pub show_cheat_sheet: bool,
     pub show_hud: bool,
     pub toolbar: FluentToolbarState,
+    pub color_picker: ColorPickerState,
     pub laser_trail: Vec<LaserTrailPoint>,
     pub laser_ripples: Vec<LaserRipple>,
     pub laser_pos: Option<Point2D>,
@@ -113,6 +132,10 @@ pub struct OverlayWindow {
     pub screen_y: i32,
     pub screen_width: u32,
     pub screen_height: u32,
+    /// Display density of the monitor the overlay currently covers (96 = 100%).
+    /// screen_width/height stay in physical pixels for window and capture APIs;
+    /// all layout and hit-testing works in DIPs derived from them.
+    pub dpi: u32,
     pub available_monitors: Vec<crate::monitor::MonitorInfo>,
     pub current_monitor_index: usize,
     pub current_monitor: crate::monitor::MonitorInfo,
@@ -168,18 +191,9 @@ impl OverlayWindow {
                 ..Default::default()
             };
             let timer_secs = (cfg.timer_duration_mins * 60).max(60);
-            let initial_color = match cfg.default_color.to_lowercase().as_str() {
-                "red" => ColorPreset::Red,
-                "green" => ColorPreset::Green,
-                "blue" => ColorPreset::Blue,
-                "yellow" => ColorPreset::Yellow,
-                "orange" => ColorPreset::Orange,
-                "pink" => ColorPreset::Pink,
-                "cyan" => ColorPreset::Cyan,
-                "white" => ColorPreset::White,
-                "black" => ColorPreset::Black,
-                _ => ColorPreset::Red,
-            };
+            // Accepts a preset name or a #RRGGBB custom colour.
+            let initial_color =
+                ColorPreset::from_config_str(&cfg.default_color).unwrap_or(ColorPreset::Red);
 
             let fill_mode = match cfg.default_fill_mode.as_str() {
                 "Tinted" => FillMode::Tinted,
@@ -220,12 +234,18 @@ impl OverlayWindow {
 
             let state = Rc::new(RefCell::new(Self {
                 hwnd,
+                host_hwnd: HWND::default(),
                 renderer,
                 mode: AppMode::Idle,
                 background_capture: None,
                 background_bitmap: None,
                 background_type: CanvasBackground::Transparent,
                 zoom: ZoomState::default(),
+                minimap: MinimapState::default(),
+                show_minimap: cfg.show_minimap,
+                default_zoom_level: cfg.default_zoom_level,
+                allow_monitor_cycling: cfg.allow_monitor_cycling,
+                monitor_target: cfg.monitor_target.clone(),
                 spotlight,
                 loupe: LoupeState::default(),
                 was_shifted_during_draw: false,
@@ -301,6 +321,18 @@ impl OverlayWindow {
                 show_cheat_sheet: false,
                 show_hud: true,
                 toolbar,
+                color_picker: {
+                    let mut cp = ColorPickerState {
+                        recent: cfg
+                            .recent_custom_colors
+                            .iter()
+                            .filter_map(|h| ColorPreset::from_config_str(h))
+                            .collect(),
+                        ..Default::default()
+                    };
+                    cp.seed_from(initial_color);
+                    cp
+                },
                 laser_trail: Vec::new(),
                 laser_ripples: Vec::new(),
                 laser_pos: None,
@@ -319,6 +351,7 @@ impl OverlayWindow {
                 screen_y,
                 screen_width,
                 screen_height,
+                dpi: 96,
                 available_monitors,
                 current_monitor_index: 0,
                 current_monitor,
@@ -327,14 +360,106 @@ impl OverlayWindow {
             let raw_ptr = Rc::into_raw(Rc::clone(&state));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, raw_ptr as isize);
 
-            windows::Win32::UI::WindowsAndMessaging::SetTimer(
-                Some(hwnd),
-                TIMER_ID_ANIMATION,
-                16,
-                None,
-            );
+            // No animation timer yet: it is started when the overlay is shown and
+            // killed when it is hidden. Ticking at 62 Hz for the whole life of a
+            // tray app burns wakeups while nothing is on screen.
 
             Ok(state)
+        }
+    }
+
+    /// Re-anchor the picker panel under the toolbar's `+` swatch.
+    pub fn relayout_color_picker(&mut self) {
+        if !self.color_picker.open {
+            return;
+        }
+        let anchor = self
+            .toolbar
+            .items
+            .iter()
+            .find(|i| i.action == FluentAction::OpenColorPicker)
+            .map(|i| i.rect)
+            .unwrap_or(self.toolbar.bar_rect);
+        // Sit below the sub-bar when one is showing, otherwise below the bar.
+        let below = self
+            .toolbar
+            .subbar_rect
+            .map(|r| r.bottom)
+            .unwrap_or(self.toolbar.bar_rect.bottom);
+        let w = self.logical_w();
+        self.color_picker.update_layout(anchor, w, below);
+    }
+
+    /// Adopt a colour chosen in the picker, remembering it for next time.
+    pub fn apply_picked_color(&mut self, color: ColorPreset) {
+        self.current_color = color;
+        self.color_picker.push_recent(color);
+        self.relayout_color_picker();
+    }
+
+    /// Physical pixels per DIP for the current monitor.
+    #[inline]
+    pub fn dpi_scale(&self) -> f32 {
+        self.dpi as f32 / 96.0
+    }
+
+    /// Overlay width in DIPs - the unit all layout and hit-testing uses.
+    #[inline]
+    pub fn logical_w(&self) -> f32 {
+        self.screen_width as f32 / self.dpi_scale()
+    }
+
+    /// Overlay height in DIPs.
+    #[inline]
+    pub fn logical_h(&self) -> f32 {
+        self.screen_height as f32 / self.dpi_scale()
+    }
+
+    /// Convert a physical-pixel coordinate (mouse input, cursor position) to the
+    /// DIP space that layout and rendering work in.
+    #[inline]
+    pub fn px_to_dip(&self, v: f32) -> f32 {
+        v / self.dpi_scale()
+    }
+
+    /// Wire the overlay to the tray host window that owns the global hotkeys.
+    pub fn set_host_hwnd(&mut self, host: HWND) {
+        self.host_hwnd = host;
+    }
+
+    fn notify_live_zoom_state(&self, active: bool) {
+        if self.host_hwnd.is_invalid() {
+            return;
+        }
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                Some(self.host_hwnd),
+                WM_LIVE_ZOOM_STATE,
+                WPARAM(active as usize),
+                LPARAM(0),
+            );
+        }
+    }
+
+    /// Start the magnification engine and claim the Ctrl+Up/Down/+/- zoom keys.
+    pub fn start_live_zoom_engine(&mut self, level: f32) -> bool {
+        let started = self.live_zoom.start(level);
+        if started {
+            self.notify_live_zoom_state(true);
+        } else {
+            self.mode = AppMode::Idle;
+            self.set_toast("⚠️", "Live Zoom unavailable on this system");
+        }
+        started
+    }
+
+    /// Stop the magnification engine and release the zoom keys back to other apps.
+    /// Safe to call when no session is running.
+    pub fn stop_live_zoom(&mut self) {
+        let was_active = self.live_zoom.is_active();
+        self.live_zoom.stop();
+        if was_active {
+            self.notify_live_zoom_state(false);
         }
     }
 
@@ -353,34 +478,36 @@ impl OverlayWindow {
         self.background_bitmap = None;
         self.background_capture = None;
         self.hide_window();
-        self.live_zoom.start(2.0);
+        let level = self.default_zoom_level.clamp(1.25, 10.0);
+        self.start_live_zoom_engine(level);
     }
 
     pub fn enter_static_zoom(&mut self) {
         if self.live_zoom.is_active() || self.mode == AppMode::LiveZoom {
-            self.live_zoom.stop();
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            self.stop_live_zoom();
         }
         self.target_monitor_under_cursor();
         if self.background_bitmap.is_none() {
             self.capture_current_screen();
         }
         let mut cursor_screen = Point2D::new(
-            self.screen_width as f32 / 2.0,
-            self.screen_height as f32 / 2.0,
+            self.logical_w() / 2.0,
+            self.logical_h() / 2.0,
         );
         unsafe {
             let mut pt = POINT::default();
             if GetCursorPos(&mut pt).is_ok() {
-                cursor_screen =
-                    Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
+                cursor_screen = Point2D::new(
+                    self.px_to_dip((pt.x - self.screen_x) as f32),
+                    self.px_to_dip((pt.y - self.screen_y) as f32),
+                );
             }
         }
         self.zoom.set_zoom_centered(
-            2.0,
+            self.default_zoom_level.clamp(1.25, 10.0),
             cursor_screen,
-            self.screen_width as f32,
-            self.screen_height as f32,
+            self.logical_w(),
+            self.logical_h(),
         );
         self.mode = AppMode::StaticZoom;
         self.loupe.active = false;
@@ -391,8 +518,8 @@ impl OverlayWindow {
         self.active_shape = None;
         self.commit_text_editor();
         self.toolbar.active_tool = None;
-        let sw = self.screen_width as f32;
-        let sh = self.screen_height as f32;
+        let sw = self.logical_w();
+        let sh = self.logical_h();
         self.toolbar.update_layout(sw, sh);
         self.show_window();
         self.set_toast("🔎", "Static Zoom (Wheel: Zoom | Pan)");
@@ -495,16 +622,15 @@ impl OverlayWindow {
             self.active_shape = None;
             self.commit_text_editor();
             self.toolbar.active_tool = Some(self.current_tool);
-            let sw = self.screen_width as f32;
-            let sh = self.screen_height as f32;
+            let sw = self.logical_w();
+            let sh = self.logical_h();
             self.toolbar.update_layout(sw, sh);
         }
     }
 
     pub fn enter_draw_mode(&mut self) {
         if self.live_zoom.is_active() || self.mode == AppMode::LiveZoom {
-            self.live_zoom.stop();
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            self.stop_live_zoom();
             self.zoom = ZoomState::default();
         } else if self.mode == AppMode::Idle
             || self.mode == AppMode::Loupe
@@ -527,8 +653,8 @@ impl OverlayWindow {
         self.active_shape = None;
         self.commit_text_editor();
         self.toolbar.active_tool = Some(self.current_tool);
-        let sw = self.screen_width as f32;
-        let sh = self.screen_height as f32;
+        let sw = self.logical_w();
+        let sh = self.logical_h();
         self.toolbar.update_layout(sw, sh);
         self.show_window();
         self.set_toast("✏️", "Draw Mode Active");
@@ -537,8 +663,7 @@ impl OverlayWindow {
 
     pub fn enter_spotlight_mode(&mut self) {
         if self.live_zoom.is_active() || self.mode == AppMode::LiveZoom {
-            self.live_zoom.stop();
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            self.stop_live_zoom();
         }
         self.zoom = ZoomState::default();
         self.background_type = CanvasBackground::Transparent;
@@ -559,14 +684,16 @@ impl OverlayWindow {
         unsafe {
             let mut pt = POINT::default();
             if GetCursorPos(&mut pt).is_ok() {
-                let screen_pt =
-                    Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
+                let screen_pt = Point2D::new(
+                    self.px_to_dip((pt.x - self.screen_x) as f32),
+                    self.px_to_dip((pt.y - self.screen_y) as f32),
+                );
                 self.spotlight.x = screen_pt.x;
                 self.spotlight.y = screen_pt.y;
             }
         }
-        let sw = self.screen_width as f32;
-        let sh = self.screen_height as f32;
+        let sw = self.logical_w();
+        let sh = self.logical_h();
         self.toolbar.update_layout(sw, sh);
         self.show_window();
         self.set_toast("🔦", "Spotlight Active (Ctrl+Wheel: Resize | Space: Pin)");
@@ -575,8 +702,7 @@ impl OverlayWindow {
 
     pub fn enter_timer_mode(&mut self, minutes: u32) {
         if self.live_zoom.is_active() || self.mode == AppMode::LiveZoom {
-            self.live_zoom.stop();
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            self.stop_live_zoom();
         }
         self.zoom = ZoomState::default();
         self.background_type = CanvasBackground::Transparent;
@@ -603,8 +729,8 @@ impl OverlayWindow {
         self.timer_paused = false;
         self.timer_alarm_sounded = false;
         self.timer_last_tick = Instant::now();
-        let sw = self.screen_width as f32;
-        let sh = self.screen_height as f32;
+        let sw = self.logical_w();
+        let sh = self.logical_h();
         self.toolbar.update_layout(sw, sh);
         self.show_window();
         self.set_toast(
@@ -625,8 +751,10 @@ impl OverlayWindow {
             unsafe {
                 let mut pt = POINT::default();
                 if GetCursorPos(&mut pt).is_ok() {
-                    let screen_pt =
-                        Point2D::new((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32);
+                    let screen_pt = Point2D::new(
+                        self.px_to_dip((pt.x - self.screen_x) as f32),
+                        self.px_to_dip((pt.y - self.screen_y) as f32),
+                    );
                     self.spotlight.x = screen_pt.x;
                     self.spotlight.y = screen_pt.y;
                 }
@@ -640,8 +768,7 @@ impl OverlayWindow {
 
     pub fn enter_loupe_mode(&mut self) {
         if self.live_zoom.is_active() || self.mode == AppMode::LiveZoom {
-            self.live_zoom.stop();
-            std::thread::sleep(std::time::Duration::from_millis(25));
+            self.stop_live_zoom();
         }
         self.zoom = ZoomState::default();
         self.background_type = CanvasBackground::Transparent;
@@ -661,18 +788,21 @@ impl OverlayWindow {
 
         let mut pt = POINT::default();
         let (cx, cy) = if unsafe { GetCursorPos(&mut pt).is_ok() } {
-            ((pt.x - self.screen_x) as f32, (pt.y - self.screen_y) as f32)
+            (
+                self.px_to_dip((pt.x - self.screen_x) as f32),
+                self.px_to_dip((pt.y - self.screen_y) as f32),
+            )
         } else {
             (
-                self.screen_width as f32 / 2.0,
-                self.screen_height as f32 / 2.0,
+                self.logical_w() / 2.0,
+                self.logical_h() / 2.0,
             )
         };
         self.loupe.x = cx;
         self.loupe.y = cy;
 
-        let sw = self.screen_width as f32;
-        let sh = self.screen_height as f32;
+        let sw = self.logical_w();
+        let sh = self.logical_h();
         self.toolbar.update_layout(sw, sh);
         self.show_window();
         self.set_toast(
@@ -685,16 +815,47 @@ impl OverlayWindow {
         self.request_repaint();
     }
 
+    /// Extend or shorten the countdown by `delta_secs`, keeping the total and the
+    /// remaining time in lockstep. `timer_seconds` is the denominator of the
+    /// progress ring and the value persisted as the default duration, so it must
+    /// stay a *duration* — never be overwritten with whatever is left on the clock.
+    pub fn adjust_timer(&mut self, delta_secs: f64) {
+        let (total, remaining) = crate::types::adjust_timer_values(
+            self.timer_seconds,
+            self.timer_remaining,
+            delta_secs,
+        );
+        self.timer_seconds = total;
+        self.timer_remaining = remaining;
+
+        // Putting time back on the clock re-arms the end-of-timer chime.
+        if self.timer_remaining > 0.0 {
+            self.timer_alarm_sounded = false;
+        }
+    }
+
+    /// Whole minutes of total duration, for toasts.
+    pub fn timer_total_mins(&self) -> u32 {
+        (self.timer_seconds as f32 / 60.0).round().max(1.0) as u32
+    }
+
     pub fn save_config(&self) {
         let mut cfg = crate::config::AppConfig::load();
         cfg.default_stroke_width = self.stroke_width;
         cfg.spotlight_radius = self.spotlight.radius;
         cfg.timer_duration_mins = (self.timer_seconds / 60).max(1);
         cfg.toolbar_collapsed = self.toolbar.collapsed;
-        if let Some(pos) = self.toolbar.custom_position {
-            cfg.toolbar_custom_position = Some((pos.x, pos.y));
-        }
-        cfg.default_color = self.current_color.name().to_string();
+        cfg.show_minimap = self.show_minimap;
+        // Unconditional: a `Some`-only write means "Reset Toolbar Position"
+        // never clears the stale position from config.json.
+        cfg.toolbar_custom_position = self.toolbar.custom_position.map(|p| (p.x, p.y));
+        cfg.default_color = self.current_color.name();
+        cfg.recent_custom_colors = self
+            .color_picker
+            .recent
+            .iter()
+            .map(|c| c.name())
+            .collect();
         cfg.default_fill_mode = match self.fill_mode {
             FillMode::None => "None".to_string(),
             FillMode::Tinted => "Tinted".to_string(),
@@ -717,7 +878,7 @@ impl OverlayWindow {
     pub fn exit_overlay(&mut self) {
         self.save_config();
         if self.live_zoom.is_active() {
-            self.live_zoom.stop();
+            self.stop_live_zoom();
         }
         self.mode = AppMode::Idle;
         self.spotlight.active = false;
@@ -795,11 +956,21 @@ impl OverlayWindow {
                 );
             }
 
-            self.toolbar.update_layout(sw as f32, sh as f32);
+            // Adopt the target monitor's density before laying anything out.
+            let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd) };
+            self.dpi = if dpi == 0 { 96 } else { dpi };
+            self.renderer.set_dpi(self.dpi);
+
+            self.toolbar.update_layout(self.logical_w(), self.logical_h());
         }
     }
 
     pub fn cycle_next_monitor(&mut self) {
+        if !self.allow_monitor_cycling {
+            self.set_toast("🖥️", "Display cycling is disabled in Settings");
+            self.request_repaint();
+            return;
+        }
         self.refresh_monitors();
         if self.available_monitors.len() <= 1 {
             self.set_toast("🖥️", "Single display active");
@@ -827,31 +998,121 @@ impl OverlayWindow {
 
     pub fn target_monitor_under_cursor(&mut self) {
         self.refresh_monitors();
-        let cursor_mon = crate::monitor::MonitorManager::get_monitor_from_cursor();
-        let mut target_idx = 0;
-        for (i, m) in self.available_monitors.iter().enumerate() {
-            if m.x == cursor_mon.x && m.y == cursor_mon.y {
-                target_idx = i;
-                break;
+
+        // "primary" pins the overlay to the main display regardless of where the
+        // pointer is; "cursor" (default) follows the pointer.
+        if self.monitor_target.eq_ignore_ascii_case("primary") {
+            let idx = self
+                .available_monitors
+                .iter()
+                .position(|m| m.is_primary)
+                .unwrap_or(0);
+            self.set_active_monitor(idx);
+            return;
+        }
+
+        // Locate the cursor against the list refresh_monitors() just built rather
+        // than calling get_monitor_from_cursor(), which enumerates all over again.
+        let mut pt = POINT::default();
+        let target_idx = if unsafe { GetCursorPos(&mut pt) }.is_ok() {
+            self.available_monitors
+                .iter()
+                .position(|m| m.contains_point(pt.x, pt.y))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        self.set_active_monitor(target_idx);
+    }
+
+    /// Take the foreground reliably.
+    ///
+    /// A bare `SetForegroundWindow` is rejected by Windows' foreground lock
+    /// whenever the caller does not own the current foreground window, which
+    /// leaves the overlay visible but without keyboard focus - every shortcut
+    /// silently does nothing. Briefly sharing an input queue with the current
+    /// foreground thread lifts the restriction.
+    fn force_foreground(&self) {
+        use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
+        };
+
+        unsafe {
+            let this_thread = GetCurrentThreadId();
+            let fg = GetForegroundWindow();
+            let fg_thread = if fg.is_invalid() {
+                0
+            } else {
+                GetWindowThreadProcessId(fg, None)
+            };
+
+            let attached = fg_thread != 0
+                && fg_thread != this_thread
+                && AttachThreadInput(this_thread, fg_thread, true).as_bool();
+
+            let _ = SetForegroundWindow(self.hwnd);
+            let _ = BringWindowToTop(self.hwnd);
+            let _ = SetFocus(Some(self.hwnd));
+
+            if attached {
+                let _ = AttachThreadInput(this_thread, fg_thread, false);
             }
         }
-        self.set_active_monitor(target_idx);
+    }
+
+    /// The ~60 Hz animation tick drives toasts, the countdown, laser decay and
+    /// smooth panning - all of which only exist while the overlay is on screen.
+    /// Running it while hidden is pure wakeup cost for a tray-resident app.
+    fn set_animation_timer(&self, running: bool) {
+        unsafe {
+            if running {
+                windows::Win32::UI::WindowsAndMessaging::SetTimer(
+                    Some(self.hwnd),
+                    TIMER_ID_ANIMATION,
+                    16,
+                    None,
+                );
+            } else {
+                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(
+                    Some(self.hwnd),
+                    TIMER_ID_ANIMATION,
+                );
+            }
+        }
     }
 
     pub fn show_window(&mut self) {
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
-            let _ = SetForegroundWindow(self.hwnd);
-            let _ = SetFocus(Some(self.hwnd));
-            self.toolbar
-                .update_layout(self.screen_width as f32, self.screen_height as f32);
-            self.request_repaint();
         }
+        self.set_animation_timer(true);
+        self.force_foreground();
+        self.toolbar
+            .update_layout(self.logical_w(), self.logical_h());
+        self.request_repaint();
     }
 
     pub fn hide_window(&mut self) {
+        self.set_animation_timer(false);
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
+        }
+    }
+
+    /// Block until DWM has composed a fresh frame.
+    ///
+    /// This is the barrier the capture path actually needs: it covers both "the
+    /// overlay just hid itself" and "fullscreen magnification just reset". The
+    /// mode-entry paths used to approximate it with a fixed 25 ms sleep, which
+    /// is a guess rather than a synchronization point and blocked the message
+    /// pump for longer than necessary while a RefCell borrow was held.
+    fn wait_for_compose() {
+        unsafe {
+            if windows::Win32::Graphics::Dwm::DwmFlush().is_err() {
+                // Only if the compositor is unavailable (e.g. DWM disabled).
+                std::thread::sleep(std::time::Duration::from_millis(15));
+            }
         }
     }
 
@@ -863,8 +1124,12 @@ impl OverlayWindow {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_HIDE);
             }
-            std::thread::sleep(std::time::Duration::from_millis(15));
         }
+
+        // Always wait, not just when we had to hide: entering a mode straight
+        // from Live Zoom leaves the window already hidden but the magnification
+        // transform still on screen.
+        Self::wait_for_compose();
 
         if let Some(cap) = ScreenCapture::capture_rect(
             self.screen_x,
@@ -883,14 +1148,35 @@ impl OverlayWindow {
         if is_visible {
             unsafe {
                 let _ = ShowWindow(self.hwnd, SW_SHOW);
-                let _ = SetForegroundWindow(self.hwnd);
             }
+            self.force_foreground();
         }
     }
 
     pub fn request_repaint(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
+        }
+    }
+
+    /// Recreate the frozen-background bitmap from the CPU-side capture we still
+    /// hold. Needed after the render target is rebuilt, since an ID2D1Bitmap
+    /// belongs to the target that made it.
+    fn rebuild_background_bitmap(&mut self) {
+        let rebuilt = match (&self.background_capture, &self.renderer.render_target) {
+            (Some(cap), Some(rt)) => cap.create_d2d_bitmap(rt).ok(),
+            _ => None,
+        };
+        self.background_bitmap = rebuilt;
+    }
+
+    /// Rebuild the render target and its dependent resources if the GPU device
+    /// was lost during the last frame. Without this the overlay renders nothing
+    /// forever after a driver reset, RDP transition, or display mode change.
+    pub fn recover_device_if_needed(&mut self) {
+        if self.renderer.recover_if_device_lost() {
+            self.rebuild_background_bitmap();
+            self.request_repaint();
         }
     }
 
@@ -1043,35 +1329,82 @@ impl OverlayWindow {
     }
 
     pub fn copy_screen_to_clipboard(&mut self) {
-        if let Some(composite) = self.get_composite_capture(self.spotlight.active)
-            && copy_bgra_to_clipboard(composite.width, composite.height, &composite.pixels)
-        {
+        let Some(composite) = self.get_composite_capture(self.spotlight.active) else {
+            self.set_toast("❌", "Nothing to copy");
+            return;
+        };
+        // Previously a failed copy was silent, so the user had no idea the
+        // clipboard still held whatever was there before.
+        if copy_bgra_to_clipboard(composite.width, composite.height, &composite.pixels) {
             self.set_toast("📋", "Copied Screen + Drawings to Clipboard!");
+        } else {
+            self.set_toast("❌", "Clipboard busy — copy failed, try again");
         }
     }
 
-    pub fn save_snapshot(&mut self) {
-        if let Some(composite) = self.get_composite_capture(self.spotlight.active) {
-            let pictures_dir = std::env::var("USERPROFILE")
-                .map(|p| format!("{}\\Pictures", p))
-                .unwrap_or_else(|_| ".".to_string());
+    /// Resolve the user's real Pictures folder. `%USERPROFILE%\Pictures` is wrong
+    /// whenever the folder is redirected - to OneDrive, another drive, or a
+    /// network share - which is common. The shell knows where it actually is.
+    fn pictures_dir() -> std::path::PathBuf {
+        use windows::Win32::System::Com::CoTaskMemFree;
+        use windows::Win32::UI::Shell::{FOLDERID_Pictures, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
-            let _ = std::fs::create_dir_all(&pictures_dir);
-
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-
-            let filename = format!("{}\\Zoomify_{}.png", pictures_dir, timestamp);
-            if composite.save_png(&filename).is_ok() {
-                self.set_toast(
-                    "💾",
-                    format!("Saved to Pictures\\Zoomify_{}.png", timestamp),
-                );
-            } else {
-                self.set_toast("❌", "Failed to save screenshot!");
+        unsafe {
+            if let Ok(pwstr) = SHGetKnownFolderPath(&FOLDERID_Pictures, KF_FLAG_DEFAULT, None)
+                && !pwstr.is_null()
+            {
+                let path = pwstr.to_string().ok().map(std::path::PathBuf::from);
+                CoTaskMemFree(Some(pwstr.0 as *const std::ffi::c_void));
+                if let Some(p) = path {
+                    return p;
+                }
             }
+        }
+
+        // Fall back only if the shell call fails outright.
+        std::env::var_os("USERPROFILE")
+            .map(|u| std::path::PathBuf::from(u).join("Pictures"))
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
+    pub fn save_snapshot(&mut self) {
+        let Some(composite) = self.get_composite_capture(self.spotlight.active) else {
+            self.set_toast("❌", "Nothing to save");
+            return;
+        };
+
+        let dir = Self::pictures_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.set_toast("❌", format!("Cannot open Pictures folder: {}", e));
+            return;
+        }
+
+        // Local wall-clock stamp, readable and sortable.
+        let stamp = unsafe {
+            let t = windows::Win32::System::SystemInformation::GetLocalTime();
+            format!(
+                "{:04}{:02}{:02}-{:02}{:02}{:02}",
+                t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+            )
+        };
+
+        // Second-resolution stamps collide when saving in quick succession, which
+        // previously overwrote the earlier shot without a word. Suffix instead.
+        let mut path = dir.join(format!("Zoomify_{}.png", stamp));
+        let mut n = 2;
+        while path.exists() && n < 1000 {
+            path = dir.join(format!("Zoomify_{}_{}.png", stamp, n));
+            n += 1;
+        }
+
+        let name = path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "screenshot.png".to_string());
+
+        match composite.save_png(&path.to_string_lossy()) {
+            Ok(()) => self.set_toast("💾", format!("Saved {}", name)),
+            Err(e) => self.set_toast("❌", format!("Save failed: {}", e)),
         }
     }
 
@@ -1171,10 +1504,21 @@ impl OverlayWindow {
                 self.current_tool = t;
                 self.toolbar.active_tool = Some(t);
                 self.sync_tool_to_toolbar();
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("🛠️", format!("Tool: {}", t.name()));
+            }
+            FluentAction::OpenColorPicker => {
+                self.ensure_draw_mode();
+                let open = !self.color_picker.open;
+                self.color_picker.open = open;
+                if open {
+                    let cur = self.current_color;
+                    self.color_picker.seed_from(cur);
+                    self.relayout_color_picker();
+                    self.set_toast("🎨", "Custom colour — drag H/S/V, click a recent swatch");
+                }
             }
             FluentAction::Color(c) => {
                 self.ensure_draw_mode();
@@ -1198,8 +1542,8 @@ impl OverlayWindow {
                 return LRESULT(0);
             }
             FluentAction::ToggleCollapse => {
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.collapsed = !self.toolbar.collapsed;
                 self.toolbar.update_layout(sw, sh);
             }
@@ -1218,10 +1562,10 @@ impl OverlayWindow {
                 }
                 self.stroke_width = w;
                 self.toolbar.stroke_width = w;
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
-                self.save_config();
+                // Not persisted per click; save_config() runs on overlay exit.
                 if self.current_tool == DrawTool::Blur {
                     self.set_toast("░", format!("Mosaic Block Size: {:.0}px", w));
                 } else {
@@ -1238,8 +1582,8 @@ impl OverlayWindow {
                 }
                 self.fill_mode = fm;
                 self.toolbar.current_fill_mode = fm;
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("🎨", format!("Fill: {}", fm.name()));
             }
@@ -1255,8 +1599,8 @@ impl OverlayWindow {
                 }
                 self.stroke_pattern = sp;
                 self.toolbar.current_stroke_pattern = sp;
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("✏️", format!("Pattern: {}", sp.name()));
             }
@@ -1264,8 +1608,8 @@ impl OverlayWindow {
                 self.arrow_settings.style = as_;
                 self.arrow_style = as_;
                 self.toolbar.current_arrow_style = as_;
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("🏹", format!("Arrow: {}", as_.name()));
             }
@@ -1273,8 +1617,8 @@ impl OverlayWindow {
                 self.badge_settings.size = bs;
                 self.badge_size = bs;
                 self.toolbar.current_badge_size = bs;
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("🔢", format!("Badge Size: {}", bs.name()));
             }
@@ -1282,16 +1626,16 @@ impl OverlayWindow {
                 self.badge_settings.shape = bsh;
                 self.badge_shape = bsh;
                 self.toolbar.current_badge_shape = bsh;
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("🔢", format!("Badge Shape: {}", bsh.name()));
             }
             FluentAction::ResetBadgeCounter => {
                 self.step_counter = 1;
                 self.toolbar.badge_counter = 1;
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("↺", "Step badge reset to #1");
             }
@@ -1302,8 +1646,8 @@ impl OverlayWindow {
                 if let Some(ed) = &mut self.text_editor {
                     ed.font_size = sz;
                 }
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("🔤", format!("Font Size: {:.0}px", sz));
             }
@@ -1315,8 +1659,8 @@ impl OverlayWindow {
                 if let Some(ed) = &mut self.text_editor {
                     ed.is_bold = bold;
                 }
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("𝐁", if bold { "Bold: On" } else { "Bold: Off" });
             }
@@ -1328,8 +1672,8 @@ impl OverlayWindow {
                 if let Some(ed) = &mut self.text_editor {
                     ed.is_italic = italic;
                 }
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("𝐼", if italic { "Italic: On" } else { "Italic: Off" });
             }
@@ -1340,8 +1684,8 @@ impl OverlayWindow {
                 if let Some(ed) = &mut self.text_editor {
                     ed.card_style = cs;
                 }
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("🏷️", format!("Text Card: {}", cs.name()));
             }
@@ -1352,8 +1696,8 @@ impl OverlayWindow {
                 if let Some(ed) = &mut self.text_editor {
                     ed.font_family = ff;
                 }
-                let sw = self.screen_width as f32;
-                let sh = self.screen_height as f32;
+                let sw = self.logical_w();
+                let sh = self.logical_h();
                 self.toolbar.update_layout(sw, sh);
                 self.set_toast("🔤", format!("Font: {}", ff.name()));
             }
@@ -1407,8 +1751,8 @@ impl OverlayWindow {
 
                     this.renderer.render_frame(
                         this.mode,
-                        this.screen_width as f32,
-                        this.screen_height as f32,
+                        this.logical_w(),
+                        this.logical_h(),
                         this.background_bitmap.as_ref(),
                         this.background_type,
                         &this.zoom,
@@ -1431,9 +1775,16 @@ impl OverlayWindow {
                         this.laser_pos,
                         this.eraser_pos,
                         snap_guides,
+                        &this.minimap,
+                        this.show_minimap,
+                        &this.color_picker,
                     );
 
                     let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
+
+                    // Must run after EndPaint: recovery invalidates the window
+                    // again, and EndPaint would validate that away.
+                    this.recover_device_if_needed();
                     LRESULT(0)
                 }
 
@@ -1473,8 +1824,8 @@ impl OverlayWindow {
                         }
 
                         if this.mode == AppMode::StaticZoom || this.mode == AppMode::Draw {
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             if this.zoom.tick_smooth_pan(0.35, sw, sh) {
                                 needs_paint = true;
                             }
@@ -1531,11 +1882,27 @@ impl OverlayWindow {
                 WM_SETCURSOR => {
                     let mut pt = POINT::default();
                     if GetCursorPos(&mut pt).is_ok() {
-                        let cx = (pt.x - this.screen_x) as f32;
-                        let cy = (pt.y - this.screen_y) as f32;
+                        let cx = this.px_to_dip((pt.x - this.screen_x) as f32);
+                        let cy = this.px_to_dip((pt.y - this.screen_y) as f32);
+                        let sw = this.logical_w();
+                        let sh = this.logical_h();
                         if this.toolbar.is_point_inside(cx, cy) {
                             let _ =
                                 SetCursor(Some(LoadCursorW(None, IDC_HAND).unwrap_or_default()));
+                            return LRESULT(1);
+                        }
+                        if this.show_minimap
+                            && this.zoom.level > 1.05
+                            && (this.mode == AppMode::StaticZoom || this.mode == AppMode::Draw)
+                            && this.minimap.hit_test(sw, sh, cx, cy)
+                        {
+                            let cursor_type = if this.minimap.is_dragging {
+                                IDC_SIZEALL
+                            } else {
+                                IDC_HAND
+                            };
+                            let _ =
+                                SetCursor(Some(LoadCursorW(None, cursor_type).unwrap_or_default()));
                             return LRESULT(1);
                         }
                     }
@@ -1565,12 +1932,13 @@ impl OverlayWindow {
                 }
 
                 WM_MOUSEMOVE => {
-                    let x = (lparam.0 & 0xFFFF) as i16 as f32;
-                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+                    // Mouse messages are physical pixels; everything below is DIPs.
+                    let x = this.px_to_dip((lparam.0 & 0xFFFF) as i16 as f32);
+                    let y = this.px_to_dip(((lparam.0 >> 16) & 0xFFFF) as i16 as f32);
                     let screen_pt = Point2D::new(x, y);
                     let canvas_pt = this.zoom.screen_to_canvas(screen_pt);
-                    let sw = this.screen_width as f32;
-                    let sh = this.screen_height as f32;
+                    let sw = this.logical_w();
+                    let sh = this.logical_h();
 
                     // Timer dragging & button hover hit testing
                     if this.mode == AppMode::Timer {
@@ -1616,14 +1984,52 @@ impl OverlayWindow {
                         return LRESULT(0);
                     }
 
+                    // Minimap dragging & hover
+                    if this.show_minimap
+                        && this.zoom.level > 1.05
+                        && (this.mode == AppMode::StaticZoom || this.mode == AppMode::Draw)
+                    {
+                        if this.minimap.is_dragging {
+                            let target_canvas = this.minimap.minimap_pt_to_canvas_pt(sw, sh, x, y);
+                            this.zoom.center_on_canvas_point(target_canvas, sw, sh);
+                            this.request_repaint();
+                            return LRESULT(0);
+                        }
+
+                        let is_hov = this.minimap.hit_test(sw, sh, x, y);
+                        if is_hov != this.minimap.is_hovered {
+                            this.minimap.is_hovered = is_hov;
+                            this.request_repaint();
+                        }
+                        if is_hov {
+                            return LRESULT(0);
+                        }
+                    } else if this.minimap.is_hovered {
+                        this.minimap.is_hovered = false;
+                    }
+
                     // Laser pointer tracking
                     if this.current_tool == DrawTool::LaserPointer {
                         this.laser_pos = Some(canvas_pt);
-                        this.laser_trail.push(LaserTrailPoint {
-                            pt: canvas_pt,
-                            timestamp: Instant::now(),
-                        });
-                        this.request_repaint();
+
+                        // Only record a point once the cursor has actually moved,
+                        // and cap the trail. Previously every mouse message pushed
+                        // a point, so a high-polling-rate mouse could pile up over
+                        // a thousand near-coincident points, all redrawn each frame.
+                        let far_enough = match this.laser_trail.last() {
+                            Some(last) => last.pt.distance(&canvas_pt) >= 2.0,
+                            None => true,
+                        };
+                        if far_enough {
+                            if this.laser_trail.len() >= MAX_LASER_TRAIL_POINTS {
+                                this.laser_trail.remove(0);
+                            }
+                            this.laser_trail.push(LaserTrailPoint {
+                                pt: canvas_pt,
+                                timestamp: Instant::now(),
+                            });
+                            this.request_repaint();
+                        }
                     } else {
                         this.laser_pos = None;
                     }
@@ -1655,6 +2061,14 @@ impl OverlayWindow {
                             this.set_toast("🧹", "Erased Shape");
                             this.request_repaint();
                         }
+                        return LRESULT(0);
+                    }
+
+                    if let Some(bar) = this.color_picker.dragging {
+                        this.color_picker.set_from_x(bar, x);
+                        let c = this.color_picker.current();
+                        this.current_color = c;
+                        this.request_repaint();
                         return LRESULT(0);
                     }
 
@@ -1766,8 +2180,9 @@ impl OverlayWindow {
                 }
 
                 WM_LBUTTONDOWN => {
-                    let x = (lparam.0 & 0xFFFF) as i16 as f32;
-                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+                    // Mouse messages are physical pixels; everything below is DIPs.
+                    let x = this.px_to_dip((lparam.0 & 0xFFFF) as i16 as f32);
+                    let y = this.px_to_dip(((lparam.0 >> 16) & 0xFFFF) as i16 as f32);
                     let screen_pt = Point2D::new(x, y);
                     let canvas_pt = this.zoom.screen_to_canvas(screen_pt);
 
@@ -1781,11 +2196,59 @@ impl OverlayWindow {
                         return LRESULT(0);
                     }
 
+                    // Colour picker sits above the canvas: claim the click before
+                    // any drawing starts, and close it when clicking elsewhere.
+                    if this.color_picker.open {
+                        if this.color_picker.contains(x, y) {
+                            if let Some(bar) = this.color_picker.bar_at(x, y) {
+                                this.color_picker.dragging = Some(bar);
+                                this.color_picker.set_from_x(bar, x);
+                                let c = this.color_picker.current();
+                                this.current_color = c;
+                                let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(
+                                    this.hwnd,
+                                );
+                            } else if let Some(c) = this.color_picker.recent_at(x, y) {
+                                this.apply_picked_color(c);
+                                this.color_picker.seed_from(c);
+                                let name = c.name();
+                                this.set_toast("🎨", format!("Colour {}", name));
+                            }
+                            this.request_repaint();
+                            return LRESULT(0);
+                        }
+                        if !this.toolbar.is_point_inside(x, y) {
+                            // Clicking away commits the colour and dismisses.
+                            let c = this.color_picker.current();
+                            this.apply_picked_color(c);
+                            this.color_picker.open = false;
+                            this.request_repaint();
+                            return LRESULT(0);
+                        }
+                    }
+
                     // If clicked on Fluent toolbar items, execute action without drawing
                     if this.toolbar.is_point_inside(x, y) {
                         if let Some(action) = this.toolbar.hit_test(x, y) {
                             return this.handle_fluent_action(action);
                         }
+                        return LRESULT(0);
+                    }
+
+                    let sw = this.logical_w();
+                    let sh = this.logical_h();
+
+                    // If clicked on Minimap, jump viewport center and start dragging
+                    if this.show_minimap
+                        && this.zoom.level > 1.05
+                        && (this.mode == AppMode::StaticZoom || this.mode == AppMode::Draw)
+                        && this.minimap.hit_test(sw, sh, x, y)
+                    {
+                        let target_canvas = this.minimap.minimap_pt_to_canvas_pt(sw, sh, x, y);
+                        this.zoom.center_on_canvas_point(target_canvas, sw, sh);
+                        this.minimap.is_dragging = true;
+                        let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(this.hwnd);
+                        this.request_repaint();
                         return LRESULT(0);
                     }
 
@@ -1795,8 +2258,8 @@ impl OverlayWindow {
 
                     // If in Timer mode, handle button clicks or clock face clicks or card dragging
                     if this.mode == AppMode::Timer {
-                        let sw = this.screen_width as f32;
-                        let sh = this.screen_height as f32;
+                        let sw = this.logical_w();
+                        let sh = this.logical_h();
                         if let Some(action) = this.timer_widget.get_action_at(screen_pt, sw, sh) {
                             match action {
                                 TimerAction::SetDuration(mins) => {
@@ -1827,15 +2290,13 @@ impl OverlayWindow {
                                     this.set_toast("⏱️", label);
                                 }
                                 TimerAction::AddMinute => {
-                                    this.timer_remaining += 60.0;
-                                    this.timer_seconds = this.timer_remaining.round() as u32;
-                                    let m = (this.timer_remaining.abs() / 60.0).floor() as u32;
+                                    this.adjust_timer(60.0);
+                                    let m = this.timer_total_mins();
                                     this.set_toast("⏱️", format!("Timer: +1m ({}m total)", m));
                                 }
                                 TimerAction::SubMinute => {
-                                    this.timer_remaining = (this.timer_remaining - 60.0).max(10.0);
-                                    this.timer_seconds = this.timer_remaining.round() as u32;
-                                    let m = (this.timer_remaining.abs() / 60.0).floor() as u32;
+                                    this.adjust_timer(-60.0);
+                                    let m = this.timer_total_mins();
                                     this.set_toast("⏱️", format!("Timer: -1m ({}m total)", m));
                                 }
                                 TimerAction::Reset => {
@@ -1898,8 +2359,8 @@ impl OverlayWindow {
                     if this.mode == AppMode::StaticZoom {
                         this.mode = AppMode::Draw;
                         this.toolbar.active_tool = Some(this.current_tool);
-                        let sw = this.screen_width as f32;
-                        let sh = this.screen_height as f32;
+                        let sw = this.logical_w();
+                        let sh = this.logical_h();
                         this.toolbar.update_layout(sw, sh);
                         this.set_toast("✏️", "Draw Mode (Drag to draw | Esc to exit)");
                     }
@@ -1958,8 +2419,8 @@ impl OverlayWindow {
                         });
                         this.step_counter += 1;
                         this.toolbar.badge_counter = this.step_counter;
-                        let sw = this.screen_width as f32;
-                        let sh = this.screen_height as f32;
+                        let sw = this.logical_w();
+                        let sh = this.logical_h();
                         this.toolbar.update_layout(sw, sh);
                         this.request_repaint();
                         return LRESULT(0);
@@ -2075,6 +2536,17 @@ impl OverlayWindow {
 
                 WM_LBUTTONUP => {
                     let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+                    if this.color_picker.dragging.take().is_some() {
+                        let c = this.color_picker.current();
+                        this.apply_picked_color(c);
+                        this.request_repaint();
+                        return LRESULT(0);
+                    }
+                    if this.minimap.is_dragging {
+                        this.minimap.is_dragging = false;
+                        return LRESULT(0);
+                    }
+
                     if this.toolbar.is_dragging {
                         this.toolbar.is_dragging = false;
                         return LRESULT(0);
@@ -2172,8 +2644,8 @@ impl OverlayWindow {
                     if this.mode == AppMode::Draw {
                         if this.zoom.level > 1.001 {
                             this.mode = AppMode::StaticZoom;
-                            let w = this.screen_width as f32;
-                            let h = this.screen_height as f32;
+                            let w = this.logical_w();
+                            let h = this.logical_h();
                             this.toolbar.update_layout(w, h);
                             this.set_toast(
                                 "🔎",
@@ -2194,8 +2666,9 @@ impl OverlayWindow {
                 WM_RBUTTONUP => LRESULT(0),
 
                 WM_MBUTTONDOWN => {
-                    let x = (lparam.0 & 0xFFFF) as i16 as f32;
-                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+                    // Mouse messages are physical pixels; everything below is DIPs.
+                    let x = this.px_to_dip((lparam.0 & 0xFFFF) as i16 as f32);
+                    let y = this.px_to_dip(((lparam.0 >> 16) & 0xFFFF) as i16 as f32);
                     this.zoom.is_dragging = true;
                     this.zoom.drag_start_mouse = Point2D::new(x, y);
                     this.zoom.drag_start_view = Point2D::new(this.zoom.view_x, this.zoom.view_y);
@@ -2224,11 +2697,9 @@ impl OverlayWindow {
                             );
                         } else {
                             let change = if delta > 0.0 { 60.0 } else { -60.0 };
-                            this.timer_remaining += change;
-                            this.timer_seconds = this.timer_remaining.abs().round() as u32;
-                            let abs_m = (this.timer_remaining.abs() / 60.0).floor() as u32;
-                            let sign = if this.timer_remaining < 0.0 { "-" } else { "" };
-                            this.set_toast("⏱️", format!("Timer: {}{}m", sign, abs_m));
+                            this.adjust_timer(change);
+                            let m = this.timer_total_mins();
+                            this.set_toast("⏱️", format!("Timer: {}m total", m));
                         }
                         this.request_repaint();
                         return LRESULT(0);
@@ -2282,8 +2753,8 @@ impl OverlayWindow {
                         }
                         this.stroke_width = new_width;
                         this.toolbar.stroke_width = new_width;
-                        let sw = this.screen_width as f32;
-                        let sh = this.screen_height as f32;
+                        let sw = this.logical_w();
+                        let sh = this.logical_h();
                         this.toolbar.update_layout(sw, sh);
                         let w_val = new_width.round() as u32;
                         if this.current_tool == DrawTool::Blur {
@@ -2303,10 +2774,13 @@ impl OverlayWindow {
                         let mut pt = POINT::default();
                         let sx = this.screen_x;
                         let sy = this.screen_y;
-                        let sw = this.screen_width as f32;
-                        let sh = this.screen_height as f32;
+                        let sw = this.logical_w();
+                        let sh = this.logical_h();
                         let (cursor_x, cursor_y) = if GetCursorPos(&mut pt).is_ok() {
-                            ((pt.x - sx) as f32, (pt.y - sy) as f32)
+                            (
+                                this.px_to_dip((pt.x - sx) as f32),
+                                this.px_to_dip((pt.y - sy) as f32),
+                            )
                         } else {
                             (sw / 2.0, sh / 2.0)
                         };
@@ -2336,10 +2810,13 @@ impl OverlayWindow {
                 WM_CHAR => {
                     let ch = char::from_u32(wparam.0 as u32).unwrap_or('\0');
                     if let Some(editor) = &mut this.text_editor {
-                        if ch == '\x08' || ch == '\x1b' || ch == '\x7f' {
-                            // Handled in WM_KEYDOWN
-                        } else if ch == '\r' || ch == '\n' {
-                            this.commit_text_editor();
+                        if ch == '\x08'
+                            || ch == '\x1b'
+                            || ch == '\x7f'
+                            || ch == '\r'
+                            || ch == '\n'
+                        {
+                            // Handled in WM_KEYDOWN (Enter inserts a newline there)
                         } else if !ch.is_control() {
                             editor.insert_char(ch);
                             this.request_repaint();
@@ -2358,8 +2835,8 @@ impl OverlayWindow {
                         let mut pt = POINT::default();
                         let current_screen_pt = if GetCursorPos(&mut pt).is_ok() {
                             Point2D::new(
-                                (pt.x - this.screen_x) as f32,
-                                (pt.y - this.screen_y) as f32,
+                                this.px_to_dip((pt.x - this.screen_x) as f32),
+                                this.px_to_dip((pt.y - this.screen_y) as f32),
                             )
                         } else {
                             this.last_mouse_pos
@@ -2390,11 +2867,16 @@ impl OverlayWindow {
                     // ── Text editor intercepts all keys first ──
                     if this.text_editor.is_some() {
                         if key == VK_ESCAPE.0 as i32 {
-                            this.text_editor = None;
-                            this.request_repaint();
+                            // Esc keeps what was typed; right-click discards.
+                            this.commit_text_editor();
                             return LRESULT(0);
                         } else if key == VK_RETURN.0 as i32 {
-                            this.commit_text_editor();
+                            if is_ctrl {
+                                this.commit_text_editor();
+                            } else if let Some(ed) = &mut this.text_editor {
+                                ed.insert_newline();
+                                this.request_repaint();
+                            }
                             return LRESULT(0);
                         } else if is_ctrl && key == 'B' as i32 {
                             this.text_is_bold = !this.text_is_bold;
@@ -2403,8 +2885,8 @@ impl OverlayWindow {
                             if let Some(ed) = &mut this.text_editor {
                                 ed.is_bold = bold;
                             }
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("𝐁", if bold { "Bold: On" } else { "Bold: Off" });
                             this.request_repaint();
@@ -2416,13 +2898,13 @@ impl OverlayWindow {
                             if let Some(ed) = &mut this.text_editor {
                                 ed.is_italic = italic;
                             }
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("𝐼", if italic { "Italic: On" } else { "Italic: Off" });
                             this.request_repaint();
                             return LRESULT(0);
-                        } else if key == VK_UP.0 as i32 {
+                        } else if is_ctrl && key == VK_UP.0 as i32 {
                             let new_sz = if let Some(ed) = &mut this.text_editor {
                                 ed.font_size = (ed.font_size + 4.0).min(96.0);
                                 ed.font_size
@@ -2431,12 +2913,12 @@ impl OverlayWindow {
                             };
                             this.font_size = new_sz;
                             this.toolbar.current_font_size = new_sz;
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.request_repaint();
                             return LRESULT(0);
-                        } else if key == VK_DOWN.0 as i32 {
+                        } else if is_ctrl && key == VK_DOWN.0 as i32 {
                             let new_sz = if let Some(ed) = &mut this.text_editor {
                                 ed.font_size = (ed.font_size - 4.0).max(12.0);
                                 ed.font_size
@@ -2445,8 +2927,8 @@ impl OverlayWindow {
                             };
                             this.font_size = new_sz;
                             this.toolbar.current_font_size = new_sz;
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.request_repaint();
                             return LRESULT(0);
@@ -2459,15 +2941,29 @@ impl OverlayWindow {
                                 editor.move_left();
                             } else if key == VK_RIGHT.0 as i32 {
                                 editor.move_right();
+                            } else if key == VK_UP.0 as i32 {
+                                editor.move_up();
+                            } else if key == VK_DOWN.0 as i32 {
+                                editor.move_down();
                             } else if key == VK_HOME.0 as i32 {
-                                editor.cursor = 0;
+                                if is_ctrl {
+                                    editor.cursor = 0;
+                                } else {
+                                    editor.move_line_start();
+                                }
                             } else if key == VK_END.0 as i32 {
-                                editor.cursor = editor.text.len();
+                                if is_ctrl {
+                                    editor.cursor = editor.text.len();
+                                } else {
+                                    editor.move_line_end();
+                                }
                             } else if is_ctrl
                                 && key == 'V' as i32
                                 && let Some(clip_text) = get_clipboard_text()
                             {
-                                editor.insert_str(&clip_text);
+                                // Normalise CRLF/CR so line splitting stays on '\n'.
+                                let normalised = clip_text.replace("\r\n", "\n").replace('\r', "\n");
+                                editor.insert_str(&normalised);
                             }
                             this.request_repaint();
                             return LRESULT(0);
@@ -2670,15 +3166,15 @@ impl OverlayWindow {
                                 if this.mode == AppMode::Draw {
                                     this.mode = AppMode::StaticZoom;
                                     this.toolbar.active_tool = None;
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
+                                    let sw = this.logical_w();
+                                    let sh = this.logical_h();
                                     this.toolbar.update_layout(sw, sh);
                                     this.set_toast("🔎", "Pan & Zoom Mode");
                                 } else if this.mode == AppMode::StaticZoom {
                                     this.mode = AppMode::Draw;
                                     this.toolbar.active_tool = None;
-                                    let sw = this.screen_width as f32;
-                                    let sh = this.screen_height as f32;
+                                    let sw = this.logical_w();
+                                    let sh = this.logical_h();
                                     this.toolbar.update_layout(sw, sh);
                                     this.set_toast("✏️", "Draw Mode");
                                 }
@@ -2710,8 +3206,8 @@ impl OverlayWindow {
                             if this.current_tool == DrawTool::StepBadge {
                                 this.step_counter = 1;
                                 this.toolbar.badge_counter = 1;
-                                let sw = this.screen_width as f32;
-                                let sh = this.screen_height as f32;
+                                let sw = this.logical_w();
+                                let sh = this.logical_h();
                                 this.toolbar.update_layout(sw, sh);
                                 this.set_toast("↺", "Step badge reset to #1");
                                 this.request_repaint();
@@ -2765,6 +3261,19 @@ impl OverlayWindow {
                             this.request_repaint();
                         }
 
+                        // ─── Minimap Radar Toggle ───
+                        k if k == 'M' as i32 => {
+                            this.show_minimap = !this.show_minimap;
+                            let status = if this.show_minimap {
+                                "Minimap Radar: Enabled"
+                            } else {
+                                "Minimap Radar: Disabled"
+                            };
+                            this.set_toast("🗺️", status);
+                            this.request_repaint();
+                            return LRESULT(0);
+                        }
+
                         // ─── Canvas Slate & Color Modes ───
                         k if k == 'W' as i32 && is_shift => {
                             this.ensure_draw_mode();
@@ -2809,8 +3318,8 @@ impl OverlayWindow {
                             this.current_tool = DrawTool::Text;
                             this.toolbar.active_tool = Some(DrawTool::Text);
                             this.sync_tool_to_toolbar();
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("🔤", "Text — click to type");
                             this.request_repaint();
@@ -2820,8 +3329,8 @@ impl OverlayWindow {
                             this.current_tool = DrawTool::Highlighter;
                             this.toolbar.active_tool = Some(DrawTool::Highlighter);
                             this.sync_tool_to_toolbar();
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("🖍️", "Highlighter");
                             this.request_repaint();
@@ -2831,8 +3340,8 @@ impl OverlayWindow {
                             this.current_tool = DrawTool::Line;
                             this.toolbar.active_tool = Some(DrawTool::Line);
                             this.sync_tool_to_toolbar();
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("📏", "Line");
                             this.request_repaint();
@@ -2842,8 +3351,8 @@ impl OverlayWindow {
                             this.current_tool = DrawTool::Arrow;
                             this.toolbar.active_tool = Some(DrawTool::Arrow);
                             this.sync_tool_to_toolbar();
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("➜", "Arrow");
                             this.request_repaint();
@@ -2853,8 +3362,8 @@ impl OverlayWindow {
                             this.current_tool = DrawTool::Rectangle;
                             this.toolbar.active_tool = Some(DrawTool::Rectangle);
                             this.sync_tool_to_toolbar();
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("▭", "Rectangle");
                             this.request_repaint();
@@ -2864,8 +3373,8 @@ impl OverlayWindow {
                             this.current_tool = DrawTool::RoundedRectangle;
                             this.toolbar.active_tool = Some(DrawTool::RoundedRectangle);
                             this.sync_tool_to_toolbar();
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("▢", "Rounded Rectangle");
                             this.request_repaint();
@@ -2875,8 +3384,8 @@ impl OverlayWindow {
                             this.current_tool = DrawTool::Ellipse;
                             this.toolbar.active_tool = Some(DrawTool::Ellipse);
                             this.sync_tool_to_toolbar();
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("⬭", "Ellipse");
                             this.request_repaint();
@@ -2898,8 +3407,8 @@ impl OverlayWindow {
                             }
                             this.fill_mode = new_fm;
                             this.toolbar.current_fill_mode = new_fm;
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             let nm = new_fm.name();
                             this.set_toast("🎨", format!("Fill Mode: {}", nm));
@@ -2924,8 +3433,8 @@ impl OverlayWindow {
                             }
                             this.stroke_pattern = new_sp;
                             this.toolbar.current_stroke_pattern = new_sp;
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             let nm = new_sp.name();
                             this.set_toast("✏️", format!("Pattern: {}", nm));
@@ -2935,8 +3444,8 @@ impl OverlayWindow {
                             this.ensure_draw_mode();
                             this.step_counter = 1;
                             this.toolbar.badge_counter = 1;
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("🔢", "Step badge counter reset to 1");
                             this.request_repaint();
@@ -2948,8 +3457,8 @@ impl OverlayWindow {
                             this.toolbar.active_tool = Some(DrawTool::StepBadge);
                             this.sync_tool_to_toolbar();
                             this.toolbar.badge_counter = this.step_counter;
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("🔢", format!("Step Badge (next: #{})", next_num));
                             this.request_repaint();
@@ -2959,8 +3468,8 @@ impl OverlayWindow {
                             this.current_tool = DrawTool::Pen;
                             this.toolbar.active_tool = Some(DrawTool::Pen);
                             this.sync_tool_to_toolbar();
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("✏️", "Pen");
                             this.request_repaint();
@@ -2970,8 +3479,8 @@ impl OverlayWindow {
                             this.current_tool = DrawTool::Blur;
                             this.toolbar.active_tool = Some(DrawTool::Blur);
                             this.sync_tool_to_toolbar();
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("░", "Redact / Blur (drag to hide)");
                             this.request_repaint();
@@ -2981,8 +3490,8 @@ impl OverlayWindow {
                             this.current_tool = DrawTool::Eraser;
                             this.toolbar.active_tool = Some(DrawTool::Eraser);
                             this.sync_tool_to_toolbar();
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("🧹", "Eraser (drag over strokes)");
                             this.request_repaint();
@@ -3014,8 +3523,8 @@ impl OverlayWindow {
                             }
                             this.stroke_width = w;
                             this.toolbar.stroke_width = w;
-                            let sw = this.screen_width as f32;
-                            let sh = this.screen_height as f32;
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("🖌️", format!("{} px", w as u32));
                             this.request_repaint();
@@ -3047,8 +3556,8 @@ impl OverlayWindow {
                                 this.badge_settings.size = new_bs;
                                 this.badge_size = new_bs;
                                 this.toolbar.current_badge_size = new_bs;
-                                let sw = this.screen_width as f32;
-                                let sh = this.screen_height as f32;
+                                let sw = this.logical_w();
+                                let sh = this.logical_h();
                                 this.toolbar.update_layout(sw, sh);
                                 let nm = new_bs.name();
                                 this.set_toast("🔢", format!("Badge Size: {}", nm));
@@ -3071,8 +3580,8 @@ impl OverlayWindow {
                                 }
                                 this.stroke_width = new_w;
                                 this.toolbar.stroke_width = new_w;
-                                let sw = this.screen_width as f32;
-                                let sh = this.screen_height as f32;
+                                let sw = this.logical_w();
+                                let sh = this.logical_h();
                                 this.toolbar.update_layout(sw, sh);
                                 this.set_toast("🖌️", format!("{} px", new_w.round() as u32));
                             }
@@ -3103,8 +3612,8 @@ impl OverlayWindow {
                                 this.badge_settings.size = new_bs;
                                 this.badge_size = new_bs;
                                 this.toolbar.current_badge_size = new_bs;
-                                let sw = this.screen_width as f32;
-                                let sh = this.screen_height as f32;
+                                let sw = this.logical_w();
+                                let sh = this.logical_h();
                                 this.toolbar.update_layout(sw, sh);
                                 let nm = new_bs.name();
                                 this.set_toast("🔢", format!("Badge Size: {}", nm));
@@ -3127,8 +3636,8 @@ impl OverlayWindow {
                                 }
                                 this.stroke_width = new_w;
                                 this.toolbar.stroke_width = new_w;
-                                let sw = this.screen_width as f32;
-                                let sh = this.screen_height as f32;
+                                let sw = this.logical_w();
+                                let sh = this.logical_h();
                                 this.toolbar.update_layout(sw, sh);
                                 this.set_toast("🖌️", format!("{} px", new_w.round() as u32));
                             }
@@ -3143,18 +3652,20 @@ impl OverlayWindow {
                                 this.loupe.magnification = new_lvl;
                                 this.set_toast("🔍", format!("Loupe Zoom {:.2}x", new_lvl));
                             } else if this.mode == AppMode::Timer {
-                                this.timer_remaining += 60.0;
-                                this.timer_seconds = this.timer_remaining.round() as u32;
-                                let m = (this.timer_remaining / 60.0).floor() as u32;
+                                this.adjust_timer(60.0);
+                                let m = this.timer_total_mins();
                                 this.set_toast("⏱️", format!("Timer: +1m ({}m total)", m));
                             } else if this.mode == AppMode::StaticZoom {
                                 let mut pt = POINT::default();
                                 let sx = this.screen_x;
                                 let sy = this.screen_y;
-                                let sw = this.screen_width as f32;
-                                let sh = this.screen_height as f32;
+                                let sw = this.logical_w();
+                                let sh = this.logical_h();
                                 let (cursor_x, cursor_y) = if GetCursorPos(&mut pt).is_ok() {
-                                    ((pt.x - sx) as f32, (pt.y - sy) as f32)
+                                    (
+                                this.px_to_dip((pt.x - sx) as f32),
+                                this.px_to_dip((pt.y - sy) as f32),
+                            )
                                 } else {
                                     (sw / 2.0, sh / 2.0)
                                 };
@@ -3180,18 +3691,20 @@ impl OverlayWindow {
                                 this.loupe.magnification = new_lvl;
                                 this.set_toast("🔍", format!("Loupe Zoom {:.2}x", new_lvl));
                             } else if this.mode == AppMode::Timer {
-                                this.timer_remaining = (this.timer_remaining - 60.0).max(10.0);
-                                this.timer_seconds = this.timer_remaining.round() as u32;
-                                let m = (this.timer_remaining / 60.0).floor() as u32;
+                                this.adjust_timer(-60.0);
+                                let m = this.timer_total_mins();
                                 this.set_toast("⏱️", format!("Timer: -1m ({}m total)", m));
                             } else if this.mode == AppMode::StaticZoom {
                                 let mut pt = POINT::default();
                                 let sx = this.screen_x;
                                 let sy = this.screen_y;
-                                let sw = this.screen_width as f32;
-                                let sh = this.screen_height as f32;
+                                let sw = this.logical_w();
+                                let sh = this.logical_h();
                                 let (cursor_x, cursor_y) = if GetCursorPos(&mut pt).is_ok() {
-                                    ((pt.x - sx) as f32, (pt.y - sy) as f32)
+                                    (
+                                this.px_to_dip((pt.x - sx) as f32),
+                                this.px_to_dip((pt.y - sy) as f32),
+                            )
                                 } else {
                                     (sw / 2.0, sh / 2.0)
                                 };
@@ -3223,8 +3736,8 @@ impl OverlayWindow {
                         let mut pt = POINT::default();
                         let current_screen_pt = if GetCursorPos(&mut pt).is_ok() {
                             Point2D::new(
-                                (pt.x - this.screen_x) as f32,
-                                (pt.y - this.screen_y) as f32,
+                                this.px_to_dip((pt.x - this.screen_x) as f32),
+                                this.px_to_dip((pt.y - this.screen_y) as f32),
                             )
                         } else {
                             this.last_mouse_pos

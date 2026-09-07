@@ -5,11 +5,12 @@ use crate::types::{
     StrokePattern, TextCardStyle, TextEditorState,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+    D2D_RECT_F, D2D_SIZE_F, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
     D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
     D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1RenderTarget,
 };
 use windows::Win32::Graphics::DirectWrite::{
@@ -44,7 +45,7 @@ impl D2DRenderer {
                     };
                     let col = color.to_d2d_color(alpha);
 
-                    if let Ok(brush) = rt.CreateSolidColorBrush(&col, None) {
+                    if let Some(brush) = self.solid_brush(rt, &col) {
                         if points.len() == 1 {
                             let dot = D2D1_ELLIPSE {
                                 point: v2(points[0].x, points[0].y),
@@ -90,7 +91,7 @@ impl D2DRenderer {
                     pattern,
                 } => {
                     let col = color.to_d2d_color(1.0);
-                    if let Ok(brush) = rt.CreateSolidColorBrush(&col, None) {
+                    if let Some(brush) = self.solid_brush(rt, &col) {
                         let p0 = v2(start.x, start.y);
                         let p1 = v2(end.x, end.y);
                         let stroke_style = self.get_stroke_style(*pattern);
@@ -107,7 +108,7 @@ impl D2DRenderer {
                     pattern,
                 } => {
                     let col = color.to_d2d_color(1.0);
-                    if let Ok(brush) = rt.CreateSolidColorBrush(&col, None) {
+                    if let Some(brush) = self.solid_brush(rt, &col) {
                         let p0 = v2(start.x, start.y);
                         let p1 = v2(end.x, end.y);
                         let stroke_style = self.get_stroke_style(*pattern);
@@ -194,7 +195,7 @@ impl D2DRenderer {
                     match fill {
                         FillMode::Tinted => {
                             let fill_col = color.to_d2d_color(0.22);
-                            if let Ok(fbrush) = rt.CreateSolidColorBrush(&fill_col, None) {
+                            if let Some(fbrush) = self.solid_brush(rt, &fill_col) {
                                 if *rounded {
                                     rt.FillRoundedRectangle(&rrect, &fbrush);
                                 } else {
@@ -204,7 +205,7 @@ impl D2DRenderer {
                         }
                         FillMode::Solid => {
                             let fill_col = color.to_d2d_color(1.0);
-                            if let Ok(fbrush) = rt.CreateSolidColorBrush(&fill_col, None) {
+                            if let Some(fbrush) = self.solid_brush(rt, &fill_col) {
                                 if *rounded {
                                     rt.FillRoundedRectangle(&rrect, &fbrush);
                                 } else {
@@ -217,7 +218,7 @@ impl D2DRenderer {
 
                     // Stroke border
                     let col = color.to_d2d_color(1.0);
-                    if let Ok(brush) = rt.CreateSolidColorBrush(&col, None) {
+                    if let Some(brush) = self.solid_brush(rt, &col) {
                         let stroke_style = self.get_stroke_style(*pattern);
                         if *rounded {
                             rt.DrawRoundedRectangle(&rrect, &brush, *width, Some(stroke_style));
@@ -250,13 +251,13 @@ impl D2DRenderer {
                     match fill {
                         FillMode::Tinted => {
                             let fill_col = color.to_d2d_color(0.22);
-                            if let Ok(fbrush) = rt.CreateSolidColorBrush(&fill_col, None) {
+                            if let Some(fbrush) = self.solid_brush(rt, &fill_col) {
                                 rt.FillEllipse(&ellipse, &fbrush);
                             }
                         }
                         FillMode::Solid => {
                             let fill_col = color.to_d2d_color(1.0);
-                            if let Ok(fbrush) = rt.CreateSolidColorBrush(&fill_col, None) {
+                            if let Some(fbrush) = self.solid_brush(rt, &fill_col) {
                                 rt.FillEllipse(&ellipse, &fbrush);
                             }
                         }
@@ -264,7 +265,7 @@ impl D2DRenderer {
                     }
 
                     let col = color.to_d2d_color(1.0);
-                    if let Ok(brush) = rt.CreateSolidColorBrush(&col, None) {
+                    if let Some(brush) = self.solid_brush(rt, &col) {
                         let stroke_style = self.get_stroke_style(*pattern);
                         rt.DrawEllipse(&ellipse, &brush, *width, Some(stroke_style));
                     }
@@ -285,8 +286,15 @@ impl D2DRenderer {
                     if let Ok(custom_format) =
                         self.get_custom_text_format(*font_size, *is_bold, *is_italic, *font_family)
                     {
-                        let layout_w = (text.len() as f32 * font_size * 0.70).max(30.0) + 16.0;
-                        let layout_h = font_size * 1.5 + 8.0;
+                        let (block_w, block_h) = self.measure_text_block(
+                            text,
+                            *font_size,
+                            *is_bold,
+                            *is_italic,
+                            *font_family,
+                        );
+                        let layout_w = block_w.max(30.0) + 16.0;
+                        let layout_h = block_h + 8.0;
 
                         let text_rect = D2D_RECT_F {
                             left: origin.x,
@@ -308,55 +316,43 @@ impl D2DRenderer {
 
                         match card_style {
                             TextCardStyle::Badge => {
-                                if let Ok(card_bg) = rt.CreateSolidColorBrush(
-                                    &D2D1_COLOR_F {
+                                if let Some(card_bg) = self.solid_brush(rt, &D2D1_COLOR_F {
                                         r: 0.08,
                                         g: 0.09,
                                         b: 0.12,
                                         a: 0.65,
-                                    },
-                                    None,
-                                ) {
+                                    }) {
                                     rt.FillRoundedRectangle(&card_rrect, &card_bg);
                                 }
-                                if let Ok(card_border) = rt.CreateSolidColorBrush(
-                                    &D2D1_COLOR_F {
+                                if let Some(card_border) = self.solid_brush(rt, &D2D1_COLOR_F {
                                         r: 1.0,
                                         g: 1.0,
                                         b: 1.0,
                                         a: 0.15,
-                                    },
-                                    None,
-                                ) {
+                                    }) {
                                     rt.DrawRoundedRectangle(&card_rrect, &card_border, 1.0, None);
                                 }
                             }
                             TextCardStyle::Solid => {
-                                if let Ok(card_bg) = rt.CreateSolidColorBrush(
-                                    &D2D1_COLOR_F {
+                                if let Some(card_bg) = self.solid_brush(rt, &D2D1_COLOR_F {
                                         r: 0.12,
                                         g: 0.13,
                                         b: 0.17,
                                         a: 0.96,
-                                    },
-                                    None,
-                                ) {
+                                    }) {
                                     rt.FillRoundedRectangle(&card_rrect, &card_bg);
                                 }
-                                if let Ok(card_border) = rt.CreateSolidColorBrush(&col, None) {
+                                if let Some(card_border) = self.solid_brush(rt, &col) {
                                     rt.DrawRoundedRectangle(&card_rrect, &card_border, 1.5, None);
                                 }
                             }
                             TextCardStyle::Transparent => {
-                                if let Ok(sh_brush) = rt.CreateSolidColorBrush(
-                                    &D2D1_COLOR_F {
+                                if let Some(sh_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
                                         r: 0.0,
                                         g: 0.0,
                                         b: 0.0,
                                         a: 0.70,
-                                    },
-                                    None,
-                                ) {
+                                    }) {
                                     let sh_rect = D2D_RECT_F {
                                         left: text_rect.left + 1.2,
                                         top: text_rect.top + 1.5,
@@ -375,7 +371,7 @@ impl D2DRenderer {
                             }
                         }
 
-                        if let Ok(brush) = rt.CreateSolidColorBrush(&col, None) {
+                        if let Some(brush) = self.solid_brush(rt, &col) {
                             rt.DrawText(
                                 &text_utf16,
                                 &custom_format,
@@ -400,15 +396,15 @@ impl D2DRenderer {
                 } => {
                     let col = color.to_d2d_color(1.0);
                     let border_w = stroke_width.max(1.0);
-                    let border_brush = rt.CreateSolidColorBrush(&col, None).ok();
+                    let border_brush = self.solid_brush(rt, &col);
 
                     let fill_brush = match fill {
                         FillMode::None => None,
                         FillMode::Tinted => {
                             let fill_col = color.to_d2d_color(0.30);
-                            rt.CreateSolidColorBrush(&fill_col, None).ok()
+                            self.solid_brush(rt, &fill_col)
                         }
-                        FillMode::Solid => rt.CreateSolidColorBrush(&col, None).ok(),
+                        FillMode::Solid => self.solid_brush(rt, &col),
                     };
 
                     let backplate_brush = if *fill == FillMode::Tinted {
@@ -418,7 +414,7 @@ impl D2DRenderer {
                             b: 0.14,
                             a: 0.70,
                         };
-                        rt.CreateSolidColorBrush(&bp_col, None).ok()
+                        self.solid_brush(rt, &bp_col)
                     } else {
                         None
                     };
@@ -540,7 +536,7 @@ impl D2DRenderer {
                             right: center.x + *radius,
                             bottom: center.y + *radius,
                         };
-                        if let Ok(tbrush) = rt.CreateSolidColorBrush(&text_col, None) {
+                        if let Some(tbrush) = self.solid_brush(rt, &text_col) {
                             rt.DrawText(&text_utf16, &custom_fmt, &text_rect, &tbrush, D2D1_DRAW_TEXT_OPTIONS_NONE, windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL);
                         }
                     }
@@ -559,50 +555,79 @@ impl D2DRenderer {
 
                     let b_size = block_size.clamp(4.0, 64.0);
 
-                    if let Some(bmp) = bg_bitmap {
-                        let mut by = t;
-                        while by < b {
-                            let bh = (b - by).min(b_size);
-                            let sample_y = (by + bh * 0.5).min(b - 1.0);
-                            let mut bx = l;
-                            while bx < r {
-                                let bw = (r - bx).min(b_size);
-                                let sample_x = (bx + bw * 0.5).min(r - 1.0);
+                    // Mosaic via downsample-then-upsample: shrink the region to one
+                    // texel per block (linear, so each texel averages its block),
+                    // then blow it back up with nearest-neighbour.
+                    //
+                    // This used to issue one DrawBitmap per block, so an 800x600
+                    // redaction at the minimum block size meant ~30,000 draw calls
+                    // *per frame*. It is now two.
+                    let mosaic = bg_bitmap.and_then(|bmp| {
+                        let cols = (w / b_size).ceil().max(1.0);
+                        let rows = (h / b_size).ceil().max(1.0);
+                        let small = D2D_SIZE_F {
+                            width: cols,
+                            height: rows,
+                        };
 
-                                let dst_block = D2D_RECT_F {
-                                    left: bx,
-                                    top: by,
-                                    right: bx + bw,
-                                    bottom: by + bh,
-                                };
-                                let src_pixel = D2D_RECT_F {
-                                    left: sample_x,
-                                    top: sample_y,
-                                    right: sample_x + 1.0,
-                                    bottom: sample_y + 1.0,
-                                };
+                        let tiny = rt
+                            .CreateCompatibleRenderTarget(
+                                Some(&small),
+                                None,
+                                None,
+                                D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+                            )
+                            .ok()?;
 
-                                rt.DrawBitmap(
-                                    bmp,
-                                    Some(&dst_block),
-                                    1.0,
-                                    D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
-                                    Some(&src_pixel),
-                                );
-
-                                bx += b_size;
-                            }
-                            by += b_size;
+                        tiny.BeginDraw();
+                        tiny.Clear(None);
+                        tiny.DrawBitmap(
+                            bmp,
+                            Some(&D2D_RECT_F {
+                                left: 0.0,
+                                top: 0.0,
+                                right: cols,
+                                bottom: rows,
+                            }),
+                            1.0,
+                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                            Some(&D2D_RECT_F {
+                                left: l,
+                                top: t,
+                                right: r,
+                                bottom: b,
+                            }),
+                        );
+                        if tiny.EndDraw(None, None).is_err() {
+                            return None;
                         }
-                    } else if let Ok(brush) = rt.CreateSolidColorBrush(
-                        &D2D1_COLOR_F {
+                        tiny.GetBitmap().ok().map(|bm| (bm, cols, rows))
+                    });
+
+                    if let Some((small_bmp, cols, rows)) = mosaic {
+                        rt.DrawBitmap(
+                            &small_bmp,
+                            Some(&D2D_RECT_F {
+                                left: l,
+                                top: t,
+                                right: r,
+                                bottom: b,
+                            }),
+                            1.0,
+                            D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                            Some(&D2D_RECT_F {
+                                left: 0.0,
+                                top: 0.0,
+                                right: cols,
+                                bottom: rows,
+                            }),
+                        );
+                    } else if let Some(brush) = self.solid_brush(rt, &D2D1_COLOR_F {
                             r: 0.1,
                             g: 0.1,
                             b: 0.1,
                             a: 0.85,
-                        },
-                        None,
-                    ) {
+                        }) {
                         let rect = D2D_RECT_F {
                             left: l,
                             top: t,
@@ -613,15 +638,12 @@ impl D2DRenderer {
                     }
 
                     // Subtle glass outline around the redacted region
-                    if let Ok(border_brush) = rt.CreateSolidColorBrush(
-                        &D2D1_COLOR_F {
+                    if let Some(border_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
                             r: 0.4,
                             g: 0.7,
                             b: 1.0,
                             a: 0.45,
-                        },
-                        None,
-                    ) {
+                        }) {
                         let border_rect = D2D_RECT_F {
                             left: l,
                             top: t,
@@ -648,8 +670,20 @@ impl D2DRenderer {
             let col = editor.color.to_d2d_color(1.0);
             let font_size = editor.font_size;
 
-            let estimated_w = (text.len() as f32 * font_size * 0.70).max(140.0) + 30.0;
-            let estimated_h = font_size * 1.6 + 14.0;
+            // Measure with the caret always present so the blink doesn't make
+            // the card pulse, and keep an input-field-sized floor.
+            let mut measured = text.to_string();
+            let caret_idx = cursor.min(measured.len());
+            measured.insert(caret_idx, '|');
+            let (block_w, block_h) = self.measure_text_block(
+                &measured,
+                font_size,
+                editor.is_bold,
+                editor.is_italic,
+                editor.font_family,
+            );
+            let estimated_w = block_w.max(140.0) + 30.0;
+            let estimated_h = block_h + 14.0;
             let rect = D2D_RECT_F {
                 left: origin.x - 8.0,
                 top: origin.y - 6.0,
@@ -665,72 +699,57 @@ impl D2DRenderer {
 
             match editor.card_style {
                 TextCardStyle::Badge => {
-                    if let Ok(bg_brush) = rt.CreateSolidColorBrush(
-                        &D2D1_COLOR_F {
+                    if let Some(bg_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
                             r: 0.08,
                             g: 0.09,
                             b: 0.12,
                             a: 0.65,
-                        },
-                        None,
-                    ) {
+                        }) {
                         rt.FillRoundedRectangle(&rrect, &bg_brush);
                     }
-                    if let Ok(border_brush) = rt.CreateSolidColorBrush(
-                        &D2D1_COLOR_F {
+                    if let Some(border_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
                             r: 0.38,
                             g: 0.72,
                             b: 0.98,
                             a: 0.85,
-                        },
-                        None,
-                    ) {
+                        }) {
                         rt.DrawRoundedRectangle(&rrect, &border_brush, 1.5, None);
                     }
                 }
                 TextCardStyle::Solid => {
-                    if let Ok(bg_brush) = rt.CreateSolidColorBrush(
-                        &D2D1_COLOR_F {
+                    if let Some(bg_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
                             r: 0.12,
                             g: 0.13,
                             b: 0.17,
                             a: 0.96,
-                        },
-                        None,
-                    ) {
+                        }) {
                         rt.FillRoundedRectangle(&rrect, &bg_brush);
                     }
-                    if let Ok(border_brush) = rt.CreateSolidColorBrush(&col, None) {
+                    if let Some(border_brush) = self.solid_brush(rt, &col) {
                         rt.DrawRoundedRectangle(&rrect, &border_brush, 1.5, None);
                     }
                 }
                 TextCardStyle::Transparent => {
-                    if let Ok(bg_brush) = rt.CreateSolidColorBrush(
-                        &D2D1_COLOR_F {
+                    if let Some(bg_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
                             r: 0.05,
                             g: 0.05,
                             b: 0.08,
                             a: 0.45,
-                        },
-                        None,
-                    ) {
+                        }) {
                         rt.FillRoundedRectangle(&rrect, &bg_brush);
                     }
-                    if let Ok(border_brush) = rt.CreateSolidColorBrush(
-                        &D2D1_COLOR_F {
+                    if let Some(border_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
                             r: 0.38,
                             g: 0.72,
                             b: 0.98,
                             a: 0.80,
-                        },
-                        None,
-                    ) {
+                        }) {
                         rt.DrawRoundedRectangle(&rrect, &border_brush, 1.0, None);
                     }
                 }
             }
 
-            if let Ok(brush) = rt.CreateSolidColorBrush(&col, None) {
+            if let Some(brush) = self.solid_brush(rt, &col) {
                 let display_text = if show_caret {
                     let mut s = text.to_string();
                     let safe_idx = cursor.min(s.len());
@@ -800,7 +819,7 @@ impl D2DRenderer {
                     b: rip_col.b,
                     a: alpha,
                 };
-                if let Ok(brush) = rt.CreateSolidColorBrush(&ring_col, None) {
+                if let Some(brush) = self.solid_brush(rt, &ring_col) {
                     let el = D2D1_ELLIPSE {
                         point: v2(ripple.center.x, ripple.center.y),
                         radiusX: radius,
@@ -823,7 +842,7 @@ impl D2DRenderer {
                         b: rip_col.b,
                         a: alpha2,
                     };
-                    if let Ok(brush2) = rt.CreateSolidColorBrush(&echo_col, None) {
+                    if let Some(brush2) = self.solid_brush(rt, &echo_col) {
                         let el2 = D2D1_ELLIPSE {
                             point: v2(ripple.center.x, ripple.center.y),
                             radiusX: radius2,
@@ -844,7 +863,7 @@ impl D2DRenderer {
                         b: 1.0,
                         a: flash_alpha,
                     };
-                    if let Ok(fbrush) = rt.CreateSolidColorBrush(&flash_col, None) {
+                    if let Some(fbrush) = self.solid_brush(rt, &flash_col) {
                         let fel = D2D1_ELLIPSE {
                             point: v2(ripple.center.x, ripple.center.y),
                             radiusX: flash_radius,
@@ -871,7 +890,7 @@ impl D2DRenderer {
                         b: base_col.b,
                         a: seg_alpha,
                     };
-                    if let Ok(brush) = rt.CreateSolidColorBrush(&seg_col, None) {
+                    if let Some(brush) = self.solid_brush(rt, &seg_col) {
                         rt.DrawLine(
                             v2(trail[i].pt.x, trail[i].pt.y),
                             v2(trail[i + 1].pt.x, trail[i + 1].pt.y),
@@ -892,7 +911,7 @@ impl D2DRenderer {
                     b: base_col.b,
                     a: 0.35,
                 };
-                if let Ok(brush) = rt.CreateSolidColorBrush(&halo_col, None) {
+                if let Some(brush) = self.solid_brush(rt, &halo_col) {
                     let el = D2D1_ELLIPSE {
                         point: v2(pos.x, pos.y),
                         radiusX: 14.0,
@@ -908,7 +927,7 @@ impl D2DRenderer {
                     b: base_col.b,
                     a: 0.90,
                 };
-                if let Ok(brush) = rt.CreateSolidColorBrush(&mid_col, None) {
+                if let Some(brush) = self.solid_brush(rt, &mid_col) {
                     let el = D2D1_ELLIPSE {
                         point: v2(pos.x, pos.y),
                         radiusX: 7.0,
@@ -924,7 +943,7 @@ impl D2DRenderer {
                     b: 1.0,
                     a: 1.0,
                 };
-                if let Ok(brush) = rt.CreateSolidColorBrush(&white_col, None) {
+                if let Some(brush) = self.solid_brush(rt, &white_col) {
                     let el = D2D1_ELLIPSE {
                         point: v2(pos.x, pos.y),
                         radiusX: 3.0,
@@ -955,10 +974,10 @@ impl D2DRenderer {
                 radiusX: 18.0,
                 radiusY: 18.0,
             };
-            if let Ok(fbrush) = rt.CreateSolidColorBrush(&fill_col, None) {
+            if let Some(fbrush) = self.solid_brush(rt, &fill_col) {
                 rt.FillEllipse(&el, &fbrush);
             }
-            if let Ok(rbrush) = rt.CreateSolidColorBrush(&ring_col, None) {
+            if let Some(rbrush) = self.solid_brush(rt, &ring_col) {
                 rt.DrawEllipse(&el, &rbrush, 1.5, None);
             }
         }
@@ -997,11 +1016,11 @@ impl D2DRenderer {
                 a: 1.0,
             };
 
-            let guide_brush = rt.CreateSolidColorBrush(&guide_col, None).ok();
-            let amber_brush = rt.CreateSolidColorBrush(&amber_col, None).ok();
-            let bg_brush = rt.CreateSolidColorBrush(&card_bg, None).ok();
-            let border_brush = rt.CreateSolidColorBrush(&card_border, None).ok();
-            let text_brush = rt.CreateSolidColorBrush(&text_col, None).ok();
+            let guide_brush = self.solid_brush(rt, &guide_col);
+            let amber_brush = self.solid_brush(rt, &amber_col);
+            let bg_brush = self.solid_brush(rt, &card_bg);
+            let border_brush = self.solid_brush(rt, &card_border);
+            let text_brush = self.solid_brush(rt, &text_col);
 
             match shape {
                 Shape::Line { start, end, .. } | Shape::Arrow { start, end, .. } => {

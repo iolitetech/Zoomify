@@ -21,6 +21,7 @@ pub const HOTKEY_SETTINGS: i32 = 111; // Ctrl+,
 pub struct HotkeyManager {
     hwnd: HWND,
     registered: Vec<i32>,
+    live_zoom_keys_active: bool,
 }
 
 impl HotkeyManager {
@@ -28,15 +29,20 @@ impl HotkeyManager {
         Self {
             hwnd,
             registered: Vec::new(),
+            live_zoom_keys_active: false,
         }
     }
 
-    pub fn register_all(&mut self) {
+    pub fn register_all(&mut self) -> Vec<&'static str> {
         let cfg = crate::config::AppConfig::load();
-        self.register_from_config(&cfg);
+        self.register_from_config(&cfg)
     }
 
-    pub fn register_from_config(&mut self, cfg: &crate::config::AppConfig) {
+    /// Returns the names of any actions whose hotkey could not be claimed -
+    /// almost always because another running app already owns that combo.
+    /// Silently dropping these leaves a shortcut that simply does nothing.
+    pub fn register_from_config(&mut self, cfg: &crate::config::AppConfig) -> Vec<&'static str> {
+        let mut failed = Vec::new();
         unsafe {
             let register = |hwnd: HWND, id: i32, hk: &crate::config::HotkeyBinding| -> bool {
                 let flags = windows::Win32::UI::Input::KeyboardAndMouse::HOT_KEY_MODIFIERS(
@@ -48,96 +54,106 @@ impl HotkeyManager {
             // 1. Static Zoom
             if register(self.hwnd, HOTKEY_STATIC_ZOOM, &cfg.hotkey_static_zoom) {
                 self.registered.push(HOTKEY_STATIC_ZOOM);
+            } else {
+                failed.push("Static Zoom");
             }
 
             // 2. Draw Mode
             if register(self.hwnd, HOTKEY_DRAW, &cfg.hotkey_draw) {
                 self.registered.push(HOTKEY_DRAW);
+            } else {
+                failed.push("Draw Mode");
             }
 
             // 3. Spotlight
             if register(self.hwnd, HOTKEY_SPOTLIGHT, &cfg.hotkey_spotlight) {
                 self.registered.push(HOTKEY_SPOTLIGHT);
+            } else {
+                failed.push("Spotlight");
             }
 
             // 4. Live Zoom
             if register(self.hwnd, HOTKEY_LIVE_ZOOM, &cfg.hotkey_live_zoom) {
                 self.registered.push(HOTKEY_LIVE_ZOOM);
+            } else {
+                failed.push("Live Zoom");
             }
 
             // 5. Timer
             if register(self.hwnd, HOTKEY_TIMER, &cfg.hotkey_timer) {
                 self.registered.push(HOTKEY_TIMER);
+            } else {
+                failed.push("Timer");
             }
 
             // 6. Loupe Magnifier
             if register(self.hwnd, HOTKEY_LOUPE, &cfg.hotkey_loupe) {
                 self.registered.push(HOTKEY_LOUPE);
-            }
-
-            // Live Zoom secondary keys
-            let ctrl_norepeat = MOD_CONTROL | MOD_NOREPEAT;
-            if RegisterHotKey(
-                Some(self.hwnd),
-                HOTKEY_LIVE_ZOOM_IN,
-                ctrl_norepeat,
-                VK_UP.0 as u32,
-            )
-            .is_ok()
-            {
-                self.registered.push(HOTKEY_LIVE_ZOOM_IN);
-            }
-
-            if RegisterHotKey(
-                Some(self.hwnd),
-                HOTKEY_LIVE_ZOOM_OUT,
-                ctrl_norepeat,
-                VK_DOWN.0 as u32,
-            )
-            .is_ok()
-            {
-                self.registered.push(HOTKEY_LIVE_ZOOM_OUT);
-            }
-
-            if RegisterHotKey(
-                Some(self.hwnd),
-                HOTKEY_LIVE_ZOOM_IN_PLUS,
-                ctrl_norepeat,
-                VK_OEM_PLUS.0 as u32,
-            )
-            .is_ok()
-            {
-                self.registered.push(HOTKEY_LIVE_ZOOM_IN_PLUS);
-            }
-
-            if RegisterHotKey(
-                Some(self.hwnd),
-                HOTKEY_LIVE_ZOOM_OUT_MINUS,
-                ctrl_norepeat,
-                VK_OEM_MINUS.0 as u32,
-            )
-            .is_ok()
-            {
-                self.registered.push(HOTKEY_LIVE_ZOOM_OUT_MINUS);
+            } else {
+                failed.push("Loupe");
             }
 
             // 7. Settings Window (Ctrl+,)
             if RegisterHotKey(
                 Some(self.hwnd),
                 HOTKEY_SETTINGS,
-                ctrl_norepeat,
+                MOD_CONTROL | MOD_NOREPEAT,
                 VK_OEM_COMMA.0 as u32,
             )
             .is_ok()
             {
                 self.registered.push(HOTKEY_SETTINGS);
+            } else {
+                failed.push("Settings");
+            }
+        }
+        failed
+    }
+
+    /// Zoom-adjust keys (Ctrl+Up/Down/+/-) are only claimed while Live Zoom is
+    /// running. Registering them globally would steal browser zoom and
+    /// paragraph navigation from every other app for the life of the process.
+    pub fn set_live_zoom_hotkeys(&mut self, active: bool) {
+        if active == self.live_zoom_keys_active {
+            return;
+        }
+        self.live_zoom_keys_active = active;
+
+        const LIVE_ZOOM_KEYS: [(i32, u16); 4] = [
+            (HOTKEY_LIVE_ZOOM_IN, VK_UP.0),
+            (HOTKEY_LIVE_ZOOM_OUT, VK_DOWN.0),
+            (HOTKEY_LIVE_ZOOM_IN_PLUS, VK_OEM_PLUS.0),
+            (HOTKEY_LIVE_ZOOM_OUT_MINUS, VK_OEM_MINUS.0),
+        ];
+
+        unsafe {
+            for (id, vk) in LIVE_ZOOM_KEYS {
+                if active {
+                    if RegisterHotKey(
+                        Some(self.hwnd),
+                        id,
+                        MOD_CONTROL | MOD_NOREPEAT,
+                        vk as u32,
+                    )
+                    .is_ok()
+                    {
+                        self.registered.push(id);
+                    }
+                } else {
+                    let _ = UnregisterHotKey(Some(self.hwnd), id);
+                    self.registered.retain(|&r| r != id);
+                }
             }
         }
     }
 
-    pub fn reload_from_config(&mut self, cfg: &crate::config::AppConfig) {
+    pub fn reload_from_config(&mut self, cfg: &crate::config::AppConfig) -> Vec<&'static str> {
+        let live_zoom_was_active = self.live_zoom_keys_active;
         self.unregister_all();
-        self.register_from_config(cfg);
+        let failed = self.register_from_config(cfg);
+        // Preserve the Live Zoom keys across a settings reload if a session is running.
+        self.set_live_zoom_hotkeys(live_zoom_was_active);
+        failed
     }
 
     pub fn unregister_all(&mut self) {
@@ -147,6 +163,7 @@ impl HotkeyManager {
             }
         }
         self.registered.clear();
+        self.live_zoom_keys_active = false;
     }
 }
 

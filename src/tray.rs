@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
     DeleteObject, GetDC, RGBQUAD, ReleaseDC,
@@ -13,7 +13,8 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
     HICON, ICONINFO, IDI_APPLICATION, LoadIconW, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    SetForegroundWindow, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TrackPopupMenuEx,
+    PostMessageW, RegisterWindowMessageW, SetForegroundWindow, TPM_LEFTALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_COMMAND, WM_NULL,
 };
 use windows::core::{PCWSTR, s, w};
 
@@ -58,6 +59,10 @@ pub struct TrayIcon {
     hwnd: HWND,
     hicon: HICON,
     nid: NOTIFYICONDATAW,
+    /// Broadcast by Explorer when the taskbar is recreated (after an Explorer
+    /// crash/restart). The icon is dropped on the floor at that point and must
+    /// be re-added, or the app becomes unreachable from the tray for good.
+    taskbar_created_msg: u32,
 }
 
 impl TrayIcon {
@@ -83,11 +88,34 @@ impl TrayIcon {
             ..Default::default()
         };
 
-        unsafe {
+        let taskbar_created_msg = unsafe {
             let _ = Shell_NotifyIconW(NIM_ADD, &nid);
-        }
+            RegisterWindowMessageW(w!("TaskbarCreated"))
+        };
 
-        Self { hwnd, hicon, nid }
+        Self {
+            hwnd,
+            hicon,
+            nid,
+            taskbar_created_msg,
+        }
+    }
+
+    /// Message id to compare against in the host window proc. Zero means
+    /// registration failed, and must never match a real message.
+    pub fn taskbar_created_msg(&self) -> u32 {
+        self.taskbar_created_msg
+    }
+
+    /// Re-add the icon after Explorer restarts.
+    pub fn re_add(&mut self) {
+        // Drop any pending balloon payload so a stale notification is not replayed.
+        self.nid.uFlags &= !NIF_INFO;
+        unsafe {
+            // Remove first in case a stale entry survived, then re-add.
+            let _ = Shell_NotifyIconW(NIM_DELETE, &self.nid);
+            let _ = Shell_NotifyIconW(NIM_ADD, &self.nid);
+        }
     }
 
     pub fn show_balloon(&mut self, title: &str, message: &str) {
@@ -108,6 +136,8 @@ impl TrayIcon {
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &self.nid);
         }
+        // One-shot: leaving NIF_INFO set would replay the balloon on any later update.
+        self.nid.uFlags &= !NIF_INFO;
     }
 
     pub fn show_menu(&self) {
@@ -214,15 +244,36 @@ impl TrayIcon {
             let _ = GetCursorPos(&mut pt);
 
             let _ = SetForegroundWindow(self.hwnd);
-            let _ = TrackPopupMenuEx(
+
+            // TPM_RETURNCMD | TPM_NONOTIFY makes the menu hand the chosen id back
+            // instead of dispatching WM_COMMAND from inside this call. Dispatching
+            // would re-enter the host window proc while its `&mut AppContext` is
+            // still live, aliasing a mutable reference.
+            let selected = TrackPopupMenuEx(
                 menu,
-                (TPM_LEFTALIGN | TPM_RIGHTBUTTON).0,
+                (TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY).0,
                 pt.x,
                 pt.y,
                 self.hwnd,
                 None,
-            );
+            )
+            .0;
+
             let _ = DestroyMenu(menu);
+
+            // Documented workaround so the menu dismisses properly on click-away.
+            let _ = PostMessageW(Some(self.hwnd), WM_NULL, WPARAM(0), LPARAM(0));
+
+            if selected != 0 {
+                // Posted, not sent: handled on a later, re-entrancy-free turn of
+                // the message loop.
+                let _ = PostMessageW(
+                    Some(self.hwnd),
+                    WM_COMMAND,
+                    WPARAM(selected as usize),
+                    LPARAM(0),
+                );
+            }
         }
     }
 

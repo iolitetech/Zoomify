@@ -18,6 +18,13 @@ impl HotkeyBinding {
         Self { modifiers, vk_code }
     }
 
+    /// A global hotkey with no modifier swallows that bare key across the whole
+    /// desktop - binding plain "A" would break typing everywhere, with no way
+    /// back except hand-editing config.json.
+    pub fn has_modifier(&self) -> bool {
+        (self.modifiers & 0x000F) != 0
+    }
+
     pub fn format_display(&self) -> String {
         let mut parts = Vec::new();
         if (self.modifiers & 0x0002) != 0 {
@@ -67,8 +74,35 @@ impl HotkeyBinding {
     }
 }
 
+/// The combo that opens the Settings window; not available for rebinding.
+pub const RESERVED_SETTINGS_HOTKEY: HotkeyBinding = HotkeyBinding::new(0x0002, 0xBC);
+
+/// Index of an existing binding that `candidate` would collide with, ignoring
+/// `slot` itself. A duplicate is worth catching up front: the OS accepts the
+/// first `RegisterHotKey` and fails the second, so the loser becomes a shortcut
+/// that silently does nothing.
+pub fn conflicting_slot(
+    bindings: &[&HotkeyBinding],
+    slot: usize,
+    candidate: &HotkeyBinding,
+) -> Option<usize> {
+    bindings
+        .iter()
+        .enumerate()
+        .find(|(i, b)| *i != slot && **b == candidate)
+        .map(|(i, _)| i)
+}
+
 fn default_timer_sound() -> bool {
     true
+}
+
+fn default_show_minimap() -> bool {
+    true
+}
+
+fn default_recent_colors() -> Vec<String> {
+    Vec::new()
 }
 
 fn default_hk_static_zoom() -> HotkeyBinding {
@@ -113,6 +147,11 @@ pub struct AppConfig {
     pub start_with_windows: bool,
     #[serde(default = "default_timer_sound")]
     pub timer_sound_enabled: bool,
+    #[serde(default = "default_show_minimap")]
+    pub show_minimap: bool,
+    /// Custom colours picked in the overlay, newest first, as `#RRGGBB`.
+    #[serde(default = "default_recent_colors")]
+    pub recent_custom_colors: Vec<String>,
     #[serde(default = "default_hk_static_zoom")]
     pub hotkey_static_zoom: HotkeyBinding,
     #[serde(default = "default_hk_draw")]
@@ -144,6 +183,8 @@ impl Default for AppConfig {
             default_badge_size: "Medium".to_string(),
             start_with_windows: false,
             timer_sound_enabled: true,
+            show_minimap: true,
+            recent_custom_colors: Vec::new(),
             hotkey_static_zoom: default_hk_static_zoom(),
             hotkey_draw: default_hk_draw(),
             hotkey_spotlight: default_hk_spotlight(),
@@ -155,6 +196,12 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// Parse a stored colour (preset name or `#RRGGBB`), falling back to Red.
+    pub fn parse_color(s: &str) -> crate::types::ColorPreset {
+        crate::types::ColorPreset::from_config_str(s)
+            .unwrap_or(crate::types::ColorPreset::Red)
+    }
+
     pub fn config_path() -> Option<PathBuf> {
         if let Ok(appdata) = std::env::var("APPDATA") {
             let mut dir = PathBuf::from(appdata);
@@ -168,14 +215,29 @@ impl AppConfig {
     }
 
     pub fn load() -> Self {
-        let mut cfg = if let Some(path) = Self::config_path()
+        let mut cfg = Self::default();
+
+        if let Some(path) = Self::config_path()
             && let Ok(data) = fs::read_to_string(&path)
-            && let Ok(loaded) = serde_json::from_str::<Self>(&data)
         {
-            loaded
-        } else {
-            Self::default()
-        };
+            // Notepad - which both "Open Config File" buttons launch - can save
+            // UTF-8 with a BOM, and serde_json rejects the leading U+FEFF. Without
+            // stripping it, hand-editing the config silently resets every setting.
+            let text = data.strip_prefix('\u{feff}').unwrap_or(&data);
+
+            match serde_json::from_str::<Self>(text) {
+                Ok(loaded) => cfg = loaded,
+                Err(e) => {
+                    // Keep the unparseable file instead of quietly overwriting it
+                    // on the next save, so the user can recover their settings.
+                    let backup = path.with_extension("json.bad");
+                    let _ = fs::write(
+                        &backup,
+                        format!("// Failed to parse: {}\n{}", e, data),
+                    );
+                }
+            }
+        }
 
         // Sync start_with_windows from actual registry state
         cfg.start_with_windows = Self::is_registered_for_startup();
@@ -183,11 +245,21 @@ impl AppConfig {
     }
 
     pub fn save(&self) {
-        let _ = Self::set_startup_registration(self.start_with_windows);
+        // save() runs on every overlay exit. Touching the registry and rewriting
+        // the file each time is needless I/O, so do both only on real changes.
+        if self.start_with_windows != Self::is_registered_for_startup() {
+            let _ = Self::set_startup_registration(self.start_with_windows);
+        }
+
         if let Some(path) = Self::config_path()
             && let Ok(json) = serde_json::to_string_pretty(self)
         {
-            let _ = fs::write(&path, json);
+            let unchanged = fs::read_to_string(&path)
+                .map(|existing| existing.strip_prefix('\u{feff}').unwrap_or(&existing) == json)
+                .unwrap_or(false);
+            if !unchanged {
+                let _ = fs::write(&path, json);
+            }
         }
     }
 
@@ -265,6 +337,7 @@ mod tests {
         assert_eq!(cfg.toolbar_custom_position, None);
         assert!(!cfg.start_with_windows);
         assert!(cfg.timer_sound_enabled);
+        assert!(cfg.show_minimap);
         assert_eq!(cfg.hotkey_static_zoom.format_display(), "Ctrl + 1");
         assert_eq!(cfg.hotkey_draw.format_display(), "Ctrl + 2");
         assert_eq!(cfg.hotkey_spotlight.format_display(), "Ctrl + 3");
@@ -277,6 +350,81 @@ mod tests {
         assert_eq!(restored.default_zoom_level, 2.0);
         assert_eq!(restored.spotlight_radius, 180.0);
         assert_eq!(restored.hotkey_static_zoom, cfg.hotkey_static_zoom);
+    }
+
+    #[test]
+    fn test_config_parses_with_utf8_bom() {
+        // Notepad saves UTF-8 with a BOM; serde_json rejects the leading U+FEFF.
+        // Unhandled, that silently resets every setting the user had.
+        let cfg = AppConfig {
+            spotlight_radius: 333.0,
+            default_color: "Cyan".to_string(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&cfg).expect("serialize");
+        let with_bom = format!("\u{feff}{}", json);
+
+        // Raw parse fails, which is the trap.
+        assert!(serde_json::from_str::<AppConfig>(&with_bom).is_err());
+
+        // The loader's strip makes it round-trip cleanly.
+        let stripped = with_bom.strip_prefix('\u{feff}').unwrap_or(&with_bom);
+        let restored: AppConfig = serde_json::from_str(stripped).expect("parse after BOM strip");
+        assert_eq!(restored.spotlight_radius, 333.0);
+        assert_eq!(restored.default_color, "Cyan");
+    }
+
+    #[test]
+    fn test_hotkey_requires_modifier() {
+        // A bare key registered globally would swallow it desktop-wide.
+        assert!(!HotkeyBinding::new(0x0000, 'A' as u32).has_modifier());
+        assert!(HotkeyBinding::new(0x0002, 'A' as u32).has_modifier()); // Ctrl
+        assert!(HotkeyBinding::new(0x0001, 'A' as u32).has_modifier()); // Alt
+        assert!(HotkeyBinding::new(0x0004, 'A' as u32).has_modifier()); // Shift
+        assert!(HotkeyBinding::new(0x0008, 'A' as u32).has_modifier()); // Win
+
+        // MOD_NOREPEAT (0x4000) alone is not a modifier key.
+        assert!(!HotkeyBinding::new(0x4000, 'A' as u32).has_modifier());
+    }
+
+    #[test]
+    fn test_hotkey_conflict_detection() {
+        let cfg = AppConfig::default();
+        let bindings = [
+            &cfg.hotkey_static_zoom,
+            &cfg.hotkey_draw,
+            &cfg.hotkey_spotlight,
+            &cfg.hotkey_live_zoom,
+            &cfg.hotkey_timer,
+            &cfg.hotkey_loupe,
+        ];
+
+        // Ctrl+2 already belongs to Draw Mode (slot 1).
+        let dup = HotkeyBinding::new(0x0002, '2' as u32);
+        assert_eq!(conflicting_slot(&bindings, 0, &dup), Some(1));
+
+        // Re-assigning a slot to the combo it already holds is not a conflict.
+        assert_eq!(conflicting_slot(&bindings, 1, &dup), None);
+
+        // An unused combo is free.
+        let fresh = HotkeyBinding::new(0x0002 | 0x0004, 'J' as u32);
+        assert_eq!(conflicting_slot(&bindings, 0, &fresh), None);
+
+        // The defaults must not collide with each other.
+        for i in 0..bindings.len() {
+            assert_eq!(
+                conflicting_slot(&bindings, i, bindings[i]),
+                None,
+                "default hotkeys collide at slot {}",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_settings_hotkey_is_reserved() {
+        // Ctrl+, opens Settings and is registered unconditionally.
+        assert_eq!(RESERVED_SETTINGS_HOTKEY.format_display(), "Ctrl + ,");
     }
 
     #[test]
