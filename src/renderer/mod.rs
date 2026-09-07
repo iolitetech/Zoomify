@@ -700,7 +700,8 @@ impl D2DRenderer {
                         && let Some(owner) = shapes.iter().find(|o| o.id == cid)
                     {
                         let bounds = crate::shapes::shape_bounds(&owner.shape);
-                        self.render_contained_text(rt, &a.shape, bounds);
+                        let rides = crate::shapes::label_rides_on_shape(&owner.shape);
+                        self.render_contained_text(rt, &a.shape, bounds, rides);
                     }
                 }
 
@@ -1075,7 +1076,8 @@ impl D2DRenderer {
                                 && let Some(owner) = shapes.iter().find(|o| o.id == cid)
                             {
                                 let bounds = crate::shapes::shape_bounds(&owner.shape);
-                                self.render_contained_text(&dc_rt, &a.shape, bounds);
+                                let rides = crate::shapes::label_rides_on_shape(&owner.shape);
+                                self.render_contained_text(&dc_rt, &a.shape, bounds, rides);
                             }
                         }
 

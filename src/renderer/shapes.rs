@@ -702,6 +702,9 @@ impl D2DRenderer {
         rt: &ID2D1RenderTarget,
         shape: &Shape,
         container: (f32, f32, f32, f32),
+        // A label on a line needs a chip behind it, or the line strikes
+        // straight through the words.
+        rides_on: bool,
     ) {
         unsafe {
             let Shape::Text {
@@ -721,10 +724,35 @@ impl D2DRenderer {
             }
 
             let pad = TextEditorState::CONTAINER_PADDING;
-            let wrap = ((container.2 - container.0) - pad * 2.0).max(24.0);
+            let wrap = if rides_on {
+                f32::MAX
+            } else {
+                ((container.2 - container.0) - pad * 2.0).max(24.0)
+            };
             let (w, h) =
                 self.measure_text_block(text, *font_size, *is_bold, *is_italic, *font_family, wrap);
             let origin = contained_text_origin(container, w, h);
+
+            if rides_on
+                && let Some(chip) = self.solid_brush(rt, &D2D1_COLOR_F {
+                    r: 0.10,
+                    g: 0.11,
+                    b: 0.14,
+                    a: 0.88,
+                })
+            {
+                let chip_rect = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: origin.x - 6.0,
+                        top: origin.y - 3.0,
+                        right: origin.x + w + 6.0,
+                        bottom: origin.y + h + 3.0,
+                    },
+                    radiusX: 4.0,
+                    radiusY: 4.0,
+                };
+                rt.FillRoundedRectangle(&chip_rect, &chip);
+            }
 
             let Ok(format) =
                 self.get_custom_text_format(*font_size, *is_bold, *is_italic, *font_family)
@@ -1004,6 +1032,30 @@ impl D2DRenderer {
                 radiusX: 6.0,
                 radiusY: 6.0,
             };
+
+            // A label being typed onto a line needs the same chip the committed
+            // one gets, or the line strikes through the words while editing.
+            if editor.container_bounds.is_some()
+                && !editor.container_wraps
+                && let Some(chip) = self.solid_brush(rt, &D2D1_COLOR_F {
+                    r: 0.10,
+                    g: 0.11,
+                    b: 0.14,
+                    a: 0.88,
+                })
+            {
+                let chip_rect = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: origin.x - 6.0,
+                        top: origin.y - 3.0,
+                        right: origin.x + estimated_w + 6.0,
+                        bottom: origin.y + estimated_h + 3.0,
+                    },
+                    radiusX: 4.0,
+                    radiusY: 4.0,
+                };
+                rt.FillRoundedRectangle(&chip_rect, &chip);
+            }
 
             if editor.container_bounds.is_none() {
             match editor.card_style {

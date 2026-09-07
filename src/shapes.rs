@@ -312,6 +312,90 @@ pub fn recognize_smart_shape(
     None
 }
 
+// Alignment
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignTo {
+    Left,
+    HCentre,
+    Right,
+    Top,
+    VCentre,
+    Bottom,
+}
+
+/// How far each box has to move to line up with the others.
+///
+/// Alignment is to the outer extent of the group, which is what people mean by
+/// "align left": everything goes to the leftmost edge, not to the average.
+/// Returns one delta per input, in the same order.
+pub fn align_offsets(boxes: &[(f32, f32, f32, f32)], to: AlignTo) -> Vec<(f32, f32)> {
+    if boxes.len() < 2 {
+        return vec![(0.0, 0.0); boxes.len()];
+    }
+    let l = boxes.iter().fold(f32::MAX, |a, b| a.min(b.0));
+    let t = boxes.iter().fold(f32::MAX, |a, b| a.min(b.1));
+    let r = boxes.iter().fold(f32::MIN, |a, b| a.max(b.2));
+    let bo = boxes.iter().fold(f32::MIN, |a, b| a.max(b.3));
+    let cx = (l + r) * 0.5;
+    let cy = (t + bo) * 0.5;
+
+    boxes
+        .iter()
+        .map(|b| match to {
+            AlignTo::Left => (l - b.0, 0.0),
+            AlignTo::Right => (r - b.2, 0.0),
+            AlignTo::HCentre => (cx - (b.0 + b.2) * 0.5, 0.0),
+            AlignTo::Top => (0.0, t - b.1),
+            AlignTo::Bottom => (0.0, bo - b.3),
+            AlignTo::VCentre => (0.0, cy - (b.1 + b.3) * 0.5),
+        })
+        .collect()
+}
+
+/// How far each box has to move for even gaps between them.
+///
+/// The outermost two stay put — they define the span — and everything between
+/// is spread so the *gaps* are equal, which looks right even when the shapes
+/// are different sizes. Spacing centres instead would bunch wide ones together.
+pub fn distribute_offsets(boxes: &[(f32, f32, f32, f32)], horizontal: bool) -> Vec<(f32, f32)> {
+    let n = boxes.len();
+    if n < 3 {
+        return vec![(0.0, 0.0); n];
+    }
+    let key = |b: &(f32, f32, f32, f32)| if horizontal { b.0 } else { b.1 };
+    let size = |b: &(f32, f32, f32, f32)| {
+        if horizontal {
+            b.2 - b.0
+        } else {
+            b.3 - b.1
+        }
+    };
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|a, b| key(&boxes[*a]).partial_cmp(&key(&boxes[*b])).unwrap());
+
+    let first = &boxes[order[0]];
+    let last = &boxes[order[n - 1]];
+    let span = if horizontal {
+        last.2 - first.0
+    } else {
+        last.3 - first.1
+    };
+    let total: f32 = order.iter().map(|i| size(&boxes[*i])).sum();
+    let gap = (span - total) / (n as f32 - 1.0);
+
+    let mut out = vec![(0.0, 0.0); n];
+    let mut cursor = key(first) + size(first) + gap;
+    for i in order.iter().take(n - 1).skip(1) {
+        let b = &boxes[*i];
+        let delta = cursor - key(b);
+        out[*i] = if horizontal { (delta, 0.0) } else { (0.0, delta) };
+        cursor += size(b) + gap;
+    }
+    out
+}
+
 // ─────────────────────── Arrow proportions ───────────────────────
 //
 // The head has to stay recognisably wider than the shaft at every stroke
@@ -501,8 +585,22 @@ pub fn with_arrow_ends(shape: &Shape, start: Point2D, end: Point2D) -> Shape {
 pub fn can_contain_text(shape: &Shape) -> bool {
     matches!(
         shape,
-        Shape::Rectangle { .. } | Shape::Ellipse { .. } | Shape::StepBadge { .. }
+        Shape::Rectangle { .. }
+            | Shape::Ellipse { .. }
+            | Shape::StepBadge { .. }
+            | Shape::Line { .. }
+            | Shape::Arrow { .. }
     )
+}
+
+/// Whether a label on this shape sits *on* it rather than *inside* it.
+///
+/// A line has no interior, so its label straddles the midpoint and needs a
+/// chip behind it or the line strikes straight through the words. It also
+/// cannot grow to fit, and wrapping it to the bounding box would squeeze a
+/// near-vertical arrow's label into a column one character wide.
+pub fn label_rides_on_shape(shape: &Shape) -> bool {
+    matches!(shape, Shape::Line { .. } | Shape::Arrow { .. })
 }
 
 /// Where a label of the given size sits inside its container: centred on both
@@ -1178,6 +1276,76 @@ mod tests {
     }
 
     #[test]
+    fn test_align_moves_everything_to_the_outer_edge() {
+        let boxes = [(10.0, 0.0, 40.0, 20.0), (100.0, 50.0, 160.0, 90.0)];
+        // "Align left" means the leftmost edge, not the average of the two.
+        let off = align_offsets(&boxes, AlignTo::Left);
+        assert_eq!(off[0], (0.0, 0.0));
+        assert_eq!(off[1], (-90.0, 0.0));
+        // Right goes the other way, to the rightmost edge.
+        let off = align_offsets(&boxes, AlignTo::Right);
+        assert_eq!(off[0], (120.0, 0.0));
+        assert_eq!(off[1], (0.0, 0.0));
+    }
+
+    #[test]
+    fn test_align_centres_on_the_group_not_the_first_shape() {
+        let boxes = [(0.0, 0.0, 20.0, 10.0), (80.0, 0.0, 100.0, 10.0)];
+        let off = align_offsets(&boxes, AlignTo::HCentre);
+        // Group spans 0..100, centre 50; each box is 20 wide so each centre
+        // must land on 50.
+        assert_eq!(off[0].0, 40.0);
+        assert_eq!(off[1].0, -40.0);
+    }
+
+    #[test]
+    fn test_align_is_a_no_op_below_two_shapes() {
+        assert_eq!(align_offsets(&[], AlignTo::Left).len(), 0);
+        let one = [(0.0, 0.0, 10.0, 10.0)];
+        assert_eq!(align_offsets(&one, AlignTo::Left), vec![(0.0, 0.0)]);
+    }
+
+    #[test]
+    fn test_distribute_equalises_gaps_not_centres() {
+        // Different widths: spacing centres evenly would bunch the wide one up
+        // against a neighbour. Equal gaps is what looks right.
+        let boxes = [
+            (0.0, 0.0, 10.0, 10.0),   // width 10
+            (20.0, 0.0, 80.0, 10.0),  // width 60, badly placed
+            (200.0, 0.0, 210.0, 10.0), // width 10
+        ];
+        let off = distribute_offsets(&boxes, true);
+        // Outermost two are the span and must not move.
+        assert_eq!(off[0], (0.0, 0.0));
+        assert_eq!(off[2], (0.0, 0.0));
+        // Span 0..210 holds 80 of shape, so two gaps of 65 each.
+        let moved_left = boxes[1].0 + off[1].0;
+        assert!((moved_left - 75.0).abs() < 0.01, "landed at {}", moved_left);
+    }
+
+    #[test]
+    fn test_distribute_needs_three() {
+        let two = [(0.0, 0.0, 10.0, 10.0), (50.0, 0.0, 60.0, 10.0)];
+        assert_eq!(distribute_offsets(&two, true), vec![(0.0, 0.0); 2]);
+    }
+
+    #[test]
+    fn test_distribute_sorts_before_spreading() {
+        // Given out of order, the result still spreads them by position rather
+        // than by the order they happen to be selected in.
+        let boxes = [
+            (200.0, 0.0, 210.0, 10.0),
+            (0.0, 0.0, 10.0, 10.0),
+            (100.0, 0.0, 110.0, 10.0),
+        ];
+        let off = distribute_offsets(&boxes, true);
+        assert_eq!(off[0], (0.0, 0.0));
+        assert_eq!(off[1], (0.0, 0.0));
+        let mid = boxes[2].0 + off[2].0;
+        assert!((mid - 100.0).abs() < 0.01, "middle landed at {}", mid);
+    }
+
+    #[test]
     fn test_arrow_head_is_always_wider_than_its_shaft() {
         // This is what broke before: past about 8px the head stopped growing
         // while the shaft kept fattening, until it read as a bar with fins.
@@ -1368,7 +1536,23 @@ mod tests {
     }
 
     #[test]
-    fn test_only_boxes_and_discs_hold_labels() {
+    fn test_lines_hold_labels_that_ride_on_them() {
+        let line = Shape::Line {
+            start: Point2D::new(0.0, 0.0),
+            end: Point2D::new(10.0, 10.0),
+            color: ColorPreset::Red,
+            width: 1.0,
+            pattern: StrokePattern::Solid,
+        };
+        // A line can carry a label, but the label sits on it, not inside it.
+        assert!(can_contain_text(&line));
+        assert!(label_rides_on_shape(&line));
+        // A box holds its label inside, so it can wrap and grow to fit.
+        assert!(!label_rides_on_shape(&rect(0.0, 0.0, 10.0, 10.0)));
+    }
+
+    #[test]
+    fn test_shapes_that_hold_labels() {
         assert!(can_contain_text(&rect(0.0, 0.0, 10.0, 10.0)));
         assert!(can_contain_text(&Shape::Ellipse {
             start: Point2D::new(0.0, 0.0),
@@ -1378,14 +1562,7 @@ mod tests {
             fill: FillMode::None,
             pattern: StrokePattern::Solid,
         }));
-        // A line or a blur patch is not a container.
-        assert!(!can_contain_text(&Shape::Line {
-            start: Point2D::new(0.0, 0.0),
-            end: Point2D::new(10.0, 10.0),
-            color: ColorPreset::Red,
-            width: 1.0,
-            pattern: StrokePattern::Solid,
-        }));
+        // A scribble or a blur patch is not a container.
         assert!(!can_contain_text(&Shape::Blur {
             start: Point2D::new(0.0, 0.0),
             end: Point2D::new(10.0, 10.0),

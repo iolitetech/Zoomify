@@ -510,6 +510,8 @@ pub struct TextEditorState {
     pub container: Option<ShapeId>,
     /// Bounds of that container, refreshed as it is edited.
     pub container_bounds: Option<(f32, f32, f32, f32)>,
+    /// False for a label riding on a line, which has no width to wrap to.
+    pub container_wraps: bool,
     pub text: String,
     pub cursor: usize,
     pub color: ColorPreset,
@@ -534,6 +536,7 @@ impl TextEditorState {
             origin,
             container: None,
             container_bounds: None,
+            container_wraps: true,
             text: String::new(),
             cursor: 0,
             color,
@@ -552,8 +555,10 @@ impl TextEditorState {
     /// for free-floating text, which only breaks where the author does.
     pub fn wrap_width(&self) -> f32 {
         match self.container_bounds {
-            Some((l, _, r, _)) => (r - l - Self::CONTAINER_PADDING * 2.0).max(24.0),
-            None => f32::MAX,
+            Some((l, _, r, _)) if self.container_wraps => {
+                (r - l - Self::CONTAINER_PADDING * 2.0).max(24.0)
+            }
+            _ => f32::MAX,
         }
     }
 

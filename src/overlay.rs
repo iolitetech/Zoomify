@@ -13,6 +13,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1,
+    VK_MENU,
     VK_F2, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -32,9 +33,10 @@ use crate::clipboard::{copy_bgra_to_clipboard, get_clipboard_text};
 use crate::live_zoom::LiveZoomEngine;
 use crate::renderer::D2DRenderer;
 use crate::shapes::{
-    ARROW_BINDING_GAP, SELECTION_HANDLE_SIZE, SELECTION_HANDLE_SLOP, SNAP_TOLERANCE_DIP,
+    ARROW_BINDING_GAP, AlignTo, align_offsets, distribute_offsets, SELECTION_HANDLE_SIZE, SELECTION_HANDLE_SLOP, SNAP_TOLERANCE_DIP,
     SnapGuide, can_bind_arrow, can_contain_text,
-    collect_anchors, container_height_for, handle_at, normalize_rect, push_pressure,
+    collect_anchors, container_height_for, handle_at, label_rides_on_shape, normalize_rect,
+    push_pressure,
     recognize_smart_shape, resolve_arrow_ends, with_arrow_ends, resize_shape, resized_bounds, shape_bounds, shape_intersects_circle,
     snap_point, snap_to_angle, snap_to_square, snap_translation, translate_shape,
 };
@@ -2009,6 +2011,86 @@ impl OverlayWindow {
         }
     }
 
+    /// Line the selection up, or spread it evenly.
+    ///
+    /// Both are one undo step. Labels are excluded: a label has no position of
+    /// its own to align, it goes wherever its container is.
+    fn arrange_selection(&mut self, align: Option<AlignTo>, distribute_h: Option<bool>) {
+        let ids: Vec<ShapeId> = self
+            .selected_ids()
+            .into_iter()
+            .filter(|id| {
+                self.annotation(*id)
+                    .map(|a| !a.is_contained_text())
+                    .unwrap_or(false)
+            })
+            .collect();
+        if ids.len() < 2 {
+            self.set_toast("↔", "Select two or more first");
+            return;
+        }
+        let boxes: Vec<(f32, f32, f32, f32)> = ids
+            .iter()
+            .filter_map(|id| self.annotation(*id).map(|a| self.shape_bounds_exact(&a.shape)))
+            .collect();
+        if boxes.len() != ids.len() {
+            return;
+        }
+
+        let (offsets, label) = match (align, distribute_h) {
+            (Some(to), _) => (
+                align_offsets(&boxes, to),
+                match to {
+                    AlignTo::Left => "Aligned Left",
+                    AlignTo::Right => "Aligned Right",
+                    AlignTo::HCentre => "Centred Horizontally",
+                    AlignTo::Top => "Aligned Top",
+                    AlignTo::Bottom => "Aligned Bottom",
+                    AlignTo::VCentre => "Centred Vertically",
+                },
+            ),
+            (None, Some(h)) => {
+                if ids.len() < 3 {
+                    self.set_toast("↔", "Select three or more to distribute");
+                    return;
+                }
+                (
+                    distribute_offsets(&boxes, h),
+                    if h {
+                        "Distributed Horizontally"
+                    } else {
+                        "Distributed Vertically"
+                    },
+                )
+            }
+            _ => return,
+        };
+
+        let mut items: Vec<(ShapeId, Shape, Shape)> = Vec::new();
+        for (id, (dx, dy)) in ids.iter().zip(offsets) {
+            if dx.abs() < 0.01 && dy.abs() < 0.01 {
+                continue;
+            }
+            let Some(index) = self.annotation_index(*id) else {
+                continue;
+            };
+            let before = self.shapes[index].shape.clone();
+            let mut after = before.clone();
+            translate_shape(&mut after, dx, dy);
+            self.shapes[index].shape = after.clone();
+            items.push((*id, before, after));
+        }
+        if items.is_empty() {
+            return;
+        }
+        self.undo_history
+            .push(HistoryAction::TransformShapes { items });
+        self.redo_history.clear();
+        self.settle_bindings();
+        self.set_toast("↔", label);
+        self.request_repaint();
+    }
+
     // Stacking and duplication
 
     /// Move the selection to the front or the back of the stack.
@@ -2235,6 +2317,9 @@ impl OverlayWindow {
         let Some(idx) = self.annotation_index(container) else {
             return;
         };
+        if label_rides_on_shape(&self.shapes[idx].shape) {
+            return;
+        }
         let bounds = shape_bounds(&self.shapes[idx].shape);
         let pad = TextEditorState::CONTAINER_PADDING;
         let wrap = ((bounds.2 - bounds.0) - pad * 2.0).max(24.0);
@@ -2258,7 +2343,8 @@ impl OverlayWindow {
         if !can_contain_text(&owner.shape) {
             return false;
         }
-        let bounds = shape_bounds(&owner.shape);
+        let owner_shape = owner.shape.clone();
+        let bounds = shape_bounds(&owner_shape);
 
         // An existing label is lifted out and put back on commit, so editing
         // and creating follow exactly the same path.
@@ -2319,6 +2405,7 @@ impl OverlayWindow {
         editor.text = text;
         editor.container = Some(container);
         editor.container_bounds = Some(bounds);
+        editor.container_wraps = !label_rides_on_shape(&owner_shape);
         self.text_editor = Some(editor);
         self.selection = None;
         self.set_toast("✏️", "Label (Esc to finish)");
@@ -4366,6 +4453,33 @@ impl OverlayWindow {
                             return LRESULT(0);
                         }
                         return LRESULT(0);
+                    }
+
+                    // Ctrl+Alt+arrows line the selection up; Ctrl+Alt+H/V spread
+                    // it. Checked before the plain-arrow nudge below.
+                    if this.current_tool == DrawTool::Select
+                        && this.selection.is_some()
+                        && is_ctrl
+                        && (GetKeyState(VK_MENU.0 as i32) as u16 & 0x8000) != 0
+                    {
+                        let align = match key {
+                            k if k == VK_LEFT.0 as i32 => Some(AlignTo::Left),
+                            k if k == VK_RIGHT.0 as i32 => Some(AlignTo::Right),
+                            k if k == VK_UP.0 as i32 => Some(AlignTo::Top),
+                            k if k == VK_DOWN.0 as i32 => Some(AlignTo::Bottom),
+                            k if k == 'C' as i32 => Some(AlignTo::HCentre),
+                            k if k == 'M' as i32 => Some(AlignTo::VCentre),
+                            _ => None,
+                        };
+                        let spread = match key {
+                            k if k == 'H' as i32 => Some(true),
+                            k if k == 'V' as i32 => Some(false),
+                            _ => None,
+                        };
+                        if align.is_some() || spread.is_some() {
+                            this.arrange_selection(align, spread);
+                            return LRESULT(0);
+                        }
                     }
 
                     // ── Selection edits claim Delete and the arrows, which
