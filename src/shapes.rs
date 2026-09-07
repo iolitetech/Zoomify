@@ -1,5 +1,5 @@
 use crate::types::{
-    ColorPreset, FillMode, Point2D, SelectionHandle, Shape, StrokePattern,
+    ColorPreset, DrawTool, FillMode, Point2D, SelectionHandle, Shape, StrokePattern,
 };
 
 pub fn snap_to_angle(start: Point2D, current: Point2D) -> Point2D {
@@ -323,6 +323,110 @@ pub fn recognize_smart_shape(
 
     None
 }
+
+// Property setters
+//
+// Each returns whether it changed anything, so a caller can record one undo
+// entry for a whole selection and skip it entirely when nothing moved.
+
+/// Which tool would have drawn this shape.
+///
+/// Lets the Select tool borrow the right property controls for whatever is
+/// selected, rather than showing controls for whichever tool was last used.
+pub fn shape_kind(shape: &Shape) -> DrawTool {
+    match shape {
+        Shape::Stroke { is_highlighter, .. } => {
+            if *is_highlighter {
+                DrawTool::Highlighter
+            } else {
+                DrawTool::Pen
+            }
+        }
+        Shape::Line { .. } => DrawTool::Line,
+        Shape::Arrow { .. } => DrawTool::Arrow,
+        Shape::Rectangle { rounded, .. } => {
+            if *rounded {
+                DrawTool::RoundedRectangle
+            } else {
+                DrawTool::Rectangle
+            }
+        }
+        Shape::Ellipse { .. } => DrawTool::Ellipse,
+        Shape::Text { .. } => DrawTool::Text,
+        Shape::StepBadge { .. } => DrawTool::StepBadge,
+        Shape::Blur { .. } => DrawTool::Blur,
+    }
+}
+
+pub fn set_shape_color(shape: &mut Shape, c: ColorPreset) -> bool {
+    let slot = match shape {
+        Shape::Stroke { color, .. }
+        | Shape::Line { color, .. }
+        | Shape::Arrow { color, .. }
+        | Shape::Rectangle { color, .. }
+        | Shape::Ellipse { color, .. }
+        | Shape::Text { color, .. }
+        | Shape::StepBadge { color, .. } => color,
+        // A blur has no colour of its own; it shows what is underneath.
+        Shape::Blur { .. } => return false,
+    };
+    if *slot == c {
+        return false;
+    }
+    *slot = c;
+    true
+}
+
+pub fn set_shape_width(shape: &mut Shape, w: f32) -> bool {
+    let slot = match shape {
+        Shape::Stroke { width, .. }
+        | Shape::Line { width, .. }
+        | Shape::Arrow { width, .. }
+        | Shape::Rectangle { width, .. }
+        | Shape::Ellipse { width, .. } => width,
+        Shape::StepBadge { stroke_width, .. } => stroke_width,
+        // For a blur the equivalent knob is how coarse the mosaic is.
+        Shape::Blur { block_size, .. } => block_size,
+        Shape::Text { .. } => return false,
+    };
+    if (*slot - w).abs() < 0.01 {
+        return false;
+    }
+    *slot = w;
+    true
+}
+
+pub fn set_shape_fill(shape: &mut Shape, f: FillMode) -> bool {
+    let slot = match shape {
+        Shape::Rectangle { fill, .. }
+        | Shape::Ellipse { fill, .. }
+        | Shape::StepBadge { fill, .. } => fill,
+        _ => return false,
+    };
+    if *slot == f {
+        return false;
+    }
+    *slot = f;
+    true
+}
+
+pub fn set_shape_pattern(shape: &mut Shape, p: StrokePattern) -> bool {
+    let slot = match shape {
+        Shape::Stroke { pattern, .. }
+        | Shape::Line { pattern, .. }
+        | Shape::Arrow { pattern, .. }
+        | Shape::Rectangle { pattern, .. }
+        | Shape::Ellipse { pattern, .. }
+        | Shape::StepBadge { pattern, .. } => pattern,
+        _ => return false,
+    };
+    if *slot == p {
+        return false;
+    }
+    *slot = p;
+    true
+}
+
 
 // Alignment
 

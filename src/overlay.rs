@@ -36,6 +36,7 @@ use crate::shapes::{
     ARROW_BINDING_GAP, AlignTo, align_offsets, distribute_offsets, SELECTION_HANDLE_SIZE, SELECTION_HANDLE_SLOP, SNAP_TOLERANCE_DIP,
     SnapGuide, can_bind_arrow, can_contain_text,
     collect_anchors, container_height_for, curve_from_handle, curve_handle, handle_at,
+    set_shape_color, set_shape_fill, set_shape_pattern, set_shape_width, shape_kind,
     label_rides_on_shape, normalize_rect,
     push_pressure,
     recognize_smart_shape, resolve_arrow_ends, with_arrow_ends, resize_shape, resized_bounds, shape_bounds, shape_intersects_circle,
@@ -1722,6 +1723,7 @@ impl OverlayWindow {
                     self.selection = Some(Selection::many(family));
                 }
                 self.begin_drag(DragKind::Move, canvas_pt);
+                self.sync_selection_kind();
                 true
             }
             None => {
@@ -1730,6 +1732,7 @@ impl OverlayWindow {
                     self.selection = None;
                 }
                 self.marquee = Some((canvas_pt, canvas_pt));
+                self.sync_selection_kind();
                 true
             }
         }
@@ -1914,6 +1917,7 @@ impl OverlayWindow {
                         original_bounds: (0.0, 0.0, 0.0, 0.0),
                     });
                     self.set_toast("▢", format!("{} selected", n));
+                    self.sync_selection_kind();
                 }
             }
             self.request_repaint();
@@ -1959,6 +1963,7 @@ impl OverlayWindow {
             return;
         }
         self.selection = None;
+        self.sync_selection_kind();
         let n = ids.len();
         if self.delete_annotations(&ids) {
             self.set_toast(
@@ -2226,6 +2231,81 @@ impl OverlayWindow {
         self.redo_history.clear();
         self.set_toast("◑", format!("Opacity {:.0}%", shown * 100.0));
         self.request_repaint();
+    }
+
+    /// Tell the toolbar what kind of thing is selected, so its sub-bar can
+    /// describe the selection rather than the last tool used.
+    ///
+    /// A mixed selection reports None: there is no single set of properties
+    /// that applies to all of it.
+    fn sync_selection_kind(&mut self) {
+        let ids = self.selected_ids();
+        let mut kind: Option<DrawTool> = None;
+        for id in &ids {
+            let Some(a) = self.annotation(*id) else {
+                continue;
+            };
+            if a.is_contained_text() {
+                continue;
+            }
+            let k = shape_kind(&a.shape);
+            match kind {
+                None => kind = Some(k),
+                Some(prev) if prev == k => {}
+                Some(_) => {
+                    kind = None;
+                    break;
+                }
+            }
+        }
+        if self.toolbar.selection_kind != kind {
+            self.toolbar.selection_kind = kind;
+            let sw = self.logical_w();
+            let sh = self.logical_h();
+            self.toolbar.update_layout(sw, sh);
+        }
+    }
+
+    /// Apply a property change to every selected shape, as one undo step.
+    ///
+    /// A property setter always updates the tool default for the *next* shape;
+    /// this is the other half, so clicking a colour or a width with something
+    /// selected changes that thing rather than only arming the next one.
+    /// Returns how many shapes actually changed.
+    fn apply_to_selection(&mut self, change: impl Fn(&mut Shape) -> bool) -> usize {
+        let ids = self.selected_ids();
+        if ids.is_empty() {
+            return 0;
+        }
+        let mut items: Vec<(ShapeId, Shape, Shape)> = Vec::new();
+        for id in ids {
+            let Some(index) = self.annotation_index(id) else {
+                continue;
+            };
+            let before = self.shapes[index].shape.clone();
+            let mut after = before.clone();
+            if !change(&mut after) {
+                continue;
+            }
+            self.shapes[index].shape = after.clone();
+            items.push((id, before, after));
+        }
+        if items.is_empty() {
+            return 0;
+        }
+        let n = items.len();
+        self.undo_history
+            .push(HistoryAction::TransformShapes { items });
+        self.redo_history.clear();
+        // A label's box may need to grow if its text just got bigger.
+        for id in self.selected_ids() {
+            if self.label_of(id).is_some() {
+                self.grow_container_to_fit(id);
+            }
+        }
+        self.settle_bindings();
+        self.request_repaint();
+        n
     }
 
     /// Set a specific head on every selected arrow.
@@ -3144,7 +3224,15 @@ impl OverlayWindow {
             FluentAction::Color(c) => {
                 self.ensure_draw_mode();
                 self.current_color = c;
-                self.set_toast("🎨", format!("Color: {}", c.name()));
+                let n = self.apply_to_selection(|s| set_shape_color(s, c));
+                self.set_toast(
+                    "🎨",
+                    if n > 0 {
+                        format!("Recoloured {} to {}", n, c.name())
+                    } else {
+                        format!("Color: {}", c.name())
+                    },
+                );
             }
             FluentAction::Undo => {
                 self.undo();
@@ -3181,6 +3269,7 @@ impl OverlayWindow {
                     DrawTool::Blur => self.blur_settings.block_size = w,
                     _ => {}
                 }
+                self.apply_to_selection(|s| set_shape_width(s, w));
                 self.stroke_width = w;
                 self.toolbar.stroke_width = w;
                 let sw = self.logical_w();
@@ -3194,6 +3283,7 @@ impl OverlayWindow {
                 }
             }
             FluentAction::SetFillMode(fm) => {
+                self.apply_to_selection(|s| set_shape_fill(s, fm));
                 match self.current_tool {
                     DrawTool::Rectangle => self.rect_settings.fill_mode = fm,
                     DrawTool::RoundedRectangle => self.rounded_rect_settings.fill_mode = fm,
@@ -3209,6 +3299,7 @@ impl OverlayWindow {
                 self.set_toast("🎨", format!("Fill: {}", fm.name()));
             }
             FluentAction::SetStrokePattern(sp) => {
+                self.apply_to_selection(|s| set_shape_pattern(s, sp));
                 match self.current_tool {
                     DrawTool::Pen => self.pen_settings.pattern = sp,
                     DrawTool::Line => self.line_settings.pattern = sp,
@@ -3226,6 +3317,13 @@ impl OverlayWindow {
                 self.set_toast("✏️", format!("Pattern: {}", sp.name()));
             }
             FluentAction::SetArrowStyle(as_) => {
+                self.apply_to_selection(|s| match s {
+                    Shape::Arrow { style, .. } if *style != as_ => {
+                        *style = as_;
+                        true
+                    }
+                    _ => false,
+                });
                 self.arrow_settings.style = as_;
                 self.arrow_style = as_;
                 self.toolbar.current_arrow_style = as_;
@@ -3236,6 +3334,14 @@ impl OverlayWindow {
             }
             FluentAction::SetBadgeSize(bs) => {
                 self.badge_settings.size = bs;
+                let r = bs.radius();
+                self.apply_to_selection(|s| match s {
+                    Shape::StepBadge { radius, .. } if (*radius - r).abs() > 0.01 => {
+                        *radius = r;
+                        true
+                    }
+                    _ => false,
+                });
                 self.badge_size = bs;
                 self.toolbar.current_badge_size = bs;
                 let sw = self.logical_w();
@@ -3244,6 +3350,13 @@ impl OverlayWindow {
                 self.set_toast("🔢", format!("Badge Size: {}", bs.name()));
             }
             FluentAction::SetBadgeShape(bsh) => {
+                self.apply_to_selection(|s| match s {
+                    Shape::StepBadge { shape, .. } if *shape != bsh => {
+                        *shape = bsh;
+                        true
+                    }
+                    _ => false,
+                });
                 self.badge_settings.shape = bsh;
                 self.badge_shape = bsh;
                 self.toolbar.current_badge_shape = bsh;
@@ -3261,6 +3374,13 @@ impl OverlayWindow {
                 self.set_toast("↺", "Step badge reset to #1");
             }
             FluentAction::SetFontSize(sz) => {
+                self.apply_to_selection(|s| match s {
+                    Shape::Text { font_size, .. } if (*font_size - sz).abs() > 0.01 => {
+                        *font_size = sz;
+                        true
+                    }
+                    _ => false,
+                });
                 self.text_settings.font_size = sz;
                 self.font_size = sz;
                 self.toolbar.current_font_size = sz;
@@ -3299,6 +3419,13 @@ impl OverlayWindow {
                 self.set_toast("𝐼", if italic { "Italic: On" } else { "Italic: Off" });
             }
             FluentAction::SetTextCardStyle(cs) => {
+                self.apply_to_selection(|s| match s {
+                    Shape::Text { card_style, .. } if *card_style != cs => {
+                        *card_style = cs;
+                        true
+                    }
+                    _ => false,
+                });
                 self.text_settings.card_style = cs;
                 self.text_card_style = cs;
                 self.toolbar.text_card_style = cs;
@@ -3311,6 +3438,13 @@ impl OverlayWindow {
                 self.set_toast("🏷️", format!("Text Card: {}", cs.name()));
             }
             FluentAction::SetFontFamily(ff) => {
+                self.apply_to_selection(|s| match s {
+                    Shape::Text { font_family, .. } if *font_family != ff => {
+                        *font_family = ff;
+                        true
+                    }
+                    _ => false,
+                });
                 self.text_settings.font_family = ff;
                 self.text_font_family = ff;
                 self.toolbar.text_font_family = ff;

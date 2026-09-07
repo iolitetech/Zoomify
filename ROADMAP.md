@@ -43,6 +43,13 @@ B is complete; **A is next.**
   deletion, undo and reordering. A position in a `Vec` survives none of those.
 - **Autosave defaults off.** It writes files on every Esc; that should be asked
   for, not assumed.
+- **Property setters do both halves.** A width/colour/fill button always arms
+  the next shape *and* applies to the selection when there is one. Commands
+  (align, restack, group, duplicate, delete) only ever act on a selection,
+  because none of them has a "default for the next shape" meaning.
+- **The Select sub-bar is an inspector.** With something selected it shows that
+  shape kind's property controls plus the commands; a mixed selection shows
+  commands only, since there is no single property set to offer.
 - **No always-on capture session.** It would remove the last ~18ms of overlay
   open time but keeps the GPU compositing frames nobody asked for, and can
   raise the system screen-capture indicator.
