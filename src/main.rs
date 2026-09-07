@@ -8,6 +8,7 @@ mod live_zoom;
 mod monitor;
 mod overlay;
 mod renderer;
+mod session;
 mod settings_window;
 mod shapes;
 mod tray;
@@ -491,6 +492,13 @@ Choose different combos in Settings (Ctrl+,).",
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+
+            // Autosave runs while the overlay tears down, where a toast can no
+            // longer be drawn. Anything it could not report lands here.
+            if let Some(err) = session::take_error() {
+                let ctx = &mut *app_ctx_ptr;
+                ctx.tray.show_balloon("Zoomify: session not saved", &err);
+            }
         }
 
         let mut app_ctx = Box::from_raw(app_ctx_ptr);

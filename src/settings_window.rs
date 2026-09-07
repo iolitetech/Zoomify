@@ -85,6 +85,7 @@ enum SettingsTab {
     General = 1,
     Canvas = 2,
     Timer = 3,
+    Sessions = 4,
 }
 
 pub struct SettingsWindow {
@@ -538,7 +539,7 @@ impl SettingsWindow {
         let tab_w = 160.0;
         let tab_h = 38.0;
 
-        for i in 0..4 {
+        for i in 0..5 {
             let ty = tab_start_y + (i as f32 * 44.0);
             if x >= 10.0 && x <= 10.0 + tab_w && y >= ty && y <= ty + tab_h {
                 self.hover_item = Some(format!("tab_{}", i));
@@ -570,6 +571,40 @@ impl SettingsWindow {
                             self.hover_item = Some(format!("hk_slot_{}", i));
                             return;
                         }
+                    }
+                }
+                SettingsTab::Sessions => {
+                    for i in 0..2 {
+                        let cy = 78.0 + (i as f32 * 82.0);
+                        if x >= 620.0 && x <= 685.0 && y >= cy + 20.0 && y <= cy + 54.0 {
+                            self.hover_item = Some(format!("sess_toggle_{}", i));
+                            return;
+                        }
+                    }
+                    let cy_keep = 242.0;
+                    if y >= cy_keep + 20.0 && y <= cy_keep + 52.0 {
+                        if x >= 566.0 && x <= 598.0 {
+                            self.hover_item = Some("keep_minus".to_string());
+                            return;
+                        } else if x >= 652.0 && x <= 684.0 {
+                            self.hover_item = Some("keep_plus".to_string());
+                            return;
+                        }
+                    }
+                    let cy_folder = 324.0;
+                    if y >= cy_folder + 19.0 && y <= cy_folder + 53.0 {
+                        if x >= 496.0 && x <= 568.0 {
+                            self.hover_item = Some("btn_folder_default".to_string());
+                            return;
+                        } else if x >= 576.0 && x <= 686.0 {
+                            self.hover_item = Some("btn_folder_browse".to_string());
+                            return;
+                        }
+                    }
+                    let cy_open = 406.0;
+                    if x >= 576.0 && x <= 686.0 && y >= cy_open + 19.0 && y <= cy_open + 53.0 {
+                        self.hover_item = Some("btn_open_sessions".to_string());
+                        return;
                     }
                 }
                 SettingsTab::General => {
@@ -669,14 +704,15 @@ impl SettingsWindow {
         let tab_w = 160.0;
         let tab_h = 38.0;
 
-        for i in 0..4 {
+        for i in 0..5 {
             let ty = tab_start_y + (i as f32 * 44.0);
             if x >= 10.0 && x <= 10.0 + tab_w && y >= ty && y <= ty + tab_h {
                 self.active_tab = match i {
                     0 => SettingsTab::Hotkeys,
                     1 => SettingsTab::General,
                     2 => SettingsTab::Canvas,
-                    _ => SettingsTab::Timer,
+                    3 => SettingsTab::Timer,
+                    _ => SettingsTab::Sessions,
                 };
                 self.capturing_hotkey_idx = None;
                 self.hotkey_error = None;
@@ -732,6 +768,58 @@ impl SettingsWindow {
                 }
                 self.capturing_hotkey_idx = None;
                 self.request_repaint();
+            }
+
+            SettingsTab::Sessions => {
+                let cy0 = 78.0;
+                if x >= 620.0 && x <= 685.0 && y >= cy0 + 20.0 && y <= cy0 + 54.0 {
+                    self.config.autosave_sessions = !self.config.autosave_sessions;
+                    self.request_repaint();
+                    return;
+                }
+                let cy1 = 160.0;
+                if x >= 620.0 && x <= 685.0 && y >= cy1 + 20.0 && y <= cy1 + 54.0 {
+                    self.config.session_export_png = !self.config.session_export_png;
+                    self.request_repaint();
+                    return;
+                }
+                let cy_keep = 242.0;
+                if y >= cy_keep + 20.0 && y <= cy_keep + 52.0 {
+                    if x >= 566.0 && x <= 598.0 {
+                        // 0 means "keep everything"; step down into it, not past.
+                        self.config.session_keep_last =
+                            self.config.session_keep_last.saturating_sub(1);
+                        self.request_repaint();
+                        return;
+                    } else if x >= 652.0 && x <= 684.0 {
+                        self.config.session_keep_last =
+                            (self.config.session_keep_last + 1).min(99);
+                        self.request_repaint();
+                        return;
+                    }
+                }
+                let cy_folder = 324.0;
+                if y >= cy_folder + 19.0 && y <= cy_folder + 53.0 {
+                    if x >= 496.0 && x <= 568.0 {
+                        self.config.session_folder.clear();
+                        self.request_repaint();
+                        return;
+                    } else if x >= 576.0 && x <= 686.0 {
+                        let start = crate::session::sessions_dir(&self.config);
+                        if let Some(dir) = crate::session::pick_folder(self.hwnd, &start) {
+                            self.config.session_folder = dir.to_string_lossy().into_owned();
+                        }
+                        self.request_repaint();
+                        return;
+                    }
+                }
+                let cy_open = 406.0;
+                if x >= 576.0 && x <= 686.0 && y >= cy_open + 19.0 && y <= cy_open + 53.0 {
+                    let dir = crate::session::sessions_dir(&self.config);
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+                    return;
+                }
             }
 
             SettingsTab::General => {
@@ -950,6 +1038,7 @@ impl SettingsWindow {
                 ("⚙  General", SettingsTab::General),
                 ("🖌  Canvas", SettingsTab::Canvas),
                 ("⏱  Timer", SettingsTab::Timer),
+                ("💾  Sessions", SettingsTab::Sessions),
             ];
 
             let active_pill_color = D2D1_COLOR_F {
@@ -1149,6 +1238,7 @@ impl SettingsWindow {
             match self.active_tab {
                 SettingsTab::Hotkeys => self.render_hotkeys_tab(rt),
                 SettingsTab::General => self.render_general_tab(rt),
+                SettingsTab::Sessions => self.render_sessions_tab(rt),
                 SettingsTab::Canvas => self.render_canvas_tab(rt),
                 SettingsTab::Timer => self.render_timer_tab(rt),
             }
@@ -1537,6 +1627,181 @@ impl SettingsWindow {
                 &b,
             );
         }
+    }
+
+    unsafe fn render_sessions_tab(&self, rt: &ID2D1HwndRenderTarget) {
+        self.render_page_header(
+            rt,
+            "Sessions",
+            "Save annotations to disk and reload them later (Ctrl+Shift+S / Ctrl+O)",
+        );
+
+        let card_bg = D2D1_COLOR_F {
+            r: 0.14,
+            g: 0.14,
+            b: 0.14,
+            a: 1.0,
+        };
+        let card_border = D2D1_COLOR_F {
+            r: 0.20,
+            g: 0.20,
+            b: 0.20,
+            a: 1.0,
+        };
+        let text_primary = D2D1_COLOR_F {
+            r: 0.95,
+            g: 0.95,
+            b: 0.95,
+            a: 1.0,
+        };
+        let text_secondary = D2D1_COLOR_F {
+            r: 0.58,
+            g: 0.58,
+            b: 0.58,
+            a: 1.0,
+        };
+
+        // A card with a title and a description line; returns its top.
+        let card = |cy: f32, title: &str, desc: &str, text_right: f32| unsafe {
+            let rect = D2D_RECT_F {
+                left: 205.0,
+                top: cy,
+                right: 700.0,
+                bottom: cy + 72.0,
+            };
+            let rrect = D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: 7.0,
+                radiusY: 7.0,
+            };
+            if let Ok(b) = rt.CreateSolidColorBrush(&card_bg, None) {
+                rt.FillRoundedRectangle(&rrect, &b);
+            }
+            if let Ok(b) = rt.CreateSolidColorBrush(&card_border, None) {
+                rt.DrawRoundedRectangle(&rrect, &b, 1.0, None);
+            }
+            if let Ok(b) = rt.CreateSolidColorBrush(&text_primary, None) {
+                let utf16: Vec<u16> = title.encode_utf16().collect();
+                let tr = D2D_RECT_F {
+                    left: 220.0,
+                    top: cy + 14.0,
+                    right: text_right,
+                    bottom: cy + 34.0,
+                };
+                draw_text(rt, &utf16, &self.format_section, &tr, &b);
+            }
+            if let Ok(b) = rt.CreateSolidColorBrush(&text_secondary, None) {
+                let utf16: Vec<u16> = desc.encode_utf16().collect();
+                let tr = D2D_RECT_F {
+                    left: 220.0,
+                    top: cy + 38.0,
+                    right: text_right,
+                    bottom: cy + 58.0,
+                };
+                draw_text(rt, &utf16, &self.format_desc, &tr, &b);
+            }
+        };
+
+        // A right-aligned button; `id` matches the hover ids above.
+        let button = |left: f32, right: f32, cy: f32, label: &str, id: &str| unsafe {
+            let is_hover = self.hover_item.as_deref() == Some(id);
+            let bg = if is_hover {
+                D2D1_COLOR_F {
+                    r: 0.25,
+                    g: 0.25,
+                    b: 0.25,
+                    a: 1.0,
+                }
+            } else {
+                D2D1_COLOR_F {
+                    r: 0.19,
+                    g: 0.19,
+                    b: 0.19,
+                    a: 1.0,
+                }
+            };
+            let rect = D2D_RECT_F {
+                left,
+                top: cy + 19.0,
+                right,
+                bottom: cy + 53.0,
+            };
+            let rrect = D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: 6.0,
+                radiusY: 6.0,
+            };
+            if let Ok(b) = rt.CreateSolidColorBrush(&bg, None) {
+                rt.FillRoundedRectangle(&rrect, &b);
+            }
+            if let Ok(b) = rt.CreateSolidColorBrush(&card_border, None) {
+                rt.DrawRoundedRectangle(&rrect, &b, 1.0, None);
+            }
+            if let Ok(b) = rt.CreateSolidColorBrush(&text_primary, None) {
+                let utf16: Vec<u16> = label.encode_utf16().collect();
+                draw_text(rt, &utf16, &self.format_button, &rect, &b);
+            }
+        };
+
+        // 1. Autosave on exit
+        card(
+            78.0,
+            "Autosave on Exit",
+            "Write the canvas to a session file each time the overlay closes",
+            590.0,
+        );
+        self.render_toggle_switch(rt, 636.0, 78.0 + 26.0, self.config.autosave_sessions);
+
+        // 2. PNG alongside
+        card(
+            160.0,
+            "Export PNG Alongside",
+            "Also write a flattened image next to each saved session",
+            590.0,
+        );
+        self.render_toggle_switch(rt, 636.0, 160.0 + 26.0, self.config.session_export_png);
+
+        // 3. Retention
+        let keep = self.config.session_keep_last;
+        card(
+            242.0,
+            "Keep Last Sessions",
+            "Older sessions are deleted after each save; 0 keeps every one",
+            550.0,
+        );
+        let keep_label = if keep == 0 {
+            "All".to_string()
+        } else {
+            keep.to_string()
+        };
+        self.render_stepper(rt, 566.0, 242.0 + 18.0, &keep_label, "keep_minus", "keep_plus");
+
+        // 4. Folder
+        let dir = crate::session::sessions_dir(&self.config);
+        let shown = dir.to_string_lossy();
+        // Long paths would run under the buttons; keep the tail, which is the
+        // part that identifies the folder.
+        let shown = if shown.chars().count() > 48 {
+            let tail: String = shown
+                .chars()
+                .skip(shown.chars().count().saturating_sub(45))
+                .collect();
+            format!("...{}", tail)
+        } else {
+            shown.into_owned()
+        };
+        card(324.0, "Session Folder", &shown, 490.0);
+        button(496.0, 568.0, 324.0, "Default", "btn_folder_default");
+        button(576.0, 686.0, 324.0, "Browse", "btn_folder_browse");
+
+        // 5. Reveal in Explorer
+        card(
+            406.0,
+            "Saved Sessions",
+            "Open the folder to copy, rename or delete saved sessions",
+            560.0,
+        );
+        button(576.0, 686.0, 406.0, "Open Folder", "btn_open_sessions");
     }
 
     unsafe fn render_canvas_tab(&self, rt: &ID2D1HwndRenderTarget) {

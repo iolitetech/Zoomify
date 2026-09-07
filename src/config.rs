@@ -101,6 +101,11 @@ fn default_show_minimap() -> bool {
     true
 }
 
+/// Ten is enough to walk back through a talk without filling a folder.
+fn default_session_keep_last() -> u32 {
+    10
+}
+
 fn default_recent_colors() -> Vec<String> {
     Vec::new()
 }
@@ -152,6 +157,19 @@ pub struct AppConfig {
     /// Custom colours picked in the overlay, newest first, as `#RRGGBB`.
     #[serde(default = "default_recent_colors")]
     pub recent_custom_colors: Vec<String>,
+    /// Write the canvas to a session file every time the overlay closes.
+    /// Off by default: it puts files on disk, so it is opt-in.
+    #[serde(default)]
+    pub autosave_sessions: bool,
+    /// Where sessions are written. Empty means Pictures\Zoomify Sessions.
+    #[serde(default)]
+    pub session_folder: String,
+    /// Also export a flattened PNG next to each saved session.
+    #[serde(default)]
+    pub session_export_png: bool,
+    /// Keep only this many sessions in the folder; 0 keeps every one.
+    #[serde(default = "default_session_keep_last")]
+    pub session_keep_last: u32,
     #[serde(default = "default_hk_static_zoom")]
     pub hotkey_static_zoom: HotkeyBinding,
     #[serde(default = "default_hk_draw")]
@@ -185,6 +203,10 @@ impl Default for AppConfig {
             timer_sound_enabled: true,
             show_minimap: true,
             recent_custom_colors: Vec::new(),
+            autosave_sessions: false,
+            session_folder: String::new(),
+            session_export_png: false,
+            session_keep_last: default_session_keep_last(),
             hotkey_static_zoom: default_hk_static_zoom(),
             hotkey_draw: default_hk_draw(),
             hotkey_spotlight: default_hk_spotlight(),

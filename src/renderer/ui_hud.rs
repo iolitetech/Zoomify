@@ -609,6 +609,7 @@ impl D2DRenderer {
                     ("Shift + Wheel", "Adjust brush stroke width"),
                     ("Ctrl+Z / Ctrl+Y", "Undo / Redo (with badge counter)"),
                     ("Ctrl+C / Ctrl+S", "Copy screen / Save snapshot"),
+                    ("Ctrl+Shift+S / Ctrl+O", "Save / load annotation session"),
                     ("E / Delete", "Clear canvas (undoable)"),
                     ("Esc / Right-Click", "Return to Pan mode / Exit overlay"),
                 ];

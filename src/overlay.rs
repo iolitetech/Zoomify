@@ -886,6 +886,10 @@ impl OverlayWindow {
 
     pub fn exit_overlay(&mut self) {
         self.save_config();
+        // Capture the canvas before teardown clears it.
+        if crate::config::AppConfig::load().autosave_sessions {
+            self.save_session(false);
+        }
         if self.live_zoom.is_active() {
             self.stop_live_zoom();
         }
@@ -1625,26 +1629,137 @@ impl OverlayWindow {
     /// Resolve the user's real Pictures folder. `%USERPROFILE%\Pictures` is wrong
     /// whenever the folder is redirected - to OneDrive, another drive, or a
     /// network share - which is common. The shell knows where it actually is.
-    fn pictures_dir() -> std::path::PathBuf {
-        use windows::Win32::System::Com::CoTaskMemFree;
-        use windows::Win32::UI::Shell::{FOLDERID_Pictures, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+    // ─────────────────────── Sessions ───────────────────────
 
+    /// Suspend always-on-top while a modal shell dialog is up. A topmost
+    /// fullscreen overlay would otherwise render straight over the dialog and
+    /// leave it unreachable.
+    fn with_topmost_suspended<T>(&self, f: impl FnOnce() -> T) -> T {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+        };
         unsafe {
-            if let Ok(pwstr) = SHGetKnownFolderPath(&FOLDERID_Pictures, KF_FLAG_DEFAULT, None)
-                && !pwstr.is_null()
-            {
-                let path = pwstr.to_string().ok().map(std::path::PathBuf::from);
-                CoTaskMemFree(Some(pwstr.0 as *const std::ffi::c_void));
-                if let Some(p) = path {
-                    return p;
-                }
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_NOTOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE,
+            );
+        }
+        let out = f();
+        unsafe {
+            let _ = SetWindowPos(
+                self.hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE,
+            );
+        }
+        out
+    }
+
+    /// Write the canvas to a session file.
+    ///
+    /// `manual` is the Ctrl+Shift+S path, which reports through a toast. The
+    /// autosave path runs while the overlay is tearing down, where a toast can
+    /// no longer be drawn, so it routes failures to a tray balloon instead.
+    pub fn save_session(&mut self, manual: bool) {
+        if self.shapes.is_empty() {
+            if manual {
+                self.set_toast("❌", "Nothing to save");
             }
+            return;
+        }
+        let cfg = crate::config::AppConfig::load();
+        let dir = crate::session::sessions_dir(&cfg);
+        let path = crate::session::next_session_path(&dir);
+        let sess = crate::session::Session::new(
+            self.shapes.clone(),
+            self.background_type,
+            self.step_counter,
+        );
+
+        if let Err(e) = crate::session::save(&path, &sess) {
+            let msg = format!("Session save failed: {}", e);
+            if manual {
+                self.set_toast("❌", msg);
+            } else {
+                crate::session::report_error(msg);
+            }
+            return;
         }
 
-        // Fall back only if the shell call fails outright.
-        std::env::var_os("USERPROFILE")
-            .map(|u| std::path::PathBuf::from(u).join("Pictures"))
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
+        if cfg.session_export_png
+            && let Some(composite) = self.get_composite_capture(false)
+        {
+            let png = path.with_extension("png");
+            let _ = composite.save_png(&png.to_string_lossy());
+        }
+
+        crate::session::prune(&dir, cfg.session_keep_last as usize);
+
+        if manual {
+            let name = path
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let count = self.shapes.len();
+            self.set_toast(
+                "💾",
+                format!("Saved {} annotation(s) — {}", count, name),
+            );
+        }
+    }
+
+    /// Replace the canvas with a saved session. Undoable in one step.
+    pub fn load_session_from(&mut self, path: &std::path::Path) {
+        match crate::session::load(path) {
+            Ok(sess) => {
+                let count = sess.shapes.len();
+                let background = sess.background_enum();
+                let previous = std::mem::replace(&mut self.shapes, sess.shapes);
+                self.undo_history.push(HistoryAction::Clear(previous));
+                self.redo_history.clear();
+                self.selection = None;
+                self.active_shape = None;
+                self.text_editor = None;
+                self.is_drawing = false;
+                self.background_type = background;
+                self.step_counter = sess.step_counter;
+                self.toolbar.badge_counter = self.step_counter;
+                self.set_toast(
+                    "📂",
+                    format!("Loaded {} annotation(s) — {}", count, sess.saved_at),
+                );
+                self.request_repaint();
+            }
+            Err(e) => self.set_toast("❌", format!("Load failed: {}", e)),
+        }
+    }
+
+    /// Ctrl+O: pick a session file and load it.
+    pub fn load_session_via_dialog(&mut self) {
+        let cfg = crate::config::AppConfig::load();
+        let dir = crate::session::sessions_dir(&cfg);
+        let _ = std::fs::create_dir_all(&dir);
+        let hwnd = self.hwnd;
+        let picked = self.with_topmost_suspended(|| crate::session::pick_session_file(hwnd, &dir));
+        match picked {
+            Some(path) => {
+                self.load_session_from(&path);
+                self.force_foreground();
+            }
+            None => {
+                self.force_foreground();
+                self.request_repaint();
+            }
+        }
     }
 
     pub fn save_snapshot(&mut self) {
@@ -1653,7 +1768,7 @@ impl OverlayWindow {
             return;
         };
 
-        let dir = Self::pictures_dir();
+        let dir = crate::session::pictures_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
             self.set_toast("❌", format!("Cannot open Pictures folder: {}", e));
             return;
@@ -3393,7 +3508,14 @@ impl OverlayWindow {
                                 this.copy_screen_to_clipboard();
                             }
                             k if k == 'S' as i32 => {
-                                this.save_snapshot();
+                                if is_shift {
+                                    this.save_session(true);
+                                } else {
+                                    this.save_snapshot();
+                                }
+                            }
+                            k if k == 'O' as i32 => {
+                                this.load_session_via_dialog();
                             }
                             k if k == VK_TAB.0 as i32 => {
                                 this.cycle_next_monitor();

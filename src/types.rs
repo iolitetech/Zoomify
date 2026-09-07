@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 
@@ -52,7 +53,7 @@ impl DrawTool {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ColorPreset {
     Red,
     Green,
@@ -202,7 +203,7 @@ pub enum CanvasBackground {
     Blackboard,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Point2D {
     pub x: f32,
     pub y: f32,
@@ -220,7 +221,7 @@ impl Point2D {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FillMode {
     None,
     Tinted,
@@ -237,7 +238,7 @@ impl FillMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StrokePattern {
     Solid,
     Dashed,
@@ -254,7 +255,7 @@ impl StrokePattern {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ArrowStyle {
     Single,
     Double,
@@ -299,7 +300,7 @@ impl BadgeSize {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BadgeShape {
     Circle,
     Square,
@@ -316,7 +317,7 @@ impl BadgeShape {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextCardStyle {
     Transparent,
     Badge,
@@ -333,7 +334,7 @@ impl TextCardStyle {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextFontFamily {
     SegoeUI,
     CascadiaCode,
@@ -350,7 +351,7 @@ impl TextFontFamily {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Shape {
     Stroke {
         points: Vec<Point2D>,
