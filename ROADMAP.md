@@ -44,7 +44,7 @@ return in an annotation tool. F is an architecture change to the overlay.
 | SVG export (`Ctrl+J`) — vector shapes over a raster background layer | `1cdd81c` |
 | PDF export (`Ctrl+P`) — single-page, no external crate | `6ac9654` |
 | Multiple boards to tab between (`Ctrl+T`/`Ctrl+W`, `Ctrl+Shift+[`/`]`) | `1021bde` |
-| Infinite canvas — pan a Whiteboard/Blackboard past the screen edge | `PENDING` |
+| Infinite canvas — pan a Whiteboard/Blackboard past the screen edge | `48b3ed9` |
 
 ### Design decisions worth not re-litigating
 
