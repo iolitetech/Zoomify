@@ -563,6 +563,7 @@ impl D2DRenderer {
                     ("", ""),
                     ("DRAW TOOLS & KEYS", ""),
                     ("V", "Select (drag/resize, Del removes)"),
+                    ("Ctrl+D / Ctrl+[ ]", "Duplicate / send back / bring front"),
                     ("P", "Pen (freehand with Bezier smoothing)"),
                     ("K", "Laser Pointer (glowing fading trail)"),
                     ("X", "Eraser (drag to delete strokes)"),

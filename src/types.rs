@@ -732,6 +732,12 @@ pub enum HistoryAction {
         /// Ascending by index, which is the order they go back in.
         items: Vec<(usize, Annotation)>,
     },
+    /// A z-order change: the annotation moved from one slot to another.
+    Reorder {
+        id: ShapeId,
+        from: usize,
+        to: usize,
+    },
     Clear(Vec<Annotation>),
     /// A move or resize applied to an already-committed shape. Addressed by id
     /// rather than position, which shifts under it.

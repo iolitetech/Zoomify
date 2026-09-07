@@ -1322,6 +1322,15 @@ impl OverlayWindow {
                         .push(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↩️", "Restored Erased Shape");
                 }
+                HistoryAction::Reorder { id, from, to } => {
+                    if let Some(now) = self.shapes.iter().position(|a| a.id == id) {
+                        let a = self.shapes.remove(now);
+                        self.shapes.insert(from.min(self.shapes.len()), a);
+                        self.redo_history
+                            .push(HistoryAction::Reorder { id, from, to });
+                        self.set_toast("↩️", "Undo Reorder");
+                    }
+                }
                 HistoryAction::DeleteShapes { items } => {
                     // Ascending, so each insert lands before the next one's index.
                     for (index, shape) in &items {
@@ -1381,6 +1390,15 @@ impl OverlayWindow {
                     self.undo_history
                         .push(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↪️", "Re-erased Shape");
+                }
+                HistoryAction::Reorder { id, from, to } => {
+                    if let Some(now) = self.shapes.iter().position(|a| a.id == id) {
+                        let a = self.shapes.remove(now);
+                        self.shapes.insert(to.min(self.shapes.len()), a);
+                        self.undo_history
+                            .push(HistoryAction::Reorder { id, from, to });
+                        self.set_toast("↪️", "Redo Reorder");
+                    }
                 }
                 HistoryAction::DeleteShapes { items } => {
                     // Descending, so removing one does not shift the next.
@@ -1774,6 +1792,89 @@ impl OverlayWindow {
             }
             self.request_repaint();
         }
+    }
+
+    // Stacking and duplication
+
+    /// Move the selection to the front or the back of the stack.
+    ///
+    /// Later in the list means drawn later, so the end of the vector is the
+    /// front. A label rides with its container regardless, because labels are
+    /// drawn in a pass of their own after every other shape.
+    fn restack_selection(&mut self, to_front: bool) {
+        let Some(sel) = &self.selection else {
+            return;
+        };
+        let id = sel.id;
+        let Some(from) = self.annotation_index(id) else {
+            return;
+        };
+        let to = if to_front { self.shapes.len() - 1 } else { 0 };
+        if from == to {
+            return;
+        }
+        let a = self.shapes.remove(from);
+        self.shapes.insert(to, a);
+        self.undo_history
+            .push(HistoryAction::Reorder { id, from, to });
+        self.redo_history.clear();
+        let (icon, label) = if to_front {
+            ("⬆", "Brought to Front")
+        } else {
+            ("⬇", "Sent to Back")
+        };
+        self.set_toast(icon, label);
+        self.request_repaint();
+    }
+
+    /// Copy the selection, offset a little, and select the copy.
+    ///
+    /// A container brings its label, with the copy's label pointed at the
+    /// copy — otherwise both boxes would share one label and moving either
+    /// would drag the same words around.
+    fn duplicate_selection(&mut self) {
+        let Some(sel) = &self.selection else {
+            return;
+        };
+        let Some(source) = self.annotation(sel.id).cloned() else {
+            return;
+        };
+        const OFFSET: f32 = 16.0;
+
+        let mut copy = source.clone();
+        copy.id = ShapeId::fresh();
+        translate_shape(&mut copy.shape, OFFSET, OFFSET);
+        let new_id = copy.id;
+
+        let label_copy = self.label_of(source.id).cloned().map(|mut l| {
+            l.id = ShapeId::fresh();
+            l.container = Some(new_id);
+            translate_shape(&mut l.shape, OFFSET, OFFSET);
+            l
+        });
+
+        self.shapes.push(copy.clone());
+        self.undo_history.push(HistoryAction::AddShape(copy));
+        if let Some(l) = label_copy {
+            self.shapes.push(l.clone());
+            self.undo_history.push(HistoryAction::AddShape(l));
+        }
+        self.redo_history.clear();
+
+        let shape = self
+            .annotation(new_id)
+            .map(|a| a.shape.clone())
+            .unwrap_or_else(|| source.shape.clone());
+        let bounds = self.shape_bounds_exact(&shape);
+        self.selection = Some(Selection {
+            id: new_id,
+            drag: None,
+            grab: Point2D::default(),
+            original: shape,
+            original_bounds: bounds,
+        });
+        self.set_toast("⧉", "Duplicated");
+        self.request_repaint();
     }
 
     // ─────────────────────── Arrow binding ───────────────────────
@@ -4093,6 +4194,16 @@ impl OverlayWindow {
                             }
                             k if k == 'O' as i32 => {
                                 this.load_session_via_dialog();
+                            }
+                            k if k == 'D' as i32 => {
+                                this.duplicate_selection();
+                            }
+                            // Ctrl+] / Ctrl+[ restack, as in most editors.
+                            k if k == 0xDD => {
+                                this.restack_selection(true);
+                            }
+                            k if k == 0xDB => {
+                                this.restack_selection(false);
                             }
                             k if k == VK_TAB.0 as i32 => {
                                 this.cycle_next_monitor();
