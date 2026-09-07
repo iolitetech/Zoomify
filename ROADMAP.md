@@ -40,7 +40,7 @@ return in an annotation tool. F is an architecture change to the overlay.
 | Grouping | `153be3f` |
 | Select and arrowhead sub-bars | `d06ee3c`/`bf4afe0` |
 | Paste an image from the clipboard (`Shape::Image`, CF_DIB/CF_BITMAP) | `1568186` |
-| Drag-and-drop image file(s) onto the canvas | _pending commit_ |
+| Drag-and-drop image file(s) onto the canvas (2-monitor caveat, see D) | `3aead45` |
 
 ### Design decisions worth not re-litigating
 
