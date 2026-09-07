@@ -797,6 +797,43 @@ impl D2DRenderer {
         }
     }
 
+    /// The rubber-band rectangle swept to select several annotations at once.
+    pub(super) unsafe fn render_marquee(
+        &self,
+        rt: &ID2D1RenderTarget,
+        bounds: (f32, f32, f32, f32),
+    ) {
+        unsafe {
+            let (l, t, r, b) = bounds;
+            let rect = D2D_RECT_F {
+                left: l,
+                top: t,
+                right: r,
+                bottom: b,
+            };
+            let accent = D2D1_COLOR_F {
+                r: 0.38,
+                g: 0.72,
+                b: 0.98,
+                a: 1.0,
+            };
+            // A faint wash makes the swept area obvious without hiding what is
+            // underneath it.
+            if let Some(fill) = self.solid_brush(rt, &D2D1_COLOR_F {
+                r: 0.38,
+                g: 0.72,
+                b: 0.98,
+                a: 0.14,
+            }) {
+                rt.FillRectangle(&rect, &fill);
+            }
+            if let Some(edge) = self.solid_brush(rt, &accent) {
+                let dashed = self.get_stroke_style(StrokePattern::Dashed);
+                rt.DrawRectangle(&rect, &edge, 1.2, Some(dashed));
+            }
+        }
+    }
+
     /// Marching-ants box plus eight grips around the selected annotation.
     ///
     /// Drawn in screen space with the identity transform, so the grips stay a

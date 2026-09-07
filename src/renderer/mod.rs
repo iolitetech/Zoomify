@@ -591,6 +591,7 @@ impl D2DRenderer {
         color_picker: &ColorPickerState,
         selection_screen_bounds: Option<(f32, f32, f32, f32)>,
         snap_guides_screen: &[(f32, f32, f32, f32, bool)],
+        marquee_screen: Option<(f32, f32, f32, f32)>,
     ) {
         let rt = match &self.render_target {
             Some(rt) => rt,
@@ -753,6 +754,12 @@ impl D2DRenderer {
                 && !snap_guides_screen.is_empty()
             {
                 self.render_snap_guides(rt, snap_guides_screen);
+            }
+
+            if (mode == AppMode::Draw || mode == AppMode::StaticZoom)
+                && let Some(m) = marquee_screen
+            {
+                self.render_marquee(rt, m);
             }
 
             // ── Selection chrome (screen space so grips keep their size) ──

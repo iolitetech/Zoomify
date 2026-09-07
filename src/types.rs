@@ -739,12 +739,11 @@ pub enum HistoryAction {
         to: usize,
     },
     Clear(Vec<Annotation>),
-    /// A move or resize applied to an already-committed shape. Addressed by id
-    /// rather than position, which shifts under it.
-    TransformShape {
-        id: ShapeId,
-        before: Shape,
-        after: Shape,
+    /// A move or resize applied to already-committed shapes. Addressed by id
+    /// rather than position, which shifts under them. Several at once so
+    /// dragging a group is one undo step, not one per shape.
+    TransformShapes {
+        items: Vec<(ShapeId, Shape, Shape)>,
     },
 }
 
@@ -786,17 +785,42 @@ pub enum DragKind {
 /// A shape picked with the Select tool, plus any drag in progress.
 #[derive(Debug, Clone)]
 pub struct Selection {
-    /// Which annotation is selected. An id rather than a position, because
-    /// positions shift under deletions and undo.
-    pub id: ShapeId,
+    /// Everything selected, by id rather than position, because positions
+    /// shift under deletions and undo.
+    pub ids: Vec<ShapeId>,
     pub drag: Option<DragKind>,
     /// Canvas point where the current drag started.
     pub grab: Point2D,
-    /// The shape as it was when the drag started — the history "before".
-    pub original: Shape,
-    /// Bounds as they were when the drag started, so a resize maps from a
-    /// fixed origin instead of compounding rounding each mouse move.
+    /// Each selected shape as it was when the drag started — the history
+    /// "before" for every one of them.
+    pub originals: Vec<(ShapeId, Shape)>,
+    /// Union bounds when the drag started, so a resize maps from a fixed
+    /// origin instead of compounding rounding on each mouse move.
     pub original_bounds: (f32, f32, f32, f32),
+}
+
+impl Selection {
+    pub fn single(id: ShapeId) -> Self {
+        Self {
+            ids: vec![id],
+            drag: None,
+            grab: Point2D::default(),
+            originals: Vec::new(),
+            original_bounds: (0.0, 0.0, 0.0, 0.0),
+        }
+    }
+
+    pub fn is_single(&self) -> bool {
+        self.ids.len() == 1
+    }
+
+    pub fn only(&self) -> Option<ShapeId> {
+        if self.ids.len() == 1 {
+            self.ids.first().copied()
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
