@@ -582,6 +582,7 @@ impl D2DRenderer {
                     ("Shift + Drag", "Snap straight line (45°)"),
                     ("Ctrl + Drag", "Snap rectangle"),
                     ("Tab + Drag", "Snap ellipse"),
+                    ("Alt + Drag", "Suppress snap to other shapes"),
                 ];
 
                 // Right column entries

@@ -690,6 +690,51 @@ impl D2DRenderer {
         }
     }
 
+    /// Alignment feedback for a snap in effect.
+    ///
+    /// Screen space, so the guides stay hairline-thin and the markers keep
+    /// their size however far the canvas is zoomed. Points arrive already
+    /// converted by the caller.
+    pub(super) unsafe fn render_snap_guides(
+        &self,
+        rt: &ID2D1RenderTarget,
+        guides: &[(f32, f32, f32, f32, bool)],
+    ) {
+        unsafe {
+            let accent = D2D1_COLOR_F {
+                r: 1.0,
+                g: 0.32,
+                b: 0.62,
+                a: 0.95,
+            };
+            let Some(brush) = self.solid_brush(rt, &accent) else {
+                return;
+            };
+            let dashed = self.get_stroke_style(StrokePattern::Dashed);
+
+            for (ax, ay, bx, by, marker) in guides {
+                if *marker {
+                    // A filled diamond reads as "landed on this point" without
+                    // being mistaken for a selection grip.
+                    let s = 5.0;
+                    if let Ok(path) = self.factory.CreatePathGeometry()
+                        && let Ok(sink) = path.Open()
+                    {
+                        sink.BeginFigure(v2(*ax, ay - s), D2D1_FIGURE_BEGIN_FILLED);
+                        sink.AddLine(v2(ax + s, *ay));
+                        sink.AddLine(v2(*ax, ay + s));
+                        sink.AddLine(v2(ax - s, *ay));
+                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                        let _ = sink.Close();
+                        rt.FillGeometry(&path, &brush, None);
+                    }
+                } else {
+                    rt.DrawLine(v2(*ax, *ay), v2(*bx, *by), &brush, 1.2, Some(dashed));
+                }
+            }
+        }
+    }
+
     /// Marching-ants box plus eight grips around the selected annotation.
     ///
     /// Drawn in screen space with the identity transform, so the grips stay a

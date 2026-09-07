@@ -32,8 +32,9 @@ use crate::clipboard::{copy_bgra_to_clipboard, get_clipboard_text};
 use crate::live_zoom::LiveZoomEngine;
 use crate::renderer::D2DRenderer;
 use crate::shapes::{
-    handle_at, push_pressure, recognize_smart_shape, resize_shape, resized_bounds, shape_bounds,
-    shape_intersects_circle, snap_to_angle, snap_to_square, translate_shape,
+    SNAP_TOLERANCE_DIP, SnapGuide, collect_anchors, handle_at, push_pressure,
+    recognize_smart_shape, resize_shape, resized_bounds, shape_bounds, shape_intersects_circle,
+    snap_point, snap_to_angle, snap_to_square, snap_translation, translate_shape,
 };
 use crate::types::{
     AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, BlurToolSettings,
@@ -143,6 +144,13 @@ pub struct OverlayWindow {
     /// True between a pen/touch contact and its release, so stray mouse
     /// messages can be ignored for the duration.
     pub pen_active: bool,
+    /// Alignment feedback for the snap currently in effect, in canvas space.
+    /// Whether shapes snap to each other at all; Alt overrides per gesture.
+    pub snap_to_shapes: bool,
+    pub snap_guides: Vec<SnapGuide>,
+    /// Cached anchors of every shape except the one being drawn or dragged,
+    /// rebuilt when a gesture starts rather than on every mouse move.
+    snap_anchors: Vec<Point2D>,
     /// Annotation picked with the Select tool, if any.
     pub selection: Option<Selection>,
     pub current_tool: DrawTool,
@@ -377,6 +385,9 @@ impl OverlayWindow {
                 live_zoom: LiveZoomEngine::new(),
                 pen_pressure: None,
                 pen_active: false,
+                snap_to_shapes: cfg.snap_to_shapes,
+                snap_guides: Vec::new(),
+                snap_anchors: Vec::new(),
                 selection: None,
                 is_drawing: false,
                 draw_start_pt: Point2D::default(),
@@ -1456,6 +1467,7 @@ impl OverlayWindow {
             && let Some(original) = self.shapes.get(index).cloned()
         {
             let bounds = self.shape_bounds_exact(&original);
+            self.rebuild_snap_anchors(Some(index));
             if let Some(sel) = &mut self.selection {
                 sel.drag = Some(DragKind::Resize(handle));
                 sel.grab = canvas_pt;
@@ -1479,6 +1491,7 @@ impl OverlayWindow {
         match hit {
             Some((index, shape)) => {
                 let bounds = self.shape_bounds_exact(&shape);
+                self.rebuild_snap_anchors(Some(index));
                 self.selection = Some(Selection {
                     index,
                     drag: Some(DragKind::Move),
@@ -1507,11 +1520,48 @@ impl OverlayWindow {
         let dx = canvas_pt.x - sel.grab.x;
         let dy = canvas_pt.y - sel.grab.y;
         let mut updated = sel.original.clone();
+        let original = sel.original.clone();
+        let original_bounds = sel.original_bounds;
+        let snapping = self.snapping_enabled();
+        let tol = self.snap_tolerance();
         match kind {
-            DragKind::Move => translate_shape(&mut updated, dx, dy),
+            DragKind::Move => {
+                let (dx, dy) = if snapping {
+                    let (sx, sy, guides) =
+                        snap_translation(&original, dx, dy, &self.snap_anchors, tol);
+                    self.snap_guides = guides;
+                    (sx, sy)
+                } else {
+                    self.snap_guides.clear();
+                    (dx, dy)
+                };
+                translate_shape(&mut updated, dx, dy);
+            }
             DragKind::Resize(handle) => {
-                let to = resized_bounds(sel.original_bounds, handle, dx, dy);
-                resize_shape(&mut updated, sel.original_bounds, to);
+                // Snap the grip itself, then rebuild the box from where it landed.
+                let grip = Point2D::new(sel.grab.x + dx, sel.grab.y + dy);
+                let grip = if snapping {
+                    match snap_point(grip, &self.snap_anchors, tol) {
+                        Some((p, guides)) => {
+                            self.snap_guides = guides;
+                            p
+                        }
+                        None => {
+                            self.snap_guides.clear();
+                            grip
+                        }
+                    }
+                } else {
+                    self.snap_guides.clear();
+                    grip
+                };
+                let to = resized_bounds(
+                    original_bounds,
+                    handle,
+                    grip.x - sel.grab.x,
+                    grip.y - sel.grab.y,
+                );
+                resize_shape(&mut updated, original_bounds, to);
             }
         }
         if index < self.shapes.len() {
@@ -1523,6 +1573,7 @@ impl OverlayWindow {
 
     /// Finish a drag, recording it in history only if the shape actually moved.
     fn select_release(&mut self) {
+        self.snap_guides.clear();
         let Some(sel) = &mut self.selection else {
             return;
         };
@@ -1862,6 +1913,66 @@ impl OverlayWindow {
             Ok(()) => self.set_toast("💾", format!("Saved {}", name)),
             Err(e) => self.set_toast("❌", format!("Save failed: {}", e)),
         }
+    }
+
+    // ─────────────────────── Snapping ───────────────────────
+
+    /// Snap tolerance in canvas units. The constant is in screen DIPs, so
+    /// dividing by the zoom keeps the pull feeling identical however far in
+    /// the canvas is scaled.
+    fn snap_tolerance(&self) -> f32 {
+        SNAP_TOLERANCE_DIP / self.zoom.level.max(0.05)
+    }
+
+    /// True unless the user is holding Alt, the live override for one gesture.
+    fn snapping_enabled(&self) -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::VK_MENU;
+        if !self.snap_to_shapes {
+            return false;
+        }
+        let alt = unsafe { GetKeyState(VK_MENU.0 as i32) as u16 & 0x8000 } != 0;
+        !alt
+    }
+
+    /// Rebuild the anchor set at the start of a gesture, leaving out `skip`
+    /// so a shape never snaps to itself.
+    fn rebuild_snap_anchors(&mut self, skip: Option<usize>) {
+        self.snap_anchors = if self.snapping_enabled() {
+            let live: Vec<Shape> = self
+                .shapes
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| Some(*i) != skip)
+                .map(|(_, s)| s.clone())
+                .collect();
+            collect_anchors(&live)
+        } else {
+            Vec::new()
+        };
+    }
+
+    /// Pull a moving point onto nearby geometry, recording the guides to draw.
+    fn apply_point_snap(&mut self, pt: Point2D) -> Point2D {
+        if !self.snapping_enabled() {
+            self.snap_guides.clear();
+            return pt;
+        }
+        let tol = self.snap_tolerance();
+        match snap_point(pt, &self.snap_anchors, tol) {
+            Some((snapped, guides)) => {
+                self.snap_guides = guides;
+                snapped
+            }
+            None => {
+                self.snap_guides.clear();
+                pt
+            }
+        }
+    }
+
+    fn clear_snap(&mut self) {
+        self.snap_guides.clear();
+        self.snap_anchors.clear();
     }
 
     /// First entry of a new stroke's pressure track, or empty for input with
@@ -2301,6 +2412,15 @@ impl OverlayWindow {
                         } else {
                             None
                         },
+                        &this
+                            .snap_guides
+                            .iter()
+                            .map(|g| {
+                                let a = this.zoom.canvas_to_screen(g.a);
+                                let b = this.zoom.canvas_to_screen(g.b);
+                                (a.x, a.y, b.x, b.y, g.marker)
+                            })
+                            .collect::<Vec<_>>(),
                     );
 
                     let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
@@ -2670,8 +2790,21 @@ impl OverlayWindow {
                         }
 
                         let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                        let is_ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
                         this.was_shifted_during_draw = is_shift;
                         let start_pt = this.draw_start_pt;
+
+                        // A held modifier is an explicit constraint of its own,
+                        // so shape snapping stands aside rather than fighting it.
+                        let freehand = matches!(this.active_shape, Some(Shape::Stroke { .. }));
+                        let canvas_pt = if freehand || is_shift || is_ctrl {
+                            if !freehand {
+                                this.snap_guides.clear();
+                            }
+                            canvas_pt
+                        } else {
+                            this.apply_point_snap(canvas_pt)
+                        };
 
                         let pen_pressure = this.pen_pressure;
                         match &mut this.active_shape {
@@ -3044,6 +3177,18 @@ impl OverlayWindow {
                     this.last_mouse_dwell_time = Some(Instant::now());
                     this.last_mouse_pos = screen_pt;
 
+                    // Freehand is never snapped; for everything else the first
+                    // corner is pulled onto nearby geometry just like the last.
+                    this.rebuild_snap_anchors(None);
+                    let canvas_pt = if this.current_tool == DrawTool::Pen
+                        || this.current_tool == DrawTool::Highlighter
+                    {
+                        this.clear_snap();
+                        canvas_pt
+                    } else {
+                        this.apply_point_snap(canvas_pt)
+                    };
+
                     this.is_drawing = true;
                     this.draw_start_pt = canvas_pt;
                     this.was_shifted_during_draw = is_shift;
@@ -3110,6 +3255,8 @@ impl OverlayWindow {
 
                 WM_LBUTTONUP => {
                     let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+                    // Guides belong to the gesture that produced them.
+                    this.clear_snap();
                     if this.color_picker.dragging.take().is_some() {
                         let c = this.color_picker.current();
                         this.apply_picked_color(c);

@@ -101,6 +101,10 @@ fn default_show_minimap() -> bool {
     true
 }
 
+fn default_snap_to_shapes() -> bool {
+    true
+}
+
 fn default_graphics_capture() -> bool {
     true
 }
@@ -179,6 +183,10 @@ pub struct AppConfig {
     /// captured black; turn it off to force the GDI path.
     #[serde(default = "default_graphics_capture")]
     pub use_graphics_capture: bool,
+    /// Pull shapes onto other shapes' corners, edges and centres while drawing
+    /// and dragging. Hold Alt to suppress it for one gesture.
+    #[serde(default = "default_snap_to_shapes")]
+    pub snap_to_shapes: bool,
     #[serde(default = "default_hk_static_zoom")]
     pub hotkey_static_zoom: HotkeyBinding,
     #[serde(default = "default_hk_draw")]
@@ -217,6 +225,7 @@ impl Default for AppConfig {
             session_export_png: false,
             session_keep_last: default_session_keep_last(),
             use_graphics_capture: default_graphics_capture(),
+            snap_to_shapes: default_snap_to_shapes(),
             hotkey_static_zoom: default_hk_static_zoom(),
             hotkey_draw: default_hk_draw(),
             hotkey_spotlight: default_hk_spotlight(),

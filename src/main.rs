@@ -368,6 +368,7 @@ unsafe extern "system" fn tray_wnd_proc(
                 overlay.timer_seconds = cfg.timer_duration_mins * 60;
                 overlay.timer_sound_enabled = cfg.timer_sound_enabled;
                 overlay.show_minimap = cfg.show_minimap;
+                overlay.snap_to_shapes = cfg.snap_to_shapes;
                 overlay.default_zoom_level = cfg.default_zoom_level;
                 overlay.allow_monitor_cycling = cfg.allow_monitor_cycling;
                 overlay.monitor_target = cfg.monitor_target.clone();

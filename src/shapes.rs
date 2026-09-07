@@ -353,6 +353,225 @@ pub fn recognize_smart_shape(
     None
 }
 
+// ─────────────────────── Snapping ───────────────────────
+//
+// Two kinds, both measured in screen DIPs so the pull feels the same at any
+// zoom: a *point* snap pulls onto another shape's corner, edge midpoint or
+// centre, and an *alignment* snap pulls one axis into line with another shape,
+// which is what keeps a row of boxes tidy.
+
+/// How close, in screen DIPs, before a snap takes hold.
+pub const SNAP_TOLERANCE_DIP: f32 = 8.0;
+
+/// How far a guide runs past the two points it connects, in canvas units. An
+/// alignment guide lies exactly along the edge it is aligning, so without an
+/// overhang it disappears underneath that edge and shows the user nothing.
+pub const SNAP_GUIDE_OVERHANG: f32 = 18.0;
+
+/// Stretch an axis-aligned guide out past both ends so it stays visible.
+fn overhang(a: Point2D, b: Point2D) -> (Point2D, Point2D) {
+    let m = SNAP_GUIDE_OVERHANG;
+    if (a.x - b.x).abs() < 0.01 {
+        let (lo, hi) = if a.y <= b.y { (a.y, b.y) } else { (b.y, a.y) };
+        (Point2D::new(a.x, lo - m), Point2D::new(a.x, hi + m))
+    } else if (a.y - b.y).abs() < 0.01 {
+        let (lo, hi) = if a.x <= b.x { (a.x, b.x) } else { (b.x, a.x) };
+        (Point2D::new(lo - m, a.y), Point2D::new(hi + m, a.y))
+    } else {
+        (a, b)
+    }
+}
+
+/// Feedback to draw for a snap that took hold.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SnapGuide {
+    pub a: Point2D,
+    pub b: Point2D,
+    /// Draw a marker at `a` rather than a line from `a` to `b`.
+    pub marker: bool,
+}
+
+/// Points on `shape` that something else can snap to.
+///
+/// Freehand strokes contribute none: snapping to a scribble is noise, not
+/// alignment.
+pub fn anchor_points(shape: &Shape) -> Vec<Point2D> {
+    match shape {
+        Shape::Stroke { .. } => Vec::new(),
+        Shape::Line { start, end, .. } | Shape::Arrow { start, end, .. } => vec![
+            *start,
+            *end,
+            Point2D::new((start.x + end.x) * 0.5, (start.y + end.y) * 0.5),
+        ],
+        Shape::StepBadge { center, radius, .. } => vec![
+            *center,
+            Point2D::new(center.x - radius, center.y),
+            Point2D::new(center.x + radius, center.y),
+            Point2D::new(center.x, center.y - radius),
+            Point2D::new(center.x, center.y + radius),
+        ],
+        _ => {
+            let (l, t, r, b) = shape_bounds(shape);
+            let cx = (l + r) * 0.5;
+            let cy = (t + b) * 0.5;
+            vec![
+                Point2D::new(l, t),
+                Point2D::new(cx, t),
+                Point2D::new(r, t),
+                Point2D::new(r, cy),
+                Point2D::new(r, b),
+                Point2D::new(cx, b),
+                Point2D::new(l, b),
+                Point2D::new(l, cy),
+                Point2D::new(cx, cy),
+            ]
+        }
+    }
+}
+
+/// Every anchor offered by `shapes`, flattened.
+pub fn collect_anchors(shapes: &[Shape]) -> Vec<Point2D> {
+    shapes.iter().flat_map(anchor_points).collect()
+}
+
+/// Pull a single moving point onto nearby geometry.
+///
+/// A full point snap wins outright; otherwise each axis is considered on its
+/// own, so a point can line up vertically with one shape and horizontally with
+/// another at the same time.
+pub fn snap_point(
+    target: Point2D,
+    anchors: &[Point2D],
+    tolerance: f32,
+) -> Option<(Point2D, Vec<SnapGuide>)> {
+    if anchors.is_empty() || tolerance <= 0.0 {
+        return None;
+    }
+
+    // 1. Land directly on an anchor if one is within reach.
+    let mut best: Option<(f32, Point2D)> = None;
+    for a in anchors {
+        let d = a.distance(&target);
+        if d <= tolerance && best.map(|(bd, _)| d < bd).unwrap_or(true) {
+            best = Some((d, *a));
+        }
+    }
+    if let Some((_, a)) = best {
+        return Some((
+            a,
+            vec![SnapGuide {
+                a,
+                b: a,
+                marker: true,
+            }],
+        ));
+    }
+
+    // 2. Otherwise line up per axis.
+    let mut snapped = target;
+    let mut guides = Vec::new();
+
+    let mut best_x: Option<(f32, Point2D)> = None;
+    let mut best_y: Option<(f32, Point2D)> = None;
+    for a in anchors {
+        let dx = (a.x - target.x).abs();
+        if dx <= tolerance && best_x.map(|(bd, _)| dx < bd).unwrap_or(true) {
+            best_x = Some((dx, *a));
+        }
+        let dy = (a.y - target.y).abs();
+        if dy <= tolerance && best_y.map(|(bd, _)| dy < bd).unwrap_or(true) {
+            best_y = Some((dy, *a));
+        }
+    }
+    if let Some((_, a)) = best_x {
+        snapped.x = a.x;
+        let (ga, gb) = overhang(a, Point2D::new(a.x, target.y));
+        guides.push(SnapGuide {
+            a: ga,
+            b: gb,
+            marker: false,
+        });
+    }
+    if let Some((_, a)) = best_y {
+        snapped.y = a.y;
+        let (ga, gb) = overhang(a, Point2D::new(target.x, a.y));
+        guides.push(SnapGuide {
+            a: ga,
+            b: gb,
+            marker: false,
+        });
+    }
+
+    if guides.is_empty() {
+        None
+    } else {
+        Some((snapped, guides))
+    }
+}
+
+/// Adjust a drag so the moving shape lines up with the others.
+///
+/// Returns the corrected delta plus whatever guides should be drawn. Each axis
+/// takes the smallest correction any of the shape's own anchors can offer, so
+/// dragging a box snaps by whichever of its edges or centre is closest to
+/// something.
+pub fn snap_translation(
+    moving: &Shape,
+    dx: f32,
+    dy: f32,
+    anchors: &[Point2D],
+    tolerance: f32,
+) -> (f32, f32, Vec<SnapGuide>) {
+    if anchors.is_empty() || tolerance <= 0.0 {
+        return (dx, dy, Vec::new());
+    }
+    let own = anchor_points(moving);
+    if own.is_empty() {
+        return (dx, dy, Vec::new());
+    }
+
+    // (correction, from, to) for the closest match on each axis.
+    let mut best_x: Option<(f32, Point2D, Point2D)> = None;
+    let mut best_y: Option<(f32, Point2D, Point2D)> = None;
+
+    for o in &own {
+        let moved = Point2D::new(o.x + dx, o.y + dy);
+        for a in anchors {
+            let cx = a.x - moved.x;
+            if cx.abs() <= tolerance && best_x.map(|(b, _, _)| cx.abs() < b.abs()).unwrap_or(true) {
+                best_x = Some((cx, moved, *a));
+            }
+            let cy = a.y - moved.y;
+            if cy.abs() <= tolerance && best_y.map(|(b, _, _)| cy.abs() < b.abs()).unwrap_or(true) {
+                best_y = Some((cy, moved, *a));
+            }
+        }
+    }
+
+    let mut guides = Vec::new();
+    let mut out_dx = dx;
+    let mut out_dy = dy;
+    if let Some((c, from, to)) = best_x {
+        out_dx += c;
+        let (ga, gb) = overhang(to, Point2D::new(to.x, from.y));
+        guides.push(SnapGuide {
+            a: ga,
+            b: gb,
+            marker: false,
+        });
+    }
+    if let Some((c, from, to)) = best_y {
+        out_dy += c;
+        let (ga, gb) = overhang(to, Point2D::new(from.x, to.y));
+        guides.push(SnapGuide {
+            a: ga,
+            b: gb,
+            marker: false,
+        });
+    }
+    (out_dx, out_dy, guides)
+}
+
 // ─────────────────────── Pen pressure ───────────────────────
 
 /// Maps pen pressure (0..=1) onto a stroke-width multiplier.
@@ -790,6 +1009,104 @@ mod tests {
             fill: FillMode::None,
             pattern: StrokePattern::Solid,
         }
+    }
+
+    #[test]
+    fn test_anchor_points_ignores_freehand_scribbles() {
+        let s = Shape::Stroke {
+            points: vec![Point2D::new(0.0, 0.0), Point2D::new(10.0, 10.0)],
+            color: ColorPreset::Red,
+            width: 2.0,
+            is_highlighter: false,
+            pattern: StrokePattern::Solid,
+            pressures: Vec::new(),
+        };
+        assert!(anchor_points(&s).is_empty());
+    }
+
+    #[test]
+    fn test_anchor_points_of_a_box_are_corners_edges_and_centre() {
+        let pts = anchor_points(&rect(0.0, 0.0, 100.0, 60.0));
+        assert_eq!(pts.len(), 9);
+        for expected in [
+            Point2D::new(0.0, 0.0),
+            Point2D::new(100.0, 60.0),
+            Point2D::new(50.0, 0.0),
+            Point2D::new(50.0, 30.0),
+        ] {
+            assert!(pts.contains(&expected), "missing {:?} in {:?}", expected, pts);
+        }
+    }
+
+    #[test]
+    fn test_anchor_points_of_a_line_are_its_own_ends_not_its_box() {
+        // A diagonal line's bounding-box corners are not on the line, so
+        // offering them would snap things to empty space.
+        let s = Shape::Line {
+            start: Point2D::new(0.0, 0.0),
+            end: Point2D::new(100.0, 100.0),
+            color: ColorPreset::Red,
+            width: 2.0,
+            pattern: StrokePattern::Solid,
+        };
+        let pts = anchor_points(&s);
+        assert_eq!(pts.len(), 3);
+        assert!(pts.contains(&Point2D::new(50.0, 50.0)));
+        assert!(!pts.contains(&Point2D::new(100.0, 0.0)));
+    }
+
+    #[test]
+    fn test_snap_point_lands_on_a_nearby_anchor() {
+        let anchors = anchor_points(&rect(0.0, 0.0, 100.0, 60.0));
+        let (p, guides) = snap_point(Point2D::new(103.0, 62.0), &anchors, 8.0).unwrap();
+        assert_eq!(p, Point2D::new(100.0, 60.0));
+        assert_eq!(guides.len(), 1);
+        assert!(guides[0].marker);
+    }
+
+    #[test]
+    fn test_snap_point_aligns_each_axis_independently() {
+        // Far from any single anchor, but level with one on x and another on y.
+        let anchors = vec![Point2D::new(200.0, 10.0), Point2D::new(10.0, 400.0)];
+        let (p, guides) = snap_point(Point2D::new(203.0, 397.0), &anchors, 8.0).unwrap();
+        assert_eq!(p, Point2D::new(200.0, 400.0));
+        assert_eq!(guides.len(), 2);
+        assert!(guides.iter().all(|g| !g.marker));
+    }
+
+    #[test]
+    fn test_snap_point_leaves_distant_points_alone() {
+        let anchors = anchor_points(&rect(0.0, 0.0, 100.0, 60.0));
+        assert!(snap_point(Point2D::new(500.0, 500.0), &anchors, 8.0).is_none());
+    }
+
+    #[test]
+    fn test_snap_translation_pulls_a_dragged_box_into_line() {
+        let moving = rect(0.0, 0.0, 50.0, 50.0);
+        let anchors = anchor_points(&rect(200.0, 103.0, 300.0, 163.0));
+        // Dropping it 100 down puts its top edge 3px off the other's top edge.
+        let (dx, dy, guides) = snap_translation(&moving, 0.0, 100.0, &anchors, 8.0);
+        assert_eq!(dx, 0.0);
+        assert_eq!(dy, 103.0);
+        assert!(!guides.is_empty());
+    }
+
+    #[test]
+    fn test_snap_translation_is_a_no_op_when_nothing_is_close() {
+        let moving = rect(0.0, 0.0, 50.0, 50.0);
+        let anchors = anchor_points(&rect(900.0, 900.0, 950.0, 950.0));
+        let (dx, dy, guides) = snap_translation(&moving, 7.0, 11.0, &anchors, 8.0);
+        assert_eq!((dx, dy), (7.0, 11.0));
+        assert!(guides.is_empty());
+    }
+
+    #[test]
+    fn test_snapping_off_when_there_is_nothing_to_snap_to() {
+        let moving = rect(0.0, 0.0, 50.0, 50.0);
+        let (dx, dy, guides) = snap_translation(&moving, 3.0, 4.0, &[], 8.0);
+        assert_eq!((dx, dy), (3.0, 4.0));
+        assert!(guides.is_empty());
+        assert!(snap_point(Point2D::new(1.0, 1.0), &[], 8.0).is_none());
     }
 
     #[test]

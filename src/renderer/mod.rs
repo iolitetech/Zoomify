@@ -581,6 +581,7 @@ impl D2DRenderer {
         show_minimap: bool,
         color_picker: &ColorPickerState,
         selection_screen_bounds: Option<(f32, f32, f32, f32)>,
+        snap_guides_screen: &[(f32, f32, f32, f32, bool)],
     ) {
         let rt = match &self.render_target {
             Some(rt) => rt,
@@ -724,6 +725,13 @@ impl D2DRenderer {
 
             // ── Screen Space Layer (Timer + Eraser + HUD + Toast + Modal) ──
             rt.SetTransform(&identity);
+
+            // ── Snap guides (screen space, under the selection chrome) ──
+            if (mode == AppMode::Draw || mode == AppMode::StaticZoom)
+                && !snap_guides_screen.is_empty()
+            {
+                self.render_snap_guides(rt, snap_guides_screen);
+            }
 
             // ── Selection chrome (screen space so grips keep their size) ──
             if (mode == AppMode::Draw || mode == AppMode::StaticZoom)
