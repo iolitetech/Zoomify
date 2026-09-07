@@ -1,5 +1,8 @@
 use super::{D2DRenderer, v2};
-use crate::shapes::{calculate_arrow_head, normalize_rect, points_to_bezier_segments};
+use crate::shapes::{
+    SELECTION_HANDLE_SIZE, calculate_arrow_head, normalize_rect, points_to_bezier_segments,
+    selection_handle_points,
+};
 use crate::types::{
     ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserRipple, LaserTrailPoint, Point2D, Shape,
     StrokePattern, TextCardStyle, TextEditorState,
@@ -652,6 +655,78 @@ impl D2DRenderer {
                         };
                         rt.DrawRectangle(&border_rect, &border_brush, 1.0, None);
                     }
+                }
+            }
+        }
+    }
+
+    /// Marching-ants box plus eight grips around the selected annotation.
+    ///
+    /// Drawn in screen space with the identity transform, so the grips stay a
+    /// fixed size no matter how far the canvas is zoomed in.
+    pub(super) unsafe fn render_selection(
+        &self,
+        rt: &ID2D1RenderTarget,
+        screen_bounds: (f32, f32, f32, f32),
+    ) {
+        unsafe {
+            let (l, t, r, b) = screen_bounds;
+            let pad = 4.0;
+            let rect = D2D_RECT_F {
+                left: l - pad,
+                top: t - pad,
+                right: r + pad,
+                bottom: b + pad,
+            };
+            let rrect = D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: 3.0,
+                radiusY: 3.0,
+            };
+
+            // Dark halo first so the box reads on light and dark content alike.
+            if let Some(halo) = self.solid_brush(rt, &D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.55,
+                }) {
+                rt.DrawRoundedRectangle(&rrect, &halo, 3.0, None);
+            }
+            let accent = D2D1_COLOR_F {
+                r: 0.38,
+                g: 0.72,
+                b: 0.98,
+                a: 1.0,
+            };
+            if let Some(line) = self.solid_brush(rt, &accent) {
+                rt.DrawRoundedRectangle(&rrect, &line, 1.4, None);
+            }
+
+            let half = SELECTION_HANDLE_SIZE * 0.5;
+            let fill = self.solid_brush(rt, &D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            });
+            let edge = self.solid_brush(rt, &accent);
+            for (_, c) in selection_handle_points((rect.left, rect.top, rect.right, rect.bottom)) {
+                let h = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: c.x - half,
+                        top: c.y - half,
+                        right: c.x + half,
+                        bottom: c.y + half,
+                    },
+                    radiusX: 2.0,
+                    radiusY: 2.0,
+                };
+                if let Some(f) = &fill {
+                    rt.FillRoundedRectangle(&h, f);
+                }
+                if let Some(e) = &edge {
+                    rt.DrawRoundedRectangle(&h, e, 1.2, None);
                 }
             }
         }

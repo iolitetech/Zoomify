@@ -16,6 +16,8 @@ pub enum AppMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrawTool {
+    /// Pick an existing annotation to move, resize or delete it.
+    Select,
     Pen,
     Highlighter,
     LaserPointer,
@@ -33,6 +35,7 @@ pub enum DrawTool {
 impl DrawTool {
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Select => "Select",
             Self::Pen => "Pen",
             Self::Highlighter => "Highlighter",
             Self::LaserPointer => "Laser Pointer",
@@ -347,7 +350,7 @@ impl TextFontFamily {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
     Stroke {
         points: Vec<Point2D>,
@@ -610,9 +613,71 @@ pub fn measure_text_block(text: &str, font_size: f32) -> (f32, f32) {
 #[derive(Debug, Clone)]
 pub enum HistoryAction {
     AddShape(Shape),
-    AddStepBadge { shape: Shape, prev_counter: u32 },
-    DeleteShape { index: usize, shape: Shape },
+    AddStepBadge {
+        shape: Shape,
+        prev_counter: u32,
+    },
+    DeleteShape {
+        index: usize,
+        shape: Shape,
+    },
     Clear(Vec<Shape>),
+    /// A move or resize applied to an already-committed shape.
+    TransformShape {
+        index: usize,
+        before: Shape,
+        after: Shape,
+    },
+}
+
+/// The eight grips around a selected shape's bounding box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionHandle {
+    NW,
+    N,
+    NE,
+    E,
+    SE,
+    S,
+    SW,
+    W,
+}
+
+impl SelectionHandle {
+    /// Which box edges this grip moves: (left, top, right, bottom).
+    pub fn edges(self) -> (bool, bool, bool, bool) {
+        match self {
+            Self::NW => (true, true, false, false),
+            Self::N => (false, true, false, false),
+            Self::NE => (false, true, true, false),
+            Self::E => (false, false, true, false),
+            Self::SE => (false, false, true, true),
+            Self::S => (false, false, false, true),
+            Self::SW => (true, false, false, true),
+            Self::W => (true, false, false, false),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragKind {
+    Move,
+    Resize(SelectionHandle),
+}
+
+/// A shape picked with the Select tool, plus any drag in progress.
+#[derive(Debug, Clone)]
+pub struct Selection {
+    /// Index into `shapes`.
+    pub index: usize,
+    pub drag: Option<DragKind>,
+    /// Canvas point where the current drag started.
+    pub grab: Point2D,
+    /// The shape as it was when the drag started — the history "before".
+    pub original: Shape,
+    /// Bounds as they were when the drag started, so a resize maps from a
+    /// fixed origin instead of compounding rounding each mouse move.
+    pub original_bounds: (f32, f32, f32, f32),
 }
 
 #[derive(Debug, Clone)]
@@ -1902,8 +1967,9 @@ pub fn compute_toolbar_layout(
 
     let mode_end_idx = if monitor_count > 1 { 5 } else { 4 };
 
-    // Tools (11 items)
+    // Tools (12 items)
     let tools = [
+        DrawTool::Select,
         DrawTool::Pen,
         DrawTool::LaserPointer,
         DrawTool::Highlighter,
@@ -1919,7 +1985,7 @@ pub fn compute_toolbar_layout(
     for t in tools {
         item_specs.push((FluentAction::Tool(t), 32.0));
     }
-    let tools_end_idx = mode_end_idx + 11;
+    let tools_end_idx = mode_end_idx + 12;
 
     // Colors (8 items)
     let colors = [

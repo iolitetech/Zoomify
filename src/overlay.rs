@@ -19,7 +19,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, HWND_TOPMOST,
     IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, LoadCursorW, RegisterClassExW, SW_HIDE,
     SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
+    CS_DBLCLKS, ShowWindow, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
     WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -30,14 +31,16 @@ use crate::clipboard::{copy_bgra_to_clipboard, get_clipboard_text};
 use crate::live_zoom::LiveZoomEngine;
 use crate::renderer::D2DRenderer;
 use crate::shapes::{
-    recognize_smart_shape, shape_intersects_circle, snap_to_angle, snap_to_square,
+    handle_at, recognize_smart_shape, resize_shape, resized_bounds, shape_bounds,
+    shape_intersects_circle, snap_to_angle, snap_to_square, translate_shape,
 };
 use crate::types::{
     AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, BlurToolSettings,
-    CanvasBackground, ColorPickerState, ColorPreset, DrawTool, FillMode, FluentAction,
+    CanvasBackground, ColorPickerState, ColorPreset, DragKind, DrawTool, FillMode, FluentAction,
     FluentToolbarState,
     HistoryAction, LaserRipple, LaserTrailPoint, LoupeState, MinimapState, Point2D, Shape,
-    ShapeToolSettings, SpotlightState, StepBadgeToolSettings, StrokePattern, StrokeToolSettings,
+    Selection, ShapeToolSettings, SpotlightState, StepBadgeToolSettings, StrokePattern,
+    StrokeToolSettings,
     TextCardStyle, TextEditorState, TextFontFamily, TextToolSettings, TimerAction,
     TimerWidgetState, ToastNotification, ZoomState,
 };
@@ -81,6 +84,8 @@ pub struct OverlayWindow {
     pub undo_history: Vec<HistoryAction>,
     pub redo_history: Vec<HistoryAction>,
     pub active_shape: Option<Shape>,
+    /// Annotation picked with the Select tool, if any.
+    pub selection: Option<Selection>,
     pub current_tool: DrawTool,
     pub current_color: ColorPreset,
     pub stroke_width: f32,
@@ -152,6 +157,9 @@ impl OverlayWindow {
                 lpfnWndProc: Some(Self::wnd_proc),
                 hInstance: hinstance,
                 lpszClassName: OVERLAY_CLASS_NAME,
+                // Needed for WM_LBUTTONDBLCLK (double-click to edit a text
+                // annotation with the Select tool).
+                style: CS_DBLCLKS,
                 hCursor: LoadCursorW(None, IDC_CROSS).unwrap_or_default(),
                 ..Default::default()
             };
@@ -308,6 +316,7 @@ impl OverlayWindow {
                 },
                 blur_settings: BlurToolSettings { block_size: 14.0 },
                 live_zoom: LiveZoomEngine::new(),
+                selection: None,
                 is_drawing: false,
                 draw_start_pt: Point2D::default(),
                 step_counter: 1,
@@ -887,6 +896,7 @@ impl OverlayWindow {
         self.loupe.pinned = false;
         self.is_drawing = false;
         self.active_shape = None;
+        self.selection = None;
         self.text_editor = None;
         self.show_cheat_sheet = false;
         self.background_bitmap = None;
@@ -1186,6 +1196,7 @@ impl OverlayWindow {
     }
 
     pub fn push_shape(&mut self, shape: Shape) {
+        self.selection = None;
         self.shapes.push(shape.clone());
         let prev_counter = match &shape {
             Shape::StepBadge { number, .. } => Some(*number),
@@ -1233,7 +1244,23 @@ impl OverlayWindow {
                     self.redo_history.push(HistoryAction::Clear(current_shapes));
                     self.set_toast("↩️", "Restored Cleared Canvas");
                 }
+                HistoryAction::TransformShape {
+                    index,
+                    before,
+                    after,
+                } => {
+                    if index < self.shapes.len() {
+                        self.shapes[index] = before.clone();
+                        self.redo_history.push(HistoryAction::TransformShape {
+                            index,
+                            before,
+                            after,
+                        });
+                        self.set_toast("↩️", "Undo Edit");
+                    }
+                }
             }
+            self.selection = None;
             self.request_repaint();
         }
     }
@@ -1273,7 +1300,23 @@ impl OverlayWindow {
                     self.undo_history.push(HistoryAction::Clear(current_shapes));
                     self.set_toast("↪️", "Re-cleared Canvas");
                 }
+                HistoryAction::TransformShape {
+                    index,
+                    before,
+                    after,
+                } => {
+                    if index < self.shapes.len() {
+                        self.shapes[index] = after.clone();
+                        self.undo_history.push(HistoryAction::TransformShape {
+                            index,
+                            before,
+                            after,
+                        });
+                        self.set_toast("↪️", "Redo Edit");
+                    }
+                }
             }
+            self.selection = None;
             self.request_repaint();
         }
     }
@@ -1283,9 +1326,246 @@ impl OverlayWindow {
             let old = std::mem::take(&mut self.shapes);
             self.undo_history.push(HistoryAction::Clear(old));
             self.redo_history.clear();
+            self.selection = None;
             self.set_toast("🧹", "Canvas Cleared (Ctrl+Z to Undo)");
             self.request_repaint();
         }
+    }
+
+    // ─────────────────────── Select tool ───────────────────────
+
+    /// Canvas bounds of a shape. Text is measured with real DirectWrite
+    /// metrics so the selection box hugs the rendered card rather than a
+    /// character-count guess.
+    pub fn shape_bounds_exact(&self, shape: &Shape) -> (f32, f32, f32, f32) {
+        if let Shape::Text {
+            origin,
+            text,
+            font_size,
+            is_bold,
+            is_italic,
+            font_family,
+            ..
+        } = shape
+        {
+            let (w, h) =
+                self.renderer
+                    .measure_text_block(text, *font_size, *is_bold, *is_italic, *font_family);
+            return (origin.x, origin.y, origin.x + w.max(20.0), origin.y + h);
+        }
+        shape_bounds(shape)
+    }
+
+    /// Bounds of the current selection, in canvas coordinates.
+    pub fn selection_bounds(&self) -> Option<(f32, f32, f32, f32)> {
+        let sel = self.selection.as_ref()?;
+        let shape = self.shapes.get(sel.index)?;
+        Some(self.shape_bounds_exact(shape))
+    }
+
+    /// The same bounds converted to screen DIPs, where the grips live.
+    pub fn selection_bounds_screen(&self) -> Option<(f32, f32, f32, f32)> {
+        let (l, t, r, b) = self.selection_bounds()?;
+        let tl = self.zoom.canvas_to_screen(Point2D::new(l, t));
+        let br = self.zoom.canvas_to_screen(Point2D::new(r, b));
+        Some((tl.x, tl.y, br.x, br.y))
+    }
+
+    /// Drop the selection if it no longer points at a live shape.
+    fn validate_selection(&mut self) {
+        if let Some(sel) = &self.selection
+            && sel.index >= self.shapes.len()
+        {
+            self.selection = None;
+        }
+    }
+
+    /// Begin a selection drag, or clear the selection when clicking away.
+    /// Returns true if the click was consumed.
+    fn select_press(&mut self, screen_pt: Point2D, canvas_pt: Point2D) -> bool {
+        // A grip on the current selection wins over picking a new shape,
+        // because grips sit outside the shape's own outline.
+        if let Some(screen_bounds) = self.selection_bounds_screen()
+            && let Some(handle) = handle_at(screen_bounds, screen_pt)
+            && let Some(index) = self.selection.as_ref().map(|s| s.index)
+            && let Some(original) = self.shapes.get(index).cloned()
+        {
+            let bounds = self.shape_bounds_exact(&original);
+            if let Some(sel) = &mut self.selection {
+                sel.drag = Some(DragKind::Resize(handle));
+                sel.grab = canvas_pt;
+                sel.original = original;
+                sel.original_bounds = bounds;
+            }
+            return true;
+        }
+
+        // Topmost shape under the cursor. The tolerance is in canvas units, so
+        // divide out the zoom to keep the grab area constant on screen.
+        let tol = 10.0 / self.zoom.level.max(1.0);
+        let hit = self
+            .shapes
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, s)| shape_intersects_circle(s, canvas_pt, tol))
+            .map(|(i, s)| (i, s.clone()));
+
+        match hit {
+            Some((index, shape)) => {
+                let bounds = self.shape_bounds_exact(&shape);
+                self.selection = Some(Selection {
+                    index,
+                    drag: Some(DragKind::Move),
+                    grab: canvas_pt,
+                    original: shape,
+                    original_bounds: bounds,
+                });
+                true
+            }
+            None => {
+                let had = self.selection.take().is_some();
+                had
+            }
+        }
+    }
+
+    /// Apply the in-flight drag. Returns true if the shape changed.
+    fn select_drag(&mut self, canvas_pt: Point2D) -> bool {
+        let Some(sel) = &self.selection else {
+            return false;
+        };
+        let Some(kind) = sel.drag else {
+            return false;
+        };
+        let index = sel.index;
+        let dx = canvas_pt.x - sel.grab.x;
+        let dy = canvas_pt.y - sel.grab.y;
+        let mut updated = sel.original.clone();
+        match kind {
+            DragKind::Move => translate_shape(&mut updated, dx, dy),
+            DragKind::Resize(handle) => {
+                let to = resized_bounds(sel.original_bounds, handle, dx, dy);
+                resize_shape(&mut updated, sel.original_bounds, to);
+            }
+        }
+        if index < self.shapes.len() {
+            self.shapes[index] = updated;
+            return true;
+        }
+        false
+    }
+
+    /// Finish a drag, recording it in history only if the shape actually moved.
+    fn select_release(&mut self) {
+        let Some(sel) = &mut self.selection else {
+            return;
+        };
+        if sel.drag.take().is_none() {
+            return;
+        }
+        let index = sel.index;
+        let before = sel.original.clone();
+        let Some(after) = self.shapes.get(index).cloned() else {
+            return;
+        };
+        if before != after {
+            self.undo_history.push(HistoryAction::TransformShape {
+                index,
+                before,
+                after: after.clone(),
+            });
+            self.redo_history.clear();
+        }
+        let bounds = self.shape_bounds_exact(&after);
+        if let Some(sel) = &mut self.selection {
+            sel.original = after;
+            sel.original_bounds = bounds;
+        }
+    }
+
+    /// Remove the selected shape, undoably.
+    fn delete_selection(&mut self) {
+        let Some(sel) = self.selection.take() else {
+            return;
+        };
+        if sel.index >= self.shapes.len() {
+            return;
+        }
+        let shape = self.shapes.remove(sel.index);
+        self.undo_history.push(HistoryAction::DeleteShape {
+            index: sel.index,
+            shape,
+        });
+        self.redo_history.clear();
+        self.set_toast("🗑️", "Deleted Annotation");
+        self.request_repaint();
+    }
+
+    /// Arrow-key nudge, in canvas units.
+    fn nudge_selection(&mut self, dx: f32, dy: f32) {
+        let Some(sel) = &self.selection else {
+            return;
+        };
+        let index = sel.index;
+        if index >= self.shapes.len() {
+            return;
+        }
+        let before = self.shapes[index].clone();
+        let mut after = before.clone();
+        translate_shape(&mut after, dx, dy);
+        self.shapes[index] = after.clone();
+        self.undo_history.push(HistoryAction::TransformShape {
+            index,
+            before,
+            after: after.clone(),
+        });
+        self.redo_history.clear();
+        let bounds = self.shape_bounds_exact(&after);
+        if let Some(sel) = &mut self.selection {
+            sel.original = after;
+            sel.original_bounds = bounds;
+        }
+        self.request_repaint();
+    }
+
+    /// Double-clicking a text annotation re-opens it in the editor. The shape
+    /// is lifted out of the list, so committing puts the edited version back.
+    fn reopen_selected_text(&mut self) -> bool {
+        let Some(sel) = &self.selection else {
+            return false;
+        };
+        let index = sel.index;
+        let Some(Shape::Text { .. }) = self.shapes.get(index) else {
+            return false;
+        };
+        let shape = self.shapes.remove(index);
+        let Shape::Text {
+            origin,
+            text,
+            font_size,
+            color,
+            is_bold,
+            is_italic,
+            card_style,
+            font_family,
+        } = shape.clone()
+        else {
+            return false;
+        };
+        self.undo_history.push(HistoryAction::DeleteShape { index, shape });
+        self.redo_history.clear();
+        self.selection = None;
+
+        let mut editor = TextEditorState::new(
+            origin, color, font_size, is_bold, is_italic, card_style, font_family,
+        );
+        editor.cursor = text.len();
+        editor.text = text;
+        self.text_editor = Some(editor);
+        self.set_toast("✏️", "Editing Text (Esc to finish)");
+        self.request_repaint();
+        true
     }
 
     pub fn commit_text_editor(&mut self) {
@@ -1778,6 +2058,11 @@ impl OverlayWindow {
                         &this.minimap,
                         this.show_minimap,
                         &this.color_picker,
+                        if this.current_tool == DrawTool::Select {
+                            this.selection_bounds_screen()
+                        } else {
+                            None
+                        },
                     );
 
                     let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
@@ -1901,6 +2186,26 @@ impl OverlayWindow {
                             } else {
                                 IDC_HAND
                             };
+                            let _ =
+                                SetCursor(Some(LoadCursorW(None, cursor_type).unwrap_or_default()));
+                            return LRESULT(1);
+                        }
+                        // Select tool: arrow by default, move cursor over a
+                        // picked shape or one of its grips.
+                        if this.current_tool == DrawTool::Select
+                            && (this.mode == AppMode::Draw || this.mode == AppMode::StaticZoom)
+                        {
+                            let over = this
+                                .selection_bounds_screen()
+                                .map(|(l, t, r, b)| {
+                                    let reach = 8.0;
+                                    cx >= l - reach
+                                        && cx <= r + reach
+                                        && cy >= t - reach
+                                        && cy <= b + reach
+                                })
+                                .unwrap_or(false);
+                            let cursor_type = if over { IDC_SIZEALL } else { IDC_ARROW };
                             let _ =
                                 SetCursor(Some(LoadCursorW(None, cursor_type).unwrap_or_default()));
                             return LRESULT(1);
@@ -2034,6 +2339,14 @@ impl OverlayWindow {
                         this.laser_pos = None;
                     }
 
+                    // Select tool: drag the picked shape or one of its grips.
+                    if this.current_tool == DrawTool::Select {
+                        if this.select_drag(canvas_pt) {
+                            this.request_repaint();
+                        }
+                        return LRESULT(0);
+                    }
+
                     // Eraser cursor tracking
                     if this.current_tool == DrawTool::Eraser {
                         this.eraser_pos = Some(screen_pt);
@@ -2053,6 +2366,7 @@ impl OverlayWindow {
                         }
                         if let Some(idx) = erased_idx {
                             let erased_shape = this.shapes.remove(idx);
+                            this.selection = None;
                             this.undo_history.push(HistoryAction::DeleteShape {
                                 index: idx,
                                 shape: erased_shape,
@@ -2179,7 +2493,7 @@ impl OverlayWindow {
                     LRESULT(0)
                 }
 
-                WM_LBUTTONDOWN => {
+                WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
                     // Mouse messages are physical pixels; everything below is DIPs.
                     let x = this.px_to_dip((lparam.0 & 0xFFFF) as i16 as f32);
                     let y = this.px_to_dip(((lparam.0 >> 16) & 0xFFFF) as i16 as f32);
@@ -2445,6 +2759,22 @@ impl OverlayWindow {
                         return LRESULT(0);
                     }
 
+                    if this.current_tool == DrawTool::Select {
+                        this.validate_selection();
+                        let consumed = this.select_press(screen_pt, canvas_pt);
+                        // Double-clicking a text annotation puts it back in the
+                        // editor instead of starting a drag.
+                        if msg == WM_LBUTTONDBLCLK && consumed && this.reopen_selected_text() {
+                            return LRESULT(0);
+                        }
+                        if consumed {
+                            let _ =
+                                windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(this.hwnd);
+                        }
+                        this.request_repaint();
+                        return LRESULT(0);
+                    }
+
                     if this.current_tool == DrawTool::Eraser {
                         this.is_drawing = true;
                         let mut erased_idx = None;
@@ -2456,6 +2786,7 @@ impl OverlayWindow {
                         }
                         if let Some(idx) = erased_idx {
                             let erased_shape = this.shapes.remove(idx);
+                            this.selection = None;
                             this.undo_history.push(HistoryAction::DeleteShape {
                                 index: idx,
                                 shape: erased_shape,
@@ -2554,6 +2885,12 @@ impl OverlayWindow {
 
                     if this.timer_widget.is_dragging {
                         this.timer_widget.is_dragging = false;
+                        return LRESULT(0);
+                    }
+
+                    if this.current_tool == DrawTool::Select {
+                        this.select_release();
+                        this.request_repaint();
                         return LRESULT(0);
                     }
 
@@ -2969,6 +3306,32 @@ impl OverlayWindow {
                             return LRESULT(0);
                         }
                         return LRESULT(0);
+                    }
+
+                    // ── Selection edits claim Delete and the arrows, which
+                    //    otherwise clear the canvas / adjust zoom ──
+                    if this.current_tool == DrawTool::Select && this.selection.is_some() {
+                        if key == VK_DELETE.0 as i32 || key == VK_BACK.0 as i32 {
+                            this.delete_selection();
+                            return LRESULT(0);
+                        }
+                        if key == VK_ESCAPE.0 as i32 {
+                            this.selection = None;
+                            this.request_repaint();
+                            return LRESULT(0);
+                        }
+                        let step = if is_shift { 10.0 } else { 1.0 };
+                        let nudge = match key {
+                            k if k == VK_LEFT.0 as i32 => Some((-step, 0.0)),
+                            k if k == VK_RIGHT.0 as i32 => Some((step, 0.0)),
+                            k if k == VK_UP.0 as i32 => Some((0.0, -step)),
+                            k if k == VK_DOWN.0 as i32 => Some((0.0, step)),
+                            _ => None,
+                        };
+                        if let Some((dx, dy)) = nudge {
+                            this.nudge_selection(dx, dy);
+                            return LRESULT(0);
+                        }
                     }
 
                     // ── Ctrl combos (always take priority) ──
@@ -3461,6 +3824,17 @@ impl OverlayWindow {
                             let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("🔢", format!("Step Badge (next: #{})", next_num));
+                            this.request_repaint();
+                        }
+                        k if k == 'V' as i32 && !is_shift => {
+                            this.ensure_draw_mode();
+                            this.current_tool = DrawTool::Select;
+                            this.toolbar.active_tool = Some(DrawTool::Select);
+                            this.sync_tool_to_toolbar();
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
+                            this.toolbar.update_layout(sw, sh);
+                            this.set_toast("↖", "Select (click a shape to edit)");
                             this.request_repaint();
                         }
                         k if k == 'P' as i32 && !is_shift => {

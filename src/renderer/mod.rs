@@ -580,6 +580,7 @@ impl D2DRenderer {
         minimap: &MinimapState,
         show_minimap: bool,
         color_picker: &ColorPickerState,
+        selection_screen_bounds: Option<(f32, f32, f32, f32)>,
     ) {
         let rt = match &self.render_target {
             Some(rt) => rt,
@@ -723,6 +724,13 @@ impl D2DRenderer {
 
             // ── Screen Space Layer (Timer + Eraser + HUD + Toast + Modal) ──
             rt.SetTransform(&identity);
+
+            // ── Selection chrome (screen space so grips keep their size) ──
+            if (mode == AppMode::Draw || mode == AppMode::StaticZoom)
+                && let Some(sb) = selection_screen_bounds
+            {
+                self.render_selection(rt, sb);
+            }
 
             // ── Eraser Cursor Indicator ──
             if (mode == AppMode::Draw || mode == AppMode::StaticZoom)

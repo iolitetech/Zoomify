@@ -562,6 +562,7 @@ impl D2DRenderer {
                     ("Ctrl+6", "Magnifier Loupe Lens (Wheel: zoom | Space: pin)"),
                     ("", ""),
                     ("DRAW TOOLS & KEYS", ""),
+                    ("V", "Select (drag/resize, Del removes)"),
                     ("P", "Pen (freehand with Bezier smoothing)"),
                     ("K", "Laser Pointer (glowing fading trail)"),
                     ("X", "Eraser (drag to delete strokes)"),

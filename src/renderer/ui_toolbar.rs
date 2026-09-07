@@ -383,6 +383,9 @@ impl D2DRenderer {
                             FluentAction::ModeTimer => ("\u{E916}", "Timer (Ctrl+5)"),
                             FluentAction::ModeLoupe => ("\u{E1A3}", "Magnifier Loupe (Ctrl+6)"),
                             FluentAction::CycleDisplay => ("\u{E7F4}", "Switch Display (Ctrl+Tab)"),
+                            FluentAction::Tool(DrawTool::Select) => {
+                                ("\u{E8B3}", "Select / Edit (V)")
+                            }
                             FluentAction::Tool(DrawTool::Pen) => ("\u{ED63}", "Pen (P)"),
                             FluentAction::Tool(DrawTool::LaserPointer) => {
                                 ("\u{EA3A}", "Laser Pointer (K)")
