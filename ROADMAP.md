@@ -42,7 +42,7 @@ return in an annotation tool. F is an architecture change to the overlay.
 | Paste an image from the clipboard (`Shape::Image`, CF_DIB/CF_BITMAP) | `1568186` |
 | Export above screen resolution (`Ctrl+Shift+E`, 1x/2x/3x) | `627a2f2` |
 | SVG export (`Ctrl+J`) — vector shapes over a raster background layer | `1cdd81c` |
-| PDF export (`Ctrl+P`) — single-page, no external crate | _pending_ |
+| PDF export (`Ctrl+P`) — single-page, no external crate | `6ac9654` |
 
 ### Design decisions worth not re-litigating
 
