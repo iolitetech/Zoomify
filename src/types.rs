@@ -780,6 +780,12 @@ impl SelectionHandle {
 pub enum DragKind {
     Move,
     Resize(SelectionHandle),
+    /// Dragging one end of a line or arrow. `true` for the start.
+    ///
+    /// A line has no meaningful interior to scale, so its ends are grabbed
+    /// directly rather than through a bounding box — and dropping an end on a
+    /// shape re-anchors it there.
+    Endpoint(bool),
 }
 
 /// A shape picked with the Select tool, plus any drag in progress.

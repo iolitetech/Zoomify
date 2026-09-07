@@ -32,7 +32,8 @@ use crate::clipboard::{copy_bgra_to_clipboard, get_clipboard_text};
 use crate::live_zoom::LiveZoomEngine;
 use crate::renderer::D2DRenderer;
 use crate::shapes::{
-    ARROW_BINDING_GAP, SNAP_TOLERANCE_DIP, SnapGuide, can_bind_arrow, can_contain_text,
+    ARROW_BINDING_GAP, SELECTION_HANDLE_SIZE, SELECTION_HANDLE_SLOP, SNAP_TOLERANCE_DIP,
+    SnapGuide, can_bind_arrow, can_contain_text,
     collect_anchors, container_height_for, handle_at, normalize_rect, push_pressure,
     recognize_smart_shape, resolve_arrow_ends, with_arrow_ends, resize_shape, resized_bounds, shape_bounds, shape_intersects_circle,
     snap_point, snap_to_angle, snap_to_square, snap_translation, translate_shape,
@@ -1507,6 +1508,38 @@ impl OverlayWindow {
         Some((tl.x, tl.y, br.x, br.y))
     }
 
+    /// The two ends of a singly-selected line or arrow, in screen DIPs.
+    ///
+    /// `None` for anything else, which is what makes the renderer fall back to
+    /// the eight-grip bounding box.
+    pub fn selection_endpoints_screen(&self) -> Option<((f32, f32), (f32, f32))> {
+        let id = self.selection.as_ref()?.only()?;
+        let a = self.annotation(id)?;
+        let (s, e) = match &a.shape {
+            Shape::Line { start, end, .. } | Shape::Arrow { start, end, .. } => (*start, *end),
+            _ => return None,
+        };
+        let s = self.zoom.canvas_to_screen(s);
+        let e = self.zoom.canvas_to_screen(e);
+        Some(((s.x, s.y), (e.x, e.y)))
+    }
+
+    /// Which end of the selected line sits under `screen_pt`, if either.
+    fn endpoint_at(&self, screen_pt: Point2D) -> Option<bool> {
+        let ((sx, sy), (ex, ey)) = self.selection_endpoints_screen()?;
+        let reach = SELECTION_HANDLE_SIZE * 0.5 + SELECTION_HANDLE_SLOP;
+        let near = |x: f32, y: f32| {
+            (screen_pt.x - x).abs() <= reach && (screen_pt.y - y).abs() <= reach
+        };
+        if near(sx, sy) {
+            Some(true)
+        } else if near(ex, ey) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
     /// The marquee rectangle currently being swept, in screen DIPs.
     pub fn marquee_screen(&self) -> Option<(f32, f32, f32, f32)> {
         let (a, b) = self.marquee?;
@@ -1557,6 +1590,13 @@ impl OverlayWindow {
     fn select_press(&mut self, screen_pt: Point2D, canvas_pt: Point2D, additive: bool) -> bool {
         // A grip on the current selection wins over picking a new shape,
         // because grips sit outside the shape's own outline.
+        // A line's own ends win over any bounding box, since they sit inside it.
+        if !additive
+            && let Some(is_start) = self.endpoint_at(screen_pt)
+        {
+            self.begin_drag(DragKind::Endpoint(is_start), canvas_pt);
+            return true;
+        }
         if !additive
             && let Some(screen_bounds) = self.selection_bounds_screen()
             && let Some(handle) = handle_at(screen_bounds, screen_pt)
@@ -1660,6 +1700,40 @@ impl OverlayWindow {
                     })
                     .collect()
             }
+            DragKind::Endpoint(is_start) => {
+                let target = if snapping {
+                    match snap_point(canvas_pt, &self.snap_anchors, tol) {
+                        Some((p, guides)) => {
+                            self.snap_guides = guides;
+                            p
+                        }
+                        None => {
+                            self.snap_guides.clear();
+                            canvas_pt
+                        }
+                    }
+                } else {
+                    self.snap_guides.clear();
+                    canvas_pt
+                };
+                originals
+                    .iter()
+                    .map(|(id, s)| {
+                        let mut u = s.clone();
+                        match &mut u {
+                            Shape::Line { start, end, .. } | Shape::Arrow { start, end, .. } => {
+                                if is_start {
+                                    *start = target;
+                                } else {
+                                    *end = target;
+                                }
+                            }
+                            _ => {}
+                        }
+                        (*id, u)
+                    })
+                    .collect()
+            }
             DragKind::Resize(handle) => {
                 // Snap the grip itself, then rebuild the box from where it landed.
                 let grip = Point2D::new(grab.x + dx, grab.y + dy);
@@ -1744,10 +1818,13 @@ impl OverlayWindow {
         let Some(sel) = &mut self.selection else {
             return;
         };
-        if sel.drag.take().is_none() {
+        let Some(kind) = sel.drag.take() else {
             return;
-        }
+        };
         let originals = sel.originals.clone();
+        if let DragKind::Endpoint(is_start) = kind {
+            self.rebind_endpoint(is_start);
+        }
         let mut items: Vec<(ShapeId, Shape, Shape)> = Vec::new();
         for (id, before) in originals {
             if let Some(after) = self.annotation(id).map(|a| a.shape.clone())
@@ -2040,6 +2117,50 @@ impl OverlayWindow {
                 self.shapes[i].shape = with_arrow_ends(&shape, s, e);
             }
         }
+    }
+
+    /// Re-anchor one end of the selected arrow to whatever it was dropped on.
+    ///
+    /// Dropping it on empty canvas frees that end, which is the only way to
+    /// detach an arrow once it has latched on.
+    fn rebind_endpoint(&mut self, is_start: bool) {
+        let Some(id) = self.selection.as_ref().and_then(|s| s.only()) else {
+            return;
+        };
+        let Some(index) = self.annotation_index(id) else {
+            return;
+        };
+        let (start, end) = match &self.shapes[index].shape {
+            Shape::Arrow { start, end, .. } | Shape::Line { start, end, .. } => (*start, *end),
+            _ => return,
+        };
+        let at = if is_start { start } else { end };
+        let target = self.bind_target_at(at, id);
+        // Both ends on one shape is an arrow to nowhere.
+        let other = if is_start {
+            self.shapes[index].end_bound
+        } else {
+            self.shapes[index].start_bound
+        };
+        let target = if target.is_some() && target == other {
+            None
+        } else {
+            target
+        };
+        if is_start {
+            self.shapes[index].start_bound = target;
+        } else {
+            self.shapes[index].end_bound = target;
+        }
+        self.settle_bindings();
+        self.set_toast(
+            "🔗",
+            if target.is_some() {
+                "Anchored"
+            } else {
+                "Detached"
+            },
+        );
     }
 
     /// The topmost shape an arrow could anchor to at this point.
@@ -2945,6 +3066,11 @@ impl OverlayWindow {
                             .collect::<Vec<_>>(),
                         if this.current_tool == DrawTool::Select {
                             this.marquee_screen()
+                        } else {
+                            None
+                        },
+                        if this.current_tool == DrawTool::Select {
+                            this.selection_endpoints_screen()
                         } else {
                             None
                         },

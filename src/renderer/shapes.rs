@@ -834,6 +834,57 @@ impl D2DRenderer {
         }
     }
 
+    /// Round grips on the two ends of a selected line or arrow.
+    ///
+    /// A line has no interior to scale, so a bounding box would offer eight
+    /// grips that mostly do the wrong thing. Its ends are what you actually
+    /// want to grab, and dropping one on a shape re-anchors it.
+    pub(super) unsafe fn render_endpoint_grips(
+        &self,
+        rt: &ID2D1RenderTarget,
+        a: (f32, f32),
+        b: (f32, f32),
+    ) {
+        unsafe {
+            let accent = D2D1_COLOR_F {
+                r: 0.38,
+                g: 0.72,
+                b: 0.98,
+                a: 1.0,
+            };
+            let fill = self.solid_brush(rt, &D2D1_COLOR_F {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            });
+            let edge = self.solid_brush(rt, &accent);
+            let halo = self.solid_brush(rt, &D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.45,
+            });
+            let r = SELECTION_HANDLE_SIZE * 0.62;
+            for (x, y) in [a, b] {
+                let ring = D2D1_ELLIPSE {
+                    point: v2(x, y),
+                    radiusX: r,
+                    radiusY: r,
+                };
+                if let Some(h) = &halo {
+                    rt.DrawEllipse(&ring, h, 3.0, None);
+                }
+                if let Some(f) = &fill {
+                    rt.FillEllipse(&ring, f);
+                }
+                if let Some(e) = &edge {
+                    rt.DrawEllipse(&ring, e, 1.6, None);
+                }
+            }
+        }
+    }
+
     /// Marching-ants box plus eight grips around the selected annotation.
     ///
     /// Drawn in screen space with the identity transform, so the grips stay a
