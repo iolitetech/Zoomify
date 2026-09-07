@@ -3,8 +3,16 @@
 Running list of what is built, what is deliberately not, and what is queued.
 Effort labels are rough: **S** a sitting, **M** a few sittings, **L** a project.
 
-Agreed order of work: **B (diagramming) → A (recording) → the rest.**
-B is complete; **A is next.**
+Agreed order of work: **B → D → E → G → C → F → A.**
+B is done; **D is next.** Recording (A) is deliberately last: it is the
+largest single item and nothing else depends on it.
+
+Why this order: D's small items unblock real workflows immediately (paste a
+screenshot in, export above screen resolution). E carries the highest-value
+workflow item (multiple boards to tab between while presenting). G is what
+turns this from a personal tool into one other people can install. C is the
+most invasive — rich text needs `Shape::Text` to carry runs — for the least
+return in an annotation tool. F is an architecture change to the overlay.
 
 ---
 
@@ -72,7 +80,7 @@ B is complete; **A is next.**
 
 ---
 
-## A. Recording & capture
+## A. Recording & capture — **last**
 
 The WGC work already gives a D3D11 device, a cached per-monitor capture item and
 a frame pool. Recording is keeping the session running instead of closing it and
@@ -120,12 +128,12 @@ Rich text (per-run bold/italic/colour), alignment inside a container, auto-fit
 font size, bullet lists. All **M** — each needs `Shape::Text` to carry runs
 rather than one flat string.
 
-## D. Export & interop
+## D. Export & interop — **next up**
 
 | Item | Effort |
 |---|---|
-| Paste an image from the clipboard onto the canvas | **S** — conspicuously missing |
-| Drag-and-drop an image file | **S** |
+| Paste an image from the clipboard onto the canvas | **M** — needs a new `Shape::Image`, a bitmap cache and image bytes in the session format. Was listed **S**, which was wrong |
+| Drag-and-drop an image file | **S** — once `Shape::Image` exists |
 | Export above screen resolution | **S** |
 | SVG export | **M** — makes the vector work reusable elsewhere |
 | PDF export | **M** |
