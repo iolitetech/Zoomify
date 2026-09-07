@@ -38,7 +38,9 @@ return in an annotation tool. F is an architecture change to the overlay.
 | Sticky notes | `4cd73eb` |
 | Curved lines and arrows | `bf71cc6` |
 | Grouping | `153be3f` |
-| Select and arrowhead sub-bars | _this commit_ |
+| Select and arrowhead sub-bars | `d06ee3c`/`bf4afe0` |
+| Paste an image from the clipboard (`Shape::Image`, CF_DIB/CF_BITMAP) | `1568186` |
+| Drag-and-drop image file(s) onto the canvas | _pending commit_ |
 
 ### Design decisions worth not re-litigating
 
@@ -128,15 +130,38 @@ Rich text (per-run bold/italic/colour), alignment inside a container, auto-fit
 font size, bullet lists. All **M** — each needs `Shape::Text` to carry runs
 rather than one flat string.
 
-## D. Export & interop — **next up**
+## D. Export & interop — **in progress**
+
+Clipboard paste and drag-and-drop are both done (see Shipped above). Remaining:
 
 | Item | Effort |
 |---|---|
-| Paste an image from the clipboard onto the canvas | **M** — needs a new `Shape::Image`, a bitmap cache and image bytes in the session format. Was listed **S**, which was wrong |
-| Drag-and-drop an image file | **S** — once `Shape::Image` exists |
 | Export above screen resolution | **S** |
 | SVG export | **M** — makes the vector work reusable elsewhere |
 | PDF export | **M** |
+
+### Known limitation: drag-and-drop needs two monitors, or an awkward order
+
+The overlay is `WS_POPUP | WS_EX_TOPMOST`, hidden (`SW_HIDE`) until a mode is
+activated, and then covers the *entire* monitor it's bound to. That's the
+whole point — it's a surface for annotating what's underneath it — but it
+means on one monitor there is nothing left on screen to drag a file **from**
+once the overlay is up, and nothing to drop **onto** before it's up.
+
+What actually works today:
+- **Two monitors.** Source app on one screen, overlay active on the other.
+  Drag across, drop. This is clean.
+- **One monitor, in this order only:** start the drag in Explorer (mouse
+  button down, don't release), hit Ctrl+2 with the other hand to bring the
+  overlay up mid-drag, then drop on it. Windows resolves the drop target
+  dynamically at release, so this works, but it is not what "drag and drop
+  support" implies and won't be discovered without being told.
+
+Real fix, not done: some way to accept a drop *before* the overlay is
+active — e.g. a small always-visible drop target, or making the tray icon
+itself a drop target that activates draw mode and forwards the file. Filed
+here rather than solved, because it changes the activation model rather than
+being a bolt-on to the current one.
 
 ## E. Workflow
 
