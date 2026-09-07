@@ -404,6 +404,9 @@ impl D2DRenderer {
                                 ("\u{E8EC}", "Step Badge (N)")
                             }
                             FluentAction::Tool(DrawTool::Text) => ("\u{E8D2}", "Text (T)"),
+                            FluentAction::Tool(DrawTool::StickyNote) => {
+                                ("\u{E70B}", "Sticky Note (Shift+S)")
+                            }
                             FluentAction::Tool(DrawTool::Blur) => {
                                 ("\u{E80A}", "Redact / Blur (Shift+X)")
                             }

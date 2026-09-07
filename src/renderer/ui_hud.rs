@@ -578,6 +578,7 @@ impl D2DRenderer {
                     ("U", "Rounded Rectangle tool"),
                     ("Q", "Ellipse / Circle tool"),
                     ("T", "Text (Enter: new line | Esc: done)"),
+                    ("Shift+S", "Sticky Note (click, then type)"),
                     ("N", "Step Badge (Shift+N: reset #)"),
                     ("Shift+X", "Redact / Blur mosaic box"),
                     ("", ""),

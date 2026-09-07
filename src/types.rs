@@ -21,6 +21,8 @@ pub enum AppMode {
 pub enum DrawTool {
     /// Pick an existing annotation to move, resize or delete it.
     Select,
+    /// A filled card that opens straight into its own label.
+    StickyNote,
     Pen,
     Highlighter,
     LaserPointer,
@@ -39,6 +41,7 @@ impl DrawTool {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Select => "Select",
+            Self::StickyNote => "Sticky Note",
             Self::Pen => "Pen",
             Self::Highlighter => "Highlighter",
             Self::LaserPointer => "Laser Pointer",
@@ -71,6 +74,17 @@ pub enum ColorPreset {
 }
 
 impl ColorPreset {
+    /// Black or white, whichever will read against this colour.
+    ///
+    /// A sticky note is a solid block of the current colour, and a label in
+    /// that same colour would be invisible on it.
+    pub fn contrasting_ink(self) -> Self {
+        let (r, g, b) = self.rgb_f32();
+        // Rec. 709 luma: green dominates perceived brightness.
+        let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if luma > 0.55 { Self::Black } else { Self::White }
+    }
+
     /// Straight sRGB components in 0..=1.
     pub fn rgb_f32(self) -> (f32, f32, f32) {
         match self {
@@ -2175,7 +2189,7 @@ pub fn compute_toolbar_layout(
 
     let mode_end_idx = if monitor_count > 1 { 5 } else { 4 };
 
-    // Tools (12 items)
+    // Tools (13 items)
     let tools = [
         DrawTool::Select,
         DrawTool::Pen,
@@ -2188,12 +2202,13 @@ pub fn compute_toolbar_layout(
         DrawTool::Ellipse,
         DrawTool::StepBadge,
         DrawTool::Text,
+        DrawTool::StickyNote,
         DrawTool::Blur,
     ];
     for t in tools {
         item_specs.push((FluentAction::Tool(t), 32.0));
     }
-    let tools_end_idx = mode_end_idx + 12;
+    let tools_end_idx = mode_end_idx + 13;
 
     // Colors (8 items)
     let colors = [

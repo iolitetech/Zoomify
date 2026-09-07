@@ -2420,6 +2420,38 @@ impl OverlayWindow {
         }
     }
 
+    /// Drop a filled card and go straight into typing on it.
+    ///
+    /// One gesture: the note is a rounded, solid rectangle and the caret is
+    /// already in it, because a sticky note you cannot type on is just a box.
+    fn place_sticky_note(&mut self, canvas_pt: Point2D) {
+        const W: f32 = 220.0;
+        const H: f32 = 140.0;
+        let colour = self.current_color;
+        let id = self.push_shape(Shape::Rectangle {
+            // Centred on the click, which is where the eye already is.
+            start: Point2D::new(canvas_pt.x - W * 0.5, canvas_pt.y - H * 0.5),
+            end: Point2D::new(canvas_pt.x + W * 0.5, canvas_pt.y + H * 0.5),
+            color: colour,
+            width: 1.5,
+            rounded: true,
+            fill: FillMode::Solid,
+            pattern: StrokePattern::Solid,
+        });
+        // Paper, not paint: fully opaque would bury whatever is underneath.
+        if let Some(index) = self.annotation_index(id) {
+            self.shapes[index].opacity = 0.92;
+        }
+        // The label has to read against the note, not match it.
+        let previous = self.current_color;
+        self.current_color = colour.contrasting_ink();
+        let opened = self.edit_container_label(id);
+        self.current_color = previous;
+        if !opened {
+            self.request_repaint();
+        }
+    }
+
     /// Open the editor on `container`'s label, creating one if it has none.
     fn edit_container_label(&mut self, container: ShapeId) -> bool {
         let Some(owner) = self.annotation(container) else {
@@ -3890,6 +3922,12 @@ impl OverlayWindow {
                         return LRESULT(0);
                     }
 
+                    if this.current_tool == DrawTool::StickyNote {
+                        this.commit_text_editor();
+                        this.place_sticky_note(canvas_pt);
+                        return LRESULT(0);
+                    }
+
                     if this.current_tool == DrawTool::Text {
                         this.commit_text_editor();
                         // Clicking inside a box types a label into it rather
@@ -5139,6 +5177,17 @@ impl OverlayWindow {
                             let sh = this.logical_h();
                             this.toolbar.update_layout(sw, sh);
                             this.set_toast("✏️", "Pen");
+                            this.request_repaint();
+                        }
+                        k if k == 'S' as i32 && is_shift => {
+                            this.ensure_draw_mode();
+                            this.current_tool = DrawTool::StickyNote;
+                            this.toolbar.active_tool = Some(DrawTool::StickyNote);
+                            this.sync_tool_to_toolbar();
+                            let sw = this.logical_w();
+                            let sh = this.logical_h();
+                            this.toolbar.update_layout(sw, sh);
+                            this.set_toast("🟨", "Sticky Note (click to place)");
                             this.request_repaint();
                         }
                         k if k == 'X' as i32 && is_shift => {
