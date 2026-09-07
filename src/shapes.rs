@@ -184,6 +184,14 @@ pub fn shape_intersects_circle(shape: &Shape, center: Point2D, radius: f32) -> b
             radius: r,
             ..
         } => center.distance(c) <= (r + radius),
+        Shape::Image { start, end, .. } => {
+            // A pasted image is solid: anywhere on it is a hit.
+            let (l, t, r, b) = normalize_rect(*start, *end);
+            center.x >= l - radius
+                && center.x <= r + radius
+                && center.y >= t - radius
+                && center.y <= b + radius
+        }
         Shape::Blur { start, end, .. } => {
             let (l, t, r, b) = normalize_rect(*start, *end);
             let threshold = radius + 2.0;
@@ -355,6 +363,8 @@ pub fn shape_kind(shape: &Shape) -> DrawTool {
         Shape::Text { .. } => DrawTool::Text,
         Shape::StepBadge { .. } => DrawTool::StepBadge,
         Shape::Blur { .. } => DrawTool::Blur,
+        // No tool draws an image; it arrives by paste or drop.
+        Shape::Image { .. } => DrawTool::Select,
     }
 }
 
@@ -367,8 +377,8 @@ pub fn set_shape_color(shape: &mut Shape, c: ColorPreset) -> bool {
         | Shape::Ellipse { color, .. }
         | Shape::Text { color, .. }
         | Shape::StepBadge { color, .. } => color,
-        // A blur has no colour of its own; it shows what is underneath.
-        Shape::Blur { .. } => return false,
+        // Neither a blur nor an image has a colour of its own.
+        Shape::Blur { .. } | Shape::Image { .. } => return false,
     };
     if *slot == c {
         return false;
@@ -387,7 +397,7 @@ pub fn set_shape_width(shape: &mut Shape, w: f32) -> bool {
         Shape::StepBadge { stroke_width, .. } => stroke_width,
         // For a blur the equivalent knob is how coarse the mosaic is.
         Shape::Blur { block_size, .. } => block_size,
-        Shape::Text { .. } => return false,
+        Shape::Text { .. } | Shape::Image { .. } => return false,
     };
     if (*slot - w).abs() < 0.01 {
         return false;
@@ -1154,7 +1164,9 @@ pub fn shape_bounds(shape: &Shape) -> (f32, f32, f32, f32) {
             let half = width * 0.5;
             (l - half, t - half, r + half, b + half)
         }
-        Shape::Blur { start, end, .. } => normalize_rect(*start, *end),
+        Shape::Blur { start, end, .. } | Shape::Image { start, end, .. } => {
+            normalize_rect(*start, *end)
+        }
         Shape::Text {
             origin,
             text,
@@ -1241,7 +1253,8 @@ pub fn translate_shape(shape: &mut Shape, dx: f32, dy: f32) {
         | Shape::Arrow { start, end, .. }
         | Shape::Rectangle { start, end, .. }
         | Shape::Ellipse { start, end, .. }
-        | Shape::Blur { start, end, .. } => {
+        | Shape::Blur { start, end, .. }
+        | Shape::Image { start, end, .. } => {
             mv(start);
             mv(end);
         }
@@ -1300,7 +1313,7 @@ pub fn resize_shape(shape: &mut Shape, from: (f32, f32, f32, f32), to: (f32, f32
             map(start);
             map(end);
         }
-        Shape::Blur { start, end, .. } => {
+        Shape::Blur { start, end, .. } | Shape::Image { start, end, .. } => {
             let map = mapper(from, to);
             map(start);
             map(end);

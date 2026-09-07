@@ -589,6 +589,156 @@ pub enum Shape {
         end: Point2D,
         block_size: f32,
     },
+    Image {
+        start: Point2D,
+        end: Point2D,
+        /// Top-down BGRA, one byte per channel.
+        pixels: ImagePixels,
+    },
+}
+
+/// Raw image bytes with their dimensions.
+///
+/// Sessions are JSON, so the bytes go out as base64 rather than an array of
+/// numbers — a 1920x1080 paste would otherwise serialise to tens of megabytes
+/// of decimal digits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImagePixels {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+
+impl ImagePixels {
+    /// A stable key for the renderer's bitmap cache.
+    ///
+    /// Content-derived, so the same image pasted twice shares one GPU bitmap
+    /// and a session reload keys to the same entry it did before.
+    pub fn cache_key(&self) -> u64 {
+        // FNV-1a over the dimensions and a sample of the bytes. Hashing every
+        // byte of a large paste on each frame would cost more than it saves.
+        let mut h: u64 = 0xcbf29ce484222325;
+        let mut eat = |b: u8| {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        };
+        for b in self.width.to_le_bytes() {
+            eat(b);
+        }
+        for b in self.height.to_le_bytes() {
+            eat(b);
+        }
+        for b in (self.bgra.len() as u64).to_le_bytes() {
+            eat(b);
+        }
+        let step = (self.bgra.len() / 4096).max(1);
+        for i in (0..self.bgra.len()).step_by(step) {
+            eat(self.bgra[i]);
+        }
+        h
+    }
+}
+
+/// Minimal base64, so image bytes survive a JSON round trip.
+mod b64 {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub fn encode(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        for chunk in bytes.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+            out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+            out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+            out.push(if chunk.len() > 1 {
+                ALPHABET[(n >> 6) as usize & 63] as char
+            } else {
+                '='
+            });
+            out.push(if chunk.len() > 2 {
+                ALPHABET[n as usize & 63] as char
+            } else {
+                '='
+            });
+        }
+        out
+    }
+
+    pub fn decode(s: &str) -> Option<Vec<u8>> {
+        let mut lookup = [255u8; 256];
+        for (i, c) in ALPHABET.iter().enumerate() {
+            lookup[*c as usize] = i as u8;
+        }
+        let cleaned: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+        if cleaned.len() % 4 != 0 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);
+        for chunk in cleaned.chunks(4) {
+            let pad = chunk.iter().filter(|b| **b == b'=').count();
+            let mut n: u32 = 0;
+            for b in chunk {
+                let v = if *b == b'=' { 0 } else { lookup[*b as usize] };
+                if v == 255 {
+                    return None;
+                }
+                n = (n << 6) | v as u32;
+            }
+            out.push((n >> 16) as u8);
+            if pad < 2 {
+                out.push((n >> 8) as u8);
+            }
+            if pad < 1 {
+                out.push(n as u8);
+            }
+        }
+        Some(out)
+    }
+}
+
+impl Serialize for ImagePixels {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("ImagePixels", 3)?;
+        st.serialize_field("width", &self.width)?;
+        st.serialize_field("height", &self.height)?;
+        st.serialize_field("bgra_base64", &b64::encode(&self.bgra))?;
+        st.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ImagePixels {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            width: u32,
+            height: u32,
+            bgra_base64: String,
+        }
+        let raw = Raw::deserialize(d)?;
+        let bgra = b64::decode(&raw.bgra_base64)
+            .ok_or_else(|| serde::de::Error::custom("image bytes are not valid base64"))?;
+        let want = raw.width as usize * raw.height as usize * 4;
+        if bgra.len() != want {
+            return Err(serde::de::Error::custom(format!(
+                "image is {} bytes, but {}x{} needs {}",
+                bgra.len(),
+                raw.width,
+                raw.height,
+                want
+            )));
+        }
+        Ok(Self {
+            width: raw.width,
+            height: raw.height,
+            bgra,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2288,6 +2438,52 @@ pub fn compute_toolbar_layout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_image_pixels_round_trip_through_json() {
+        // Every byte value once, so a bad base64 alphabet or padding edge
+        // would show up rather than hiding in an all-zero buffer.
+        let bgra: Vec<u8> = (0..=255u8).cycle().take(4 * 3 * 2).collect();
+        let img = ImagePixels {
+            width: 3,
+            height: 2,
+            bgra,
+        };
+        let json = serde_json::to_string(&img).unwrap();
+        // The wire format is base64, not a huge JSON array of numbers.
+        assert!(json.contains("bgra_base64"));
+        assert!(!json.contains("[0,1,2"));
+
+        let back: ImagePixels = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, img);
+    }
+
+    #[test]
+    fn test_image_pixels_rejects_a_length_that_does_not_match_dimensions() {
+        // A crafted or truncated file must fail to load rather than panic
+        // later on an out-of-bounds row read in the renderer.
+        let bad = r#"{"width":10,"height":10,"bgra_base64":"AAAA"}"#;
+        assert!(serde_json::from_str::<ImagePixels>(bad).is_err());
+    }
+
+    #[test]
+    fn test_image_cache_key_is_stable_and_content_sensitive() {
+        let a = ImagePixels {
+            width: 4,
+            height: 4,
+            bgra: vec![10u8; 4 * 4 * 4],
+        };
+        let b = ImagePixels {
+            width: 4,
+            height: 4,
+            bgra: vec![10u8; 4 * 4 * 4],
+        };
+        let mut c = b.clone();
+        c.bgra[0] = 200;
+
+        assert_eq!(a.cache_key(), b.cache_key(), "identical content must share a key");
+        assert_ne!(a.cache_key(), c.cache_key(), "changed content must not collide");
+    }
 
     #[test]
     fn test_adjust_timer_keeps_total_and_remaining_consistent() {

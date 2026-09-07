@@ -5,8 +5,8 @@ use crate::shapes::{
     selection_handle_points, trim_polyline_end,
 };
 use crate::types::{
-    ArrowHead, ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserRipple, LaserTrailPoint, Point2D, Shape,
-    StrokePattern, TextCardStyle, TextEditorState,
+    ArrowHead, ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserRipple, LaserTrailPoint,
+    Point2D, Shape, StrokePattern, TextCardStyle, TextEditorState,
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
@@ -692,6 +692,25 @@ impl D2DRenderer {
                         }
                     }
                 }
+                Shape::Image { start, end, pixels } => {
+                    if let Some(bitmap) = self.image_bitmap(rt, pixels) {
+                        let (l, t, r, b) = normalize_rect(*start, *end);
+                        let dst = D2D_RECT_F {
+                            left: l,
+                            top: t,
+                            right: r,
+                            bottom: b,
+                        };
+                        rt.DrawBitmap(
+                            &bitmap,
+                            Some(&dst),
+                            opacity,
+                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                            None,
+                        );
+                    }
+                }
+
                 Shape::Blur {
                     start,
                     end,

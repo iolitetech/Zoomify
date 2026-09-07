@@ -11,13 +11,14 @@ use std::collections::HashMap;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_CAP_STYLE_ROUND,
-    D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DOT, D2D1_DASH_STYLE_SOLID,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_LINE_JOIN_ROUND,
-    D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DOT,
+    D2D1_DASH_STYLE_SOLID, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
+    D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_STROKE_STYLE_PROPERTIES,
     D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory,
     ID2D1GeometryGroup, ID2D1HwndRenderTarget, ID2D1RenderTarget, ID2D1SolidColorBrush,
@@ -40,10 +41,10 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::capture::ScreenCapture;
 use crate::types::{
-    Annotation, AppMode, CanvasBackground, ColorPickerState, ColorPreset, DrawTool, FluentToolbarState,
-    LaserRipple,
-    LaserTrailPoint, LoupeState, MinimapState, Point2D, Shape, SpotlightState, StrokePattern,
-    TextEditorState, TextFontFamily, TimerWidgetState, ToastNotification, ZoomState,
+    Annotation, AppMode, CanvasBackground, ColorPickerState, ColorPreset, DrawTool,
+    FluentToolbarState, LaserRipple, LaserTrailPoint, LoupeState, MinimapState, Point2D, Shape,
+    SpotlightState, StrokePattern, TextEditorState, TextFontFamily, TimerWidgetState,
+    ToastNotification, ZoomState,
 };
 
 #[inline]
@@ -78,6 +79,10 @@ pub struct D2DRenderer {
     /// the target changes (the offscreen target used for export is a different
     /// one) or the device is lost.
     solid_brush_cache: RefCell<(usize, HashMap<u32, ID2D1SolidColorBrush>)>,
+    /// Pasted images, keyed by content, alongside the render target they were
+    /// uploaded to. Re-uploading a full-screen paste every frame would be the
+    /// single most expensive thing the renderer does.
+    image_cache: RefCell<(usize, HashMap<u64, ID2D1Bitmap>)>,
     /// Window + size the HWND render target was built for, so it can be rebuilt
     /// after the GPU device is lost (driver reset/TDR, RDP transition, mode change).
     target_hwnd: HWND,
@@ -302,6 +307,7 @@ impl D2DRenderer {
                 text_formats_cache: RefCell::new(HashMap::new()),
                 spotlight_geometry_cache: RefCell::new(None),
                 solid_brush_cache: RefCell::new((0, HashMap::new())),
+            image_cache: RefCell::new((0, HashMap::new())),
                 target_hwnd: HWND::default(),
                 target_width: 0,
                 target_height: 0,
@@ -353,6 +359,52 @@ impl D2DRenderer {
 
     pub fn get_text_format(&self, font_size: f32) -> Result<IDWriteTextFormat> {
         self.get_custom_text_format(font_size, true, false, TextFontFamily::SegoeUI)
+    }
+
+    /// Upload a pasted image once and hand back the cached bitmap.
+    ///
+    /// Keyed by content and by the render target it belongs to: bitmaps are
+    /// device resources, and the offscreen target used for export is a
+    /// different device from the window's.
+    fn image_bitmap(
+        &self,
+        rt: &ID2D1RenderTarget,
+        pixels: &crate::types::ImagePixels,
+    ) -> Option<ID2D1Bitmap> {
+        unsafe {
+            let target_key = rt as *const _ as *const () as usize;
+            let mut cache = self.image_cache.borrow_mut();
+            if cache.0 != target_key {
+                cache.0 = target_key;
+                cache.1.clear();
+            }
+            let key = pixels.cache_key();
+            if let Some(b) = cache.1.get(&key) {
+                return Some(b.clone());
+            }
+            let size = D2D_SIZE_U {
+                width: pixels.width,
+                height: pixels.height,
+            };
+            let props = D2D1_BITMAP_PROPERTIES {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+            };
+            let bitmap = rt
+                .CreateBitmap(
+                    size,
+                    Some(pixels.bgra.as_ptr() as *const _),
+                    pixels.width * 4,
+                    &props,
+                )
+                .ok()?;
+            cache.1.insert(key, bitmap.clone());
+            Some(bitmap)
+        }
     }
 
     pub fn get_custom_text_format(

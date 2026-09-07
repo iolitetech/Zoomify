@@ -323,6 +323,15 @@ mod tests {
                 card_style: crate::types::TextCardStyle::Badge,
                 font_family: crate::types::TextFontFamily::CascadiaCode,
             },
+            Shape::Image {
+                start: Point2D::new(0.0, 0.0),
+                end: Point2D::new(4.0, 4.0),
+                pixels: crate::types::ImagePixels {
+                    width: 2,
+                    height: 2,
+                    bgra: (0..16u8).collect(),
+                },
+            },
         ]
         .into_iter()
         .map(Annotation::new)

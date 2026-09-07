@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 
 use windows::Win32::Foundation::{HANDLE, HGLOBAL};
-use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFOHEADER};
+use windows::Win32::Graphics::Gdi::{
+    BI_BITFIELDS, BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits,
+    GetObjectW, HBITMAP, ReleaseDC,
+};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
     SetClipboardData,
@@ -9,6 +12,7 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
 use windows::core::w;
 
+const CF_BITMAP: u32 = 2;
 const CF_DIB: u32 = 8;
 const CF_UNICODETEXT: u32 = 13;
 
@@ -172,5 +176,182 @@ pub fn get_clipboard_text() -> Option<String> {
 
         let _ = CloseClipboard();
         text
+    }
+}
+
+/// An image lifted off the clipboard, as top-down BGRA.
+pub struct ClipboardImage {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+
+/// Read a bitmap from the clipboard, if there is one.
+///
+/// CF_DIB is what every screenshot tool and browser puts there, and is tried
+/// first. Some apps — anything going through .NET's `Clipboard.SetImage`
+/// among them — offer only CF_BITMAP, a GDI handle with no pixel bytes of its
+/// own, so that is the fallback.
+pub fn get_clipboard_image() -> Option<ClipboardImage> {
+    if !open_clipboard_retrying() {
+        return None;
+    }
+    let out = unsafe { read_dib().or_else(|| read_cf_bitmap()) };
+    unsafe {
+        let _ = CloseClipboard();
+    }
+    out
+}
+
+unsafe fn read_dib() -> Option<ClipboardImage> {
+    unsafe {
+        let handle = GetClipboardData(CF_DIB).ok()?;
+        if handle.is_invalid() {
+            return None;
+        }
+        let hglobal = HGLOBAL(handle.0);
+        let ptr = GlobalLock(hglobal);
+        if ptr.is_null() {
+            return None;
+        }
+
+        let header = &*(ptr as *const BITMAPINFOHEADER);
+        let width = header.biWidth;
+        // A negative height means the rows are already top-down.
+        let top_down = header.biHeight < 0;
+        let height = header.biHeight.abs();
+        let bpp = header.biBitCount as u32;
+
+        // Only the two layouts that actually turn up on the clipboard.
+        if width <= 0 || height <= 0 || (bpp != 24 && bpp != 32) {
+            let _ = GlobalUnlock(hglobal);
+            return None;
+        }
+        // Guard against something absurd before allocating for it.
+        if width > 32768 || height > 32768 {
+            let _ = GlobalUnlock(hglobal);
+            return None;
+        }
+
+        // Pixels start after the header and any colour masks the DIB declares.
+        let mask_bytes = if header.biCompression == BI_BITFIELDS.0 {
+            12
+        } else {
+            0
+        };
+        let pixels = (ptr as *const u8).add(header.biSize as usize + mask_bytes);
+
+        let w = width as usize;
+        let h = height as usize;
+        let src_stride = ((w * bpp as usize + 31) / 32) * 4; // rows pad to 4 bytes
+        let mut bgra = vec![0u8; w * h * 4];
+
+        for row in 0..h {
+            let src_row = if top_down { row } else { h - 1 - row };
+            let src = pixels.add(src_row * src_stride);
+            let dst = row * w * 4;
+            for col in 0..w {
+                let s = src.add(col * (bpp as usize / 8));
+                let d = dst + col * 4;
+                bgra[d] = *s;
+                bgra[d + 1] = *s.add(1);
+                bgra[d + 2] = *s.add(2);
+                // A 32-bit DIB's fourth byte is usually zero rather than a
+                // real alpha, and honouring it would paste an invisible image.
+                bgra[d + 3] = 255;
+            }
+        }
+
+        let _ = GlobalUnlock(hglobal);
+        Some(ClipboardImage {
+            width: width as u32,
+            height: h as u32,
+            bgra,
+        })
+    }
+}
+
+/// Fall back for a clipboard that only offers CF_BITMAP: a GDI handle with no
+/// pixel bytes of its own until `GetDIBits` renders it into a buffer.
+///
+/// This is the common case for anything going through .NET's managed
+/// clipboard API, which registers CF_BITMAP without ever writing CF_DIB.
+unsafe fn read_cf_bitmap() -> Option<ClipboardImage> {
+    unsafe {
+        let handle = GetClipboardData(CF_BITMAP).ok()?;
+        if handle.is_invalid() {
+            return None;
+        }
+        let hbitmap = HBITMAP(handle.0);
+
+        let mut bmp = BITMAP {
+            bmType: 0,
+            bmWidth: 0,
+            bmHeight: 0,
+            bmWidthBytes: 0,
+            bmPlanes: 0,
+            bmBitsPixel: 0,
+            bmBits: std::ptr::null_mut(),
+        };
+        let got = GetObjectW(
+            hbitmap.into(),
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bmp as *mut _ as *mut std::ffi::c_void),
+        );
+        if got == 0 || bmp.bmWidth <= 0 || bmp.bmHeight <= 0 {
+            return None;
+        }
+        if bmp.bmWidth > 32768 || bmp.bmHeight > 32768 {
+            return None;
+        }
+
+        let width = bmp.bmWidth as u32;
+        let height = bmp.bmHeight as u32;
+
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width as i32,
+                // Negative asks GDI to hand rows back top-down, so no flip
+                // pass is needed afterwards.
+                biHeight: -(height as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let hdc = GetDC(None);
+        if hdc.is_invalid() {
+            return None;
+        }
+        let mut bgra = vec![0u8; width as usize * height as usize * 4];
+        let rows = GetDIBits(
+            hdc,
+            hbitmap,
+            0,
+            height,
+            Some(bgra.as_mut_ptr() as *mut std::ffi::c_void),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        ReleaseDC(None, hdc);
+
+        if rows == 0 {
+            return None;
+        }
+        // A 32-bit source's fourth byte is not a reliable alpha channel;
+        // honouring it as-is would often paste an invisible image.
+        for px in bgra.chunks_exact_mut(4) {
+            px[3] = 255;
+        }
+
+        Some(ClipboardImage {
+            width,
+            height,
+            bgra,
+        })
     }
 }

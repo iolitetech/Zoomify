@@ -43,14 +43,11 @@ use crate::shapes::{
     snap_point, snap_to_angle, snap_to_square, snap_translation, translate_shape,
 };
 use crate::types::{
-    AppMode, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, BlurToolSettings,
-    Annotation, ArrowHead, CanvasBackground, ColorPickerState, ColorPreset, DragKind, DrawTool, FillMode,
-    FluentAction,
-    FluentToolbarState,
-    HistoryAction, LaserRipple, LaserTrailPoint, LoupeState, MinimapState, Point2D, Shape,
-    Selection, ShapeId, ShapeToolSettings, SpotlightState, StepBadgeToolSettings,
-    StrokePattern,
-    StrokeToolSettings,
+    Annotation, AppMode, ArrowHead, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize,
+    BlurToolSettings, CanvasBackground, ColorPickerState, ColorPreset, DragKind, DrawTool,
+    FillMode, FluentAction, FluentToolbarState, HistoryAction, ImagePixels, LaserRipple,
+    LaserTrailPoint, LoupeState, MinimapState, Point2D, Selection, Shape, ShapeId,
+    ShapeToolSettings, SpotlightState, StepBadgeToolSettings, StrokePattern, StrokeToolSettings,
     TextCardStyle, TextEditorState, TextFontFamily, TextToolSettings, TimerAction,
     TimerWidgetState, ToastNotification, ZoomState,
 };
@@ -2705,6 +2702,64 @@ impl OverlayWindow {
         }
     }
 
+    /// Drop whatever bitmap is on the clipboard onto the canvas, centred in
+    /// the current view and scaled to fit it.
+    ///
+    /// This is the one paste path that does not go through the text editor:
+    /// Ctrl+V there inserts text, and only reaches here when nothing is being
+    /// typed into.
+    fn paste_image_from_clipboard(&mut self) {
+        self.ensure_draw_mode();
+        let Some(img) = crate::clipboard::get_clipboard_image() else {
+            self.set_toast("📋", "No image on the clipboard");
+            return;
+        };
+        if img.width == 0 || img.height == 0 {
+            return;
+        }
+
+        // Fit inside most of the viewport rather than dumping a screenshot's
+        // native pixels onto the canvas, which is usually far bigger than the
+        // window it is being pasted into.
+        let sw = self.logical_w();
+        let sh = self.logical_h();
+        let max_w = (sw * 0.7).max(80.0);
+        let max_h = (sh * 0.7).max(80.0);
+        let scale = (max_w / img.width as f32)
+            .min(max_h / img.height as f32)
+            .min(1.0);
+        let w = img.width as f32 * scale;
+        let h = img.height as f32 * scale;
+
+        let centre_screen = Point2D::new(sw / 2.0, sh / 2.0);
+        let centre = self.zoom.screen_to_canvas(centre_screen);
+
+        let id = self.push_shape(Shape::Image {
+            start: Point2D::new(centre.x - w * 0.5, centre.y - h * 0.5),
+            end: Point2D::new(centre.x + w * 0.5, centre.y + h * 0.5),
+            pixels: ImagePixels {
+                width: img.width,
+                height: img.height,
+                bgra: img.bgra,
+            },
+        });
+
+        // Selection chrome, and Delete/drag on it, only respond while the
+        // Select tool is active — switch to it, or a paste while e.g. the Pen
+        // tool is active would drop the image with no visible way to move or
+        // remove it short of Ctrl+Z.
+        self.current_tool = DrawTool::Select;
+        self.toolbar.active_tool = Some(DrawTool::Select);
+        self.sync_tool_to_toolbar();
+        self.selection = Some(Selection::single(id));
+        self.sync_selection_kind();
+        let sw = self.logical_w();
+        let sh = self.logical_h();
+        self.toolbar.update_layout(sw, sh);
+        self.set_toast("📋", "Pasted Image");
+        self.request_repaint();
+    }
+
     /// Open the editor on `container`'s label, creating one if it has none.
     fn edit_container_label(&mut self, container: ShapeId) -> bool {
         let Some(owner) = self.annotation(container) else {
@@ -5043,6 +5098,9 @@ impl OverlayWindow {
                             }
                             k if k == 'D' as i32 => {
                                 this.duplicate_selection();
+                            }
+                            k if k == 'V' as i32 => {
+                                this.paste_image_from_clipboard();
                             }
                             // Ctrl+Shift+Up/Down fades the selection; Ctrl+E
                             // cycles the arrowhead.
