@@ -40,7 +40,7 @@ return in an annotation tool. F is an architecture change to the overlay.
 | Grouping | `153be3f` |
 | Select and arrowhead sub-bars | `d06ee3c`/`bf4afe0` |
 | Paste an image from the clipboard (`Shape::Image`, CF_DIB/CF_BITMAP) | `1568186` |
-| Export above screen resolution (`Ctrl+Shift+E`, 1x/2x/3x) | _pending_ |
+| Export above screen resolution (`Ctrl+Shift+E`, 1x/2x/3x) | `627a2f2` |
 
 ### Design decisions worth not re-litigating
 
