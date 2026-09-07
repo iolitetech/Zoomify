@@ -402,6 +402,15 @@ pub struct Annotation {
     /// makes it follow the container through moves and resizes for free.
     #[serde(default)]
     pub container: Option<ShapeId>,
+    /// For a `Line` or `Arrow`: what each end is anchored to, if anything.
+    ///
+    /// The stored endpoints are kept in step with these by a settle pass after
+    /// any mutation, so everything else — hit-testing, bounds, snapping,
+    /// export — keeps reading plain geometry and needs no idea bindings exist.
+    #[serde(default)]
+    pub start_bound: Option<ShapeId>,
+    #[serde(default)]
+    pub end_bound: Option<ShapeId>,
 }
 
 impl Annotation {
@@ -410,6 +419,8 @@ impl Annotation {
             id: ShapeId::fresh(),
             shape,
             container: None,
+            start_bound: None,
+            end_bound: None,
         }
     }
 

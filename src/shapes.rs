@@ -353,6 +353,110 @@ pub fn recognize_smart_shape(
     None
 }
 
+// ─────────────────────── Arrow binding ───────────────────────
+
+/// Breathing room between a bound arrow's tip and the shape it points at.
+pub const ARROW_BINDING_GAP: f32 = 6.0;
+
+/// Whether an arrow can anchor to this shape.
+///
+/// It needs a boundary worth aiming at. A freehand scribble, a line or a blur
+/// patch has no meaningful "edge" to stop against.
+pub fn can_bind_arrow(shape: &Shape) -> bool {
+    matches!(
+        shape,
+        Shape::Rectangle { .. } | Shape::Ellipse { .. } | Shape::StepBadge { .. } | Shape::Text { .. }
+    )
+}
+
+/// Where a ray from a shape's centre toward `toward` leaves its outline,
+/// pushed out by `gap`.
+///
+/// This is what keeps a bound arrow touching the edge of a box rather than
+/// burying its head in the middle of it, at whatever angle the two end up.
+pub fn boundary_point(shape: &Shape, toward: Point2D, gap: f32) -> Point2D {
+    let (l, t, r, b) = shape_bounds(shape);
+    let c = Point2D::new((l + r) * 0.5, (t + b) * 0.5);
+    let dx = toward.x - c.x;
+    let dy = toward.y - c.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 0.001 {
+        return c;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let rx = ((r - l) * 0.5).max(0.5);
+    let ry = ((b - t) * 0.5).max(0.5);
+
+    let hit = match shape {
+        Shape::Ellipse { .. } => {
+            let a = (ux / rx).powi(2) + (uy / ry).powi(2);
+            if a > 1e-9 { 1.0 / a.sqrt() } else { rx.min(ry) }
+        }
+        Shape::StepBadge { radius, .. } => *radius,
+        _ => {
+            // Rectangle: whichever axis the ray crosses first.
+            let tx = if ux.abs() > 1e-6 { rx / ux.abs() } else { f32::MAX };
+            let ty = if uy.abs() > 1e-6 { ry / uy.abs() } else { f32::MAX };
+            tx.min(ty)
+        }
+    };
+
+    // Never reach past the point being aimed at, or a short arrow between two
+    // touching boxes would turn itself inside out.
+    let d = (hit + gap).min(len);
+    Point2D::new(c.x + ux * d, c.y + uy * d)
+}
+
+/// The endpoints a bound line or arrow actually draws between.
+///
+/// Returns `None` when nothing is bound, so callers can skip the clone.
+/// Each end aims at the *centre* of whatever the other end is attached to,
+/// which keeps the two resolutions independent rather than chasing each other.
+pub fn resolve_arrow_ends(
+    shape: &Shape,
+    start_target: Option<&Shape>,
+    end_target: Option<&Shape>,
+    gap: f32,
+) -> Option<(Point2D, Point2D)> {
+    if start_target.is_none() && end_target.is_none() {
+        return None;
+    }
+    let (start, end) = match shape {
+        Shape::Arrow { start, end, .. } | Shape::Line { start, end, .. } => (*start, *end),
+        _ => return None,
+    };
+
+    let centre = |s: &Shape| {
+        let (l, t, r, b) = shape_bounds(s);
+        Point2D::new((l + r) * 0.5, (t + b) * 0.5)
+    };
+    let aim_for_start = end_target.map(centre).unwrap_or(end);
+    let aim_for_end = start_target.map(centre).unwrap_or(start);
+
+    let new_start = match start_target {
+        Some(s) => boundary_point(s, aim_for_start, gap),
+        None => start,
+    };
+    let new_end = match end_target {
+        Some(s) => boundary_point(s, aim_for_end, gap),
+        None => end,
+    };
+    Some((new_start, new_end))
+}
+
+/// Put resolved endpoints back into a copy of the shape.
+pub fn with_arrow_ends(shape: &Shape, start: Point2D, end: Point2D) -> Shape {
+    let mut out = shape.clone();
+    match &mut out {
+        Shape::Arrow { start: s, end: e, .. } | Shape::Line { start: s, end: e, .. } => {
+            *s = start;
+            *e = end;
+        }
+        _ => {}
+    }
+    out
+}
+
 // ─────────────────────── Container labels ───────────────────────
 
 /// Whether a shape can hold a label.
@@ -865,7 +969,7 @@ pub fn resize_shape(shape: &mut Shape, from: (f32, f32, f32, f32), to: (f32, f32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{BadgeShape, TextCardStyle, TextFontFamily};
+    use crate::types::{ArrowStyle, BadgeShape, TextCardStyle, TextFontFamily};
 
     #[test]
     fn test_normalize_rect() {
@@ -1046,6 +1150,120 @@ mod tests {
             fill: FillMode::None,
             pattern: StrokePattern::Solid,
         }
+    }
+
+    fn arrow(x0: f32, y0: f32, x1: f32, y1: f32) -> Shape {
+        Shape::Arrow {
+            start: Point2D::new(x0, y0),
+            end: Point2D::new(x1, y1),
+            color: ColorPreset::Red,
+            width: 2.0,
+            style: ArrowStyle::Single,
+            pattern: StrokePattern::Solid,
+        }
+    }
+
+    #[test]
+    fn test_only_shapes_with_an_edge_can_be_anchored_to() {
+        assert!(can_bind_arrow(&rect(0.0, 0.0, 10.0, 10.0)));
+        assert!(!can_bind_arrow(&arrow(0.0, 0.0, 10.0, 10.0)));
+        assert!(!can_bind_arrow(&Shape::Blur {
+            start: Point2D::new(0.0, 0.0),
+            end: Point2D::new(10.0, 10.0),
+            block_size: 8.0,
+        }));
+    }
+
+    #[test]
+    fn test_boundary_point_leaves_a_box_through_the_facing_edge() {
+        let b = rect(0.0, 0.0, 100.0, 100.0); // centre (50,50), half-extent 50
+        // Straight to the right: exits the right edge, plus the gap.
+        let p = boundary_point(&b, Point2D::new(500.0, 50.0), 6.0);
+        assert!((p.x - 106.0).abs() < 0.01, "{:?}", p);
+        assert!((p.y - 50.0).abs() < 0.01);
+        // Straight up: exits the top edge.
+        let p = boundary_point(&b, Point2D::new(50.0, -500.0), 6.0);
+        assert!((p.y - (-6.0)).abs() < 0.01, "{:?}", p);
+    }
+
+    #[test]
+    fn test_boundary_point_never_overshoots_its_target() {
+        // Aiming at something inside the box must not fling the tip past it.
+        let b = rect(0.0, 0.0, 100.0, 100.0);
+        let toward = Point2D::new(60.0, 50.0);
+        let p = boundary_point(&b, toward, 6.0);
+        assert!(p.x <= toward.x + 0.01, "{:?}", p);
+    }
+
+    #[test]
+    fn test_boundary_point_on_a_disc_uses_its_radius() {
+        let badge = Shape::StepBadge {
+            center: Point2D::new(0.0, 0.0),
+            number: 1,
+            radius: 20.0,
+            color: ColorPreset::Red,
+            shape: BadgeShape::Circle,
+            fill: FillMode::Solid,
+            stroke_width: 0.0,
+            pattern: StrokePattern::Solid,
+        };
+        let p = boundary_point(&badge, Point2D::new(1000.0, 0.0), 5.0);
+        assert!((p.x - 25.0).abs() < 0.01, "{:?}", p);
+    }
+
+    #[test]
+    fn test_unbound_arrows_are_left_exactly_as_drawn() {
+        assert!(resolve_arrow_ends(&arrow(0.0, 0.0, 10.0, 10.0), None, None, 6.0).is_none());
+    }
+
+    #[test]
+    fn test_bound_arrow_ends_sit_on_the_two_boxes() {
+        let a = rect(0.0, 0.0, 100.0, 100.0); // centre (50,50)
+        let b = rect(300.0, 0.0, 400.0, 100.0); // centre (350,50)
+        // Authored anywhere: the resolved ends come from the boxes, not this.
+        let arr = arrow(0.0, 0.0, 0.0, 0.0);
+        let (s, e) = resolve_arrow_ends(&arr, Some(&a), Some(&b), 6.0).unwrap();
+        assert!((s.x - 106.0).abs() < 0.01, "{:?}", s);
+        assert!((e.x - 294.0).abs() < 0.01, "{:?}", e);
+        assert!((s.y - 50.0).abs() < 0.01 && (e.y - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_one_bound_end_leaves_the_other_where_it_was() {
+        let a = rect(0.0, 0.0, 100.0, 100.0);
+        let arr = arrow(7.0, 9.0, 400.0, 50.0);
+        let (s, e) = resolve_arrow_ends(&arr, Some(&a), None, 6.0).unwrap();
+        // The free end is untouched.
+        assert_eq!(e, Point2D::new(400.0, 50.0));
+        // The bound end left the box toward it.
+        assert!(s.x > 100.0, "{:?}", s);
+    }
+
+    #[test]
+    fn test_moving_the_target_moves_the_bound_end() {
+        let arr = arrow(0.0, 0.0, 0.0, 0.0);
+        let far = rect(300.0, 0.0, 400.0, 100.0);
+        let near = rect(0.0, 0.0, 100.0, 100.0);
+        let (s1, _) = resolve_arrow_ends(&arr, Some(&near), Some(&far), 6.0).unwrap();
+        // Drop the anchored box 200 down; its end of the arrow must follow.
+        let moved = rect(0.0, 200.0, 100.0, 300.0);
+        let (s2, _) = resolve_arrow_ends(&arr, Some(&moved), Some(&far), 6.0).unwrap();
+        assert!(s2.y > s1.y + 150.0, "{:?} -> {:?}", s1, s2);
+    }
+
+    #[test]
+    fn test_with_arrow_ends_replaces_only_the_endpoints() {
+        let arr = arrow(0.0, 0.0, 10.0, 10.0);
+        let out = with_arrow_ends(&arr, Point2D::new(1.0, 2.0), Point2D::new(3.0, 4.0));
+        let Shape::Arrow {
+            start, end, width, ..
+        } = &out
+        else {
+            panic!("shape changed variant")
+        };
+        assert_eq!(*start, Point2D::new(1.0, 2.0));
+        assert_eq!(*end, Point2D::new(3.0, 4.0));
+        assert_eq!(*width, 2.0);
     }
 
     #[test]

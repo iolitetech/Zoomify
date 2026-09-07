@@ -32,8 +32,9 @@ use crate::clipboard::{copy_bgra_to_clipboard, get_clipboard_text};
 use crate::live_zoom::LiveZoomEngine;
 use crate::renderer::D2DRenderer;
 use crate::shapes::{
-    SNAP_TOLERANCE_DIP, SnapGuide, can_contain_text, collect_anchors, container_height_for,
-    handle_at, push_pressure,
+    ARROW_BINDING_GAP, SNAP_TOLERANCE_DIP, SnapGuide, can_bind_arrow, can_contain_text,
+    collect_anchors, container_height_for, handle_at, push_pressure, resolve_arrow_ends,
+    with_arrow_ends,
     recognize_smart_shape, resize_shape, resized_bounds, shape_bounds, shape_intersects_circle,
     snap_point, snap_to_angle, snap_to_square, snap_translation, translate_shape,
 };
@@ -1346,6 +1347,7 @@ impl OverlayWindow {
                 }
             }
             self.selection = None;
+            self.settle_bindings();
             self.request_repaint();
         }
     }
@@ -1406,6 +1408,7 @@ impl OverlayWindow {
                 }
             }
             self.selection = None;
+            self.settle_bindings();
             self.request_repaint();
         }
     }
@@ -1589,6 +1592,7 @@ impl OverlayWindow {
         }
         if let Some(index) = self.annotation_index(id) {
             self.shapes[index].shape = updated;
+            self.settle_bindings();
             return true;
         }
         false
@@ -1686,6 +1690,7 @@ impl OverlayWindow {
             after: after.clone(),
         });
         self.redo_history.clear();
+        self.settle_bindings();
         let bounds = self.shape_bounds_exact(&after);
         if let Some(sel) = &mut self.selection {
             sel.original = after;
@@ -1769,6 +1774,90 @@ impl OverlayWindow {
             }
             self.request_repaint();
         }
+    }
+
+    // ─────────────────────── Arrow binding ───────────────────────
+
+    /// Rewrite every bound arrow's endpoints from what it is anchored to.
+    ///
+    /// Endpoints are derived, so rather than teaching hit-testing, bounds,
+    /// snapping and export about bindings, they are written back into the
+    /// stored geometry after any mutation and everything downstream carries on
+    /// reading plain shapes.
+    fn settle_bindings(&mut self) {
+        let bound: Vec<usize> = self
+            .shapes
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.start_bound.is_some() || a.end_bound.is_some())
+            .map(|(i, _)| i)
+            .collect();
+        if bound.is_empty() {
+            return;
+        }
+        for i in bound {
+            let (shape, sb, eb) = {
+                let a = &self.shapes[i];
+                (a.shape.clone(), a.start_bound, a.end_bound)
+            };
+            // A target that is gone keeps its binding and its last endpoint, so
+            // undoing the deletion re-attaches instead of orphaning the arrow.
+            let start_target = sb.and_then(|id| self.annotation(id)).map(|a| a.shape.clone());
+            let end_target = eb.and_then(|id| self.annotation(id)).map(|a| a.shape.clone());
+            if let Some((s, e)) = resolve_arrow_ends(
+                &shape,
+                start_target.as_ref(),
+                end_target.as_ref(),
+                ARROW_BINDING_GAP,
+            ) {
+                self.shapes[i].shape = with_arrow_ends(&shape, s, e);
+            }
+        }
+    }
+
+    /// The topmost shape an arrow could anchor to at this point.
+    fn bind_target_at(&self, canvas_pt: Point2D, exclude: ShapeId) -> Option<ShapeId> {
+        self.shapes
+            .iter()
+            .rev()
+            .find(|a| {
+                a.id != exclude
+                    && !a.is_contained_text()
+                    && can_bind_arrow(&a.shape)
+                    && shape_intersects_circle(&a.shape, canvas_pt, 4.0)
+            })
+            .map(|a| a.id)
+    }
+
+    /// Anchor a freshly drawn line or arrow to whatever its ends landed on.
+    fn bind_new_arrow(&mut self, id: ShapeId) {
+        let Some(index) = self.annotation_index(id) else {
+            return;
+        };
+        let (start, end) = match &self.shapes[index].shape {
+            Shape::Arrow { start, end, .. } | Shape::Line { start, end, .. } => (*start, *end),
+            _ => return,
+        };
+        let sb = self.bind_target_at(start, id);
+        let eb = self.bind_target_at(end, id);
+        // Both ends on the same shape would be an arrow to nowhere.
+        let (sb, eb) = if sb.is_some() && sb == eb {
+            (None, None)
+        } else {
+            (sb, eb)
+        };
+        if sb.is_none() && eb.is_none() {
+            return;
+        }
+        self.shapes[index].start_bound = sb;
+        self.shapes[index].end_bound = eb;
+        self.settle_bindings();
+        let what = match (sb.is_some(), eb.is_some()) {
+            (true, true) => "Arrow anchored at both ends",
+            (true, false) => "Arrow anchored at its tail",
+            _ => "Arrow anchored at its head",
+        };
+        self.set_toast("🔗", what);
     }
 
     /// The label bound to `container`, if it has one.
@@ -2044,6 +2133,7 @@ impl OverlayWindow {
                 self.background_type = background;
                 self.step_counter = sess.step_counter;
                 self.toolbar.badge_counter = self.step_counter;
+                self.settle_bindings();
                 self.set_toast(
                     "📂",
                     format!("Loaded {} annotation(s) — {}", count, sess.saved_at),
@@ -3535,7 +3625,12 @@ impl OverlayWindow {
                                 _ => true,
                             };
                             if should_keep {
-                                this.push_shape(shape);
+                                let bindable =
+                                    matches!(shape, Shape::Line { .. } | Shape::Arrow { .. });
+                                let id = this.push_shape(shape);
+                                if bindable {
+                                    this.bind_new_arrow(id);
+                                }
                             }
                         }
                         this.request_repaint();
