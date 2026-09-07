@@ -1004,6 +1004,20 @@ pub enum HistoryAction {
     },
 }
 
+/// One page of annotations that can be tabbed to independently of the
+/// others — see `OverlayWindow::boards`. Only the parts of the overlay's
+/// state that a fresh page should start clean carry over here (its shapes
+/// and their own undo/redo stack); everything else — background capture,
+/// zoom, current tool and colour, selection — stays shared on
+/// `OverlayWindow` itself, since switching boards is meant to feel like
+/// flipping to a new sheet mid-presentation, not like reopening the app.
+#[derive(Debug, Clone, Default)]
+pub struct Board {
+    pub shapes: Vec<Annotation>,
+    pub undo_history: Vec<HistoryAction>,
+    pub redo_history: Vec<HistoryAction>,
+}
+
 /// The eight grips around a selected shape's bounding box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionHandle {

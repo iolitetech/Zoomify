@@ -4,8 +4,8 @@ Running list of what is built, what is deliberately not, and what is queued.
 Effort labels are rough: **S** a sitting, **M** a few sittings, **L** a project.
 
 Agreed order of work: **B → D → E → G → C → F → A.**
-B and D are done; **E is next.** Recording (A) is deliberately last: it is
-the largest single item and nothing else depends on it.
+B and D are done; **E is in progress.** Recording (A) is deliberately last:
+it is the largest single item and nothing else depends on it.
 
 Why this order: D's small items unblock real workflows immediately (paste a
 screenshot in, export above screen resolution). E carries the highest-value
@@ -43,6 +43,7 @@ return in an annotation tool. F is an architecture change to the overlay.
 | Export above screen resolution (`Ctrl+Shift+E`, 1x/2x/3x) | `627a2f2` |
 | SVG export (`Ctrl+J`) — vector shapes over a raster background layer | `1cdd81c` |
 | PDF export (`Ctrl+P`) — single-page, no external crate | `6ac9654` |
+| Multiple boards to tab between (`Ctrl+T`/`Ctrl+W`, `Ctrl+Shift+[`/`]`) | `PENDING` |
 
 ### Design decisions worth not re-litigating
 
@@ -161,17 +162,24 @@ Drag-and-drop from Explorer/a browser was built and deliberately removed —
 see the note under "Design decisions worth not re-litigating" above for why,
 and what a real fix would actually require.
 
-## E. Workflow
+## E. Workflow — **in progress**
 
 | Item | Effort |
 |---|---|
+| Multiple boards / pages to tab between | **shipped**, see above |
 | Eyedropper — pick a colour off the screen | **S** |
 | First-run onboarding | **S** |
 | Toolbar customisation (which tools show) | **M** — see the crowding constraint |
-| Multiple boards / pages to tab between | **M** — highest value here for presenting |
 | Command palette (`Ctrl+K`) | **M** |
 | Infinite canvas past screen bounds | **M** |
 | Rebindable in-overlay keys | **M** |
+
+Boards are in-memory only — not part of a saved session file. Each board
+holds its own shapes and undo/redo stack; everything else (background
+capture, zoom, current tool/colour, selection) is shared, so switching feels
+like flipping to a fresh sheet mid-presentation rather than reopening the
+app. `Ctrl+W` on the last remaining board is a no-op rather than clearing
+it — `E`/Delete already does that job explicitly.
 
 ## F. Multi-monitor
 

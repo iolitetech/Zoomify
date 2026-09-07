@@ -41,7 +41,7 @@ use crate::shapes::{
     with_arrow_ends,
 };
 use crate::types::{
-    Annotation, AppMode, ArrowHead, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize,
+    Annotation, AppMode, ArrowHead, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, Board,
     BlurToolSettings, CanvasBackground, ColorPickerState, ColorPreset, DragKind, DrawTool,
     FillMode, FluentAction, FluentToolbarState, HistoryAction, ImagePixels, LaserRipple,
     LaserTrailPoint, LoupeState, MinimapState, Point2D, Selection, Shape, ShapeId,
@@ -140,6 +140,15 @@ pub struct OverlayWindow {
     pub shapes: Vec<Annotation>,
     pub undo_history: Vec<HistoryAction>,
     pub redo_history: Vec<HistoryAction>,
+    /// Every board, including the active one — always at least one. The
+    /// active board's slot (`boards[active_board]`) is stale while it's
+    /// loaded: its live content is on `shapes`/`undo_history`/`redo_history`
+    /// above instead, and only gets written back into `boards` by
+    /// `switch_board` at the moment of switching away. Nothing outside
+    /// `switch_board` should read a board's content through this field.
+    pub boards: Vec<Board>,
+    /// Index into `boards` of the page currently loaded onto `shapes` et al.
+    pub active_board: usize,
     pub active_shape: Option<Shape>,
     /// Pressure from the most recent pen sample, 0..=1. `None` for mouse,
     /// touch, or a pen with no pressure axis.
@@ -337,6 +346,8 @@ impl OverlayWindow {
                 shapes: Vec::new(),
                 undo_history: Vec::new(),
                 redo_history: Vec::new(),
+                boards: vec![Board::default()],
+                active_board: 0,
                 active_shape: None,
                 current_tool: DrawTool::Pen,
                 current_color: initial_color,
@@ -995,6 +1006,8 @@ impl OverlayWindow {
         self.shapes.clear();
         self.undo_history.clear();
         self.redo_history.clear();
+        self.boards = vec![Board::default()];
+        self.active_board = 0;
         self.background_type = CanvasBackground::Transparent;
         self.laser_trail.clear();
         self.laser_ripples.clear();
@@ -1490,6 +1503,115 @@ impl OverlayWindow {
             self.set_toast("🧹", "Canvas Cleared (Ctrl+Z to Undo)");
             self.request_repaint();
         }
+    }
+
+    // ─────────────────────────── Boards ────────────────────────────
+    // A board is a page of shapes with its own undo/redo. Only one is ever
+    // "live" — its content sits directly on `shapes`/`undo_history`/
+    // `redo_history` rather than inside `boards`, so every other method in
+    // this file keeps reading and writing those fields exactly as before and
+    // has no idea multiple boards exist. Switching is just parking the live
+    // content into `boards[active_board]` and pulling another slot's content
+    // out onto those same fields.
+
+    /// Swap the live board for `index`, parking the current one first.
+    /// No-op if `index` is out of range or already active.
+    fn switch_board(&mut self, index: usize) {
+        if index >= self.boards.len() || index == self.active_board {
+            return;
+        }
+        self.commit_text_editor();
+
+        self.boards[self.active_board].shapes = std::mem::take(&mut self.shapes);
+        self.boards[self.active_board].undo_history = std::mem::take(&mut self.undo_history);
+        self.boards[self.active_board].redo_history = std::mem::take(&mut self.redo_history);
+
+        self.shapes = std::mem::take(&mut self.boards[index].shapes);
+        self.undo_history = std::mem::take(&mut self.boards[index].undo_history);
+        self.redo_history = std::mem::take(&mut self.boards[index].redo_history);
+        self.active_board = index;
+
+        self.selection = None;
+        self.marquee = None;
+        self.active_shape = None;
+        self.is_drawing = false;
+        self.snap_guides.clear();
+
+        self.set_toast(
+            "📑",
+            format!("Board {} of {}", self.active_board + 1, self.boards.len()),
+        );
+        self.request_repaint();
+    }
+
+    /// Add a fresh blank board right after the active one and switch to it.
+    pub fn new_board(&mut self) {
+        self.commit_text_editor();
+        self.boards[self.active_board].shapes = std::mem::take(&mut self.shapes);
+        self.boards[self.active_board].undo_history = std::mem::take(&mut self.undo_history);
+        self.boards[self.active_board].redo_history = std::mem::take(&mut self.redo_history);
+
+        self.boards.insert(self.active_board + 1, Board::default());
+        self.active_board += 1;
+        // The new slot is already empty, so this is just adopting it rather
+        // than a real park-and-load — `shapes` etc. are already blank from
+        // the `mem::take` calls above.
+
+        self.selection = None;
+        self.marquee = None;
+        self.active_shape = None;
+        self.is_drawing = false;
+        self.snap_guides.clear();
+
+        self.set_toast(
+            "📑",
+            format!("New Board ({} of {})", self.active_board + 1, self.boards.len()),
+        );
+        self.request_repaint();
+    }
+
+    /// Close the active board and switch to the one that takes its place.
+    /// Refuses when it is the only board — closing the last one would just
+    /// mean clearing it, which `Ctrl+E`/Delete already do explicitly.
+    pub fn close_board(&mut self) {
+        if self.boards.len() <= 1 {
+            self.set_toast("📑", "Only Board — Nothing to Close");
+            self.request_repaint();
+            return;
+        }
+        self.commit_text_editor();
+
+        self.boards.remove(self.active_board);
+        let next = self.active_board.min(self.boards.len() - 1);
+
+        self.shapes = std::mem::take(&mut self.boards[next].shapes);
+        self.undo_history = std::mem::take(&mut self.boards[next].undo_history);
+        self.redo_history = std::mem::take(&mut self.boards[next].redo_history);
+        self.active_board = next;
+
+        self.selection = None;
+        self.marquee = None;
+        self.active_shape = None;
+        self.is_drawing = false;
+        self.snap_guides.clear();
+
+        self.set_toast(
+            "📑",
+            format!("Board Closed ({} of {})", self.active_board + 1, self.boards.len()),
+        );
+        self.request_repaint();
+    }
+
+    /// Tab to the next board, wrapping around.
+    pub fn next_board(&mut self) {
+        let next = (self.active_board + 1) % self.boards.len();
+        self.switch_board(next);
+    }
+
+    /// Tab to the previous board, wrapping around.
+    pub fn prev_board(&mut self) {
+        let prev = (self.active_board + self.boards.len() - 1) % self.boards.len();
+        self.switch_board(prev);
     }
 
     // ─────────────────────── Select tool ───────────────────────
@@ -5320,12 +5442,26 @@ impl OverlayWindow {
                             k if k == 'G' as i32 => {
                                 this.set_grouping(true);
                             }
-                            // Ctrl+] / Ctrl+[ restack, as in most editors.
-                            k if k == 0xDD => {
+                            // Ctrl+] / Ctrl+[ restack, as in most editors;
+                            // Ctrl+Shift+] / Ctrl+Shift+[ tab between boards
+                            // instead, mirroring next/prev in a browser.
+                            k if k == 0xDD && !is_shift => {
                                 this.restack_selection(true);
                             }
-                            k if k == 0xDB => {
+                            k if k == 0xDB && !is_shift => {
                                 this.restack_selection(false);
+                            }
+                            k if k == 0xDD && is_shift => {
+                                this.next_board();
+                            }
+                            k if k == 0xDB && is_shift => {
+                                this.prev_board();
+                            }
+                            k if k == 'T' as i32 => {
+                                this.new_board();
+                            }
+                            k if k == 'W' as i32 => {
+                                this.close_board();
                             }
                             k if k == VK_TAB.0 as i32 => {
                                 this.cycle_next_monitor();
