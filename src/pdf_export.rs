@@ -21,7 +21,11 @@ use std::io::Write as _;
 pub fn build_pdf(width_px: u32, height_px: u32, rgb: &[u8], dpi: f32) -> Vec<u8> {
     debug_assert_eq!(rgb.len(), width_px as usize * height_px as usize * 3);
 
-    let dpi = if dpi.is_finite() && dpi > 1.0 { dpi } else { 96.0 };
+    let dpi = if dpi.is_finite() && dpi > 1.0 {
+        dpi
+    } else {
+        96.0
+    };
     let page_w = (width_px as f32 * 72.0 / dpi).max(1.0);
     let page_h = (height_px as f32 * 72.0 / dpi).max(1.0);
 
@@ -75,7 +79,7 @@ pub fn build_pdf(width_px: u32, height_px: u32, rgb: &[u8], dpi: f32) -> Vec<u8>
     let xref_offset = out.len();
     let _ = write!(out, "xref\n0 6\n0000000000 65535 f \n");
     for &off in &offsets[1..] {
-        let _ = write!(out, "{:010} 00000 n \n", off);
+        let _ = writeln!(out, "{:010} 00000 n ", off);
     }
     let _ = write!(
         out,
@@ -91,7 +95,7 @@ pub fn build_pdf(width_px: u32, height_px: u32, rgb: &[u8], dpi: f32) -> Vec<u8>
 /// 255, so there is nothing meaningful to composite — just discard it.
 pub fn bgra_to_rgb(bgra: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(bgra.len() / 4 * 3);
-    for px in bgra.chunks_exact(4) {
+    for px in bgra.as_chunks::<4>().0 {
         rgb.push(px[2]);
         rgb.push(px[1]);
         rgb.push(px[0]);
@@ -155,8 +159,9 @@ mod tests {
         // The declared byte count must actually appear as one contiguous
         // run right after that object's "stream\n" marker.
         let img_obj_start = find_bytes(&pdf, b"/Subtype /Image").unwrap();
-        let stream_start =
-            find_bytes(&pdf[img_obj_start..], b"stream\n").unwrap() + img_obj_start + b"stream\n".len();
+        let stream_start = find_bytes(&pdf[img_obj_start..], b"stream\n").unwrap()
+            + img_obj_start
+            + b"stream\n".len();
         assert_eq!(&pdf[stream_start..stream_start + rgb.len()], rgb.as_slice());
     }
 

@@ -33,7 +33,7 @@ impl D2DRenderer {
                     b: 0.0,
                     a: alpha,
                 };
-                if let Ok(brush) = rt.CreateSolidColorBrush(&shadow_col, None) {
+                if let Some(brush) = self.solid_brush(rt, &shadow_col) {
                     let s_rrect = D2D1_ROUNDED_RECT {
                         rect: D2D_RECT_F {
                             left: card_l - offset,
@@ -65,7 +65,7 @@ impl D2DRenderer {
                 b: 0.14,
                 a: 0.94,
             };
-            if let Ok(brush) = rt.CreateSolidColorBrush(&bg_color, None) {
+            if let Some(brush) = self.solid_brush(rt, &bg_color) {
                 rt.FillRoundedRectangle(&card_rrect, &brush);
             }
 
@@ -84,7 +84,7 @@ impl D2DRenderer {
                     a: 0.85,
                 }
             };
-            if let Ok(brush) = rt.CreateSolidColorBrush(&border_color, None) {
+            if let Some(brush) = self.solid_brush(rt, &border_color) {
                 let stroke_w = if minimap.is_hovered || minimap.is_dragging {
                     1.5
                 } else {
@@ -118,7 +118,7 @@ impl D2DRenderer {
                     b: 0.08,
                     a: 0.25,
                 };
-                if let Ok(brush) = rt.CreateSolidColorBrush(&scrim_color, None) {
+                if let Some(brush) = self.solid_brush(rt, &scrim_color) {
                     rt.FillRectangle(&inner_rect, &brush);
                 }
             } else {
@@ -129,7 +129,7 @@ impl D2DRenderer {
                     b: 0.22,
                     a: 1.0,
                 };
-                if let Ok(brush) = rt.CreateSolidColorBrush(&empty_color, None) {
+                if let Some(brush) = self.solid_brush(rt, &empty_color) {
                     rt.FillRectangle(&inner_rect, &brush);
                 }
             }
@@ -149,7 +149,7 @@ impl D2DRenderer {
                 b: 1.0,
                 a: 0.24,
             };
-            if let Ok(brush) = rt.CreateSolidColorBrush(&vp_fill_col, None) {
+            if let Some(brush) = self.solid_brush(rt, &vp_fill_col) {
                 rt.FillRectangle(&vp_rect, &brush);
             }
 
@@ -160,7 +160,7 @@ impl D2DRenderer {
                 b: 1.0,
                 a: 0.95,
             };
-            if let Ok(brush) = rt.CreateSolidColorBrush(&vp_border_col, None) {
+            if let Some(brush) = self.solid_brush(rt, &vp_border_col) {
                 rt.DrawRectangle(&vp_rect, &brush, 2.0, None);
             }
         }

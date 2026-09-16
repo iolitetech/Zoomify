@@ -68,7 +68,7 @@ impl D2DRenderer {
                     b: 0.0,
                     a: shadow_alpha,
                 };
-                if let Ok(s_brush) = rt.CreateSolidColorBrush(&shadow_col, None) {
+                if let Some(s_brush) = self.solid_brush(rt, &shadow_col) {
                     if loupe.is_rect {
                         let s_rrect = D2D1_ROUNDED_RECT {
                             rect: D2D_RECT_F {
@@ -122,7 +122,7 @@ impl D2DRenderer {
                         a: 0.92,
                     } // Deep charcoal bezel
                 };
-                if let Ok(rim_brush) = rt.CreateSolidColorBrush(&rim_color, None) {
+                if let Some(rim_brush) = self.solid_brush(rt, &rim_color) {
                     rt.DrawRoundedRectangle(&lens_rrect, &rim_brush, 4.0, None);
                 }
 
@@ -133,7 +133,7 @@ impl D2DRenderer {
                     b: 1.0,
                     a: 0.35,
                 };
-                if let Ok(sheen_brush) = rt.CreateSolidColorBrush(&sheen_color, None) {
+                if let Some(sheen_brush) = self.solid_brush(rt, &sheen_color) {
                     let inner_rrect = D2D1_ROUNDED_RECT {
                         rect: D2D_RECT_F {
                             left: cx - r + 1.5,
@@ -170,7 +170,7 @@ impl D2DRenderer {
                         a: 0.92,
                     } // Deep charcoal bezel
                 };
-                if let Ok(rim_brush) = rt.CreateSolidColorBrush(&rim_color, None) {
+                if let Some(rim_brush) = self.solid_brush(rt, &rim_color) {
                     rt.DrawEllipse(&lens_ellipse, &rim_brush, 4.0, None);
                 }
 
@@ -181,7 +181,7 @@ impl D2DRenderer {
                     b: 1.0,
                     a: 0.35,
                 };
-                if let Ok(sheen_brush) = rt.CreateSolidColorBrush(&sheen_color, None) {
+                if let Some(sheen_brush) = self.solid_brush(rt, &sheen_color) {
                     let inner_ellipse = D2D1_ELLIPSE {
                         point: v2(cx, cy),
                         radiusX: (r - 1.5).max(1.0),
@@ -206,8 +206,8 @@ impl D2DRenderer {
                     a: 0.65,
                 };
 
-                if let Ok(ch_brush) = rt.CreateSolidColorBrush(&crosshair_col, None)
-                    && let Ok(sh_brush) = rt.CreateSolidColorBrush(&shadow_col, None)
+                if let Some(ch_brush) = self.solid_brush(rt, &crosshair_col)
+                    && let Some(sh_brush) = self.solid_brush(rt, &shadow_col)
                 {
                     let arm_len = 12.0;
                     let gap = 5.0;
@@ -298,7 +298,7 @@ impl D2DRenderer {
                     a: 0.92,
                 }
             };
-            if let Ok(badge_bg) = rt.CreateSolidColorBrush(&badge_bg_col, None) {
+            if let Some(badge_bg) = self.solid_brush(rt, &badge_bg_col) {
                 rt.FillRoundedRectangle(&badge_rrect, &badge_bg);
             }
             let border_col = D2D1_COLOR_F {
@@ -307,7 +307,7 @@ impl D2DRenderer {
                 b: 1.0,
                 a: 0.35,
             };
-            if let Ok(border_brush) = rt.CreateSolidColorBrush(&border_col, None) {
+            if let Some(border_brush) = self.solid_brush(rt, &border_col) {
                 rt.DrawRoundedRectangle(&badge_rrect, &border_brush, 1.0, None);
             }
 
@@ -319,7 +319,7 @@ impl D2DRenderer {
                 b: 1.0,
                 a: 0.95,
             };
-            if let Ok(text_brush) = rt.CreateSolidColorBrush(&text_color, None) {
+            if let Some(text_brush) = self.solid_brush(rt, &text_color) {
                 rt.DrawText(
                     &wide_str,
                     &self.text_format_toolbar_small,

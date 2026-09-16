@@ -81,7 +81,7 @@ impl D2DRenderer {
                     b: 0.03,
                     a: dim_opacity,
                 };
-                if let Ok(dim_brush) = rt.CreateSolidColorBrush(&dim_brush_color, None) {
+                if let Some(dim_brush) = self.solid_brush(rt, &dim_brush_color) {
                     rt.FillGeometry(group, &dim_brush, None);
                 }
 
@@ -101,7 +101,7 @@ impl D2DRenderer {
                     }
                 };
 
-                if let Ok(ring_brush) = rt.CreateSolidColorBrush(&ring_col, None) {
+                if let Some(ring_brush) = self.solid_brush(rt, &ring_col) {
                     let ellipse = D2D1_ELLIPSE {
                         point: v2(0.0, 0.0),
                         radiusX: radius,
@@ -164,21 +164,21 @@ impl D2DRenderer {
                 bottom: hud_y + hud_h,
             };
 
-            if let Ok(bg_brush) = rt.CreateSolidColorBrush(&bg_col, None) {
+            if let Some(bg_brush) = self.solid_brush(rt, &bg_col) {
                 let rrect = D2D1_ROUNDED_RECT {
                     rect: hud_rect,
                     radiusX: 18.0,
                     radiusY: 18.0,
                 };
                 rt.FillRoundedRectangle(&rrect, &bg_brush);
-                if let Ok(b_brush) = rt.CreateSolidColorBrush(&border_col, None) {
+                if let Some(b_brush) = self.solid_brush(rt, &border_col) {
                     rt.DrawRoundedRectangle(&rrect, &b_brush, 1.0, None);
                 }
             }
 
             let dot_center = v2(hud_x + 22.0, hud_y + hud_h / 2.0);
             let dot_color = color.to_d2d_color(1.0);
-            if let Ok(dot_brush) = rt.CreateSolidColorBrush(&dot_color, None) {
+            if let Some(dot_brush) = self.solid_brush(rt, &dot_color) {
                 let el = D2D1_ELLIPSE {
                     point: dot_center,
                     radiusX: 6.0,
@@ -232,7 +232,7 @@ impl D2DRenderer {
                 b: 0.96,
                 a: 0.95,
             };
-            if let Ok(tbrush) = rt.CreateSolidColorBrush(&text_col, None) {
+            if let Some(tbrush) = self.solid_brush(rt, &text_col) {
                 let text_rect = D2D_RECT_F {
                     left: hud_x + 36.0,
                     top: hud_y + 8.0,
@@ -286,14 +286,14 @@ impl D2DRenderer {
                 radiusX: 14.0,
                 radiusY: 14.0,
             };
-            if let Ok(shadow_brush) = rt.CreateSolidColorBrush(
+            if let Some(shadow_brush) = self.solid_brush(
+                rt,
                 &D2D1_COLOR_F {
                     r: 0.0,
                     g: 0.0,
                     b: 0.0,
                     a: 0.40 * opacity,
                 },
-                None,
             ) {
                 rt.FillRoundedRectangle(&shadow_rrect, &shadow_brush);
             }
@@ -322,10 +322,10 @@ impl D2DRenderer {
                 a: 0.16 * opacity,
             };
 
-            if let Ok(bg_brush) = rt.CreateSolidColorBrush(&bg_col, None) {
+            if let Some(bg_brush) = self.solid_brush(rt, &bg_col) {
                 rt.FillRoundedRectangle(&main_rrect, &bg_brush);
             }
-            if let Ok(border_brush) = rt.CreateSolidColorBrush(&border_col, None) {
+            if let Some(border_brush) = self.solid_brush(rt, &border_col) {
                 rt.DrawRoundedRectangle(&main_rrect, &border_brush, 1.0, None);
             }
 
@@ -337,7 +337,7 @@ impl D2DRenderer {
                 b: 0.83,
                 a: 0.35 * opacity,
             };
-            if let Ok(badge_brush) = rt.CreateSolidColorBrush(&badge_bg_col, None) {
+            if let Some(badge_brush) = self.solid_brush(rt, &badge_bg_col) {
                 let badge_el = D2D1_ELLIPSE {
                     point: badge_center,
                     radiusX: 13.0,
@@ -354,14 +354,14 @@ impl D2DRenderer {
                 right: toast_x + 35.0,
                 bottom: toast_y + 35.0,
             };
-            if let Ok(white_brush) = rt.CreateSolidColorBrush(
+            if let Some(white_brush) = self.solid_brush(
+                rt,
                 &D2D1_COLOR_F {
                     r: 1.0,
                     g: 1.0,
                     b: 1.0,
                     a: opacity,
                 },
-                None,
             ) {
                 rt.DrawText(
                     &icon_utf16,
@@ -410,7 +410,7 @@ impl D2DRenderer {
                     right: toast_x + toast_w - 14.0,
                     bottom: toast_y + toast_h - 4.0,
                 };
-                if let Ok(text_brush) = rt.CreateSolidColorBrush(&text_col, None) {
+                if let Some(text_brush) = self.solid_brush(rt, &text_col) {
                     rt.DrawText(
                         &title_utf16,
                         &self.text_format_toast_title,
@@ -420,7 +420,7 @@ impl D2DRenderer {
                         windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                     );
                 }
-                if let Ok(sub_brush) = rt.CreateSolidColorBrush(&sub_col, None) {
+                if let Some(sub_brush) = self.solid_brush(rt, &sub_col) {
                     rt.DrawText(
                         &sub_utf16,
                         &self.text_format_toast_sub,
@@ -438,7 +438,7 @@ impl D2DRenderer {
                     right: toast_x + toast_w - 14.0,
                     bottom: toast_y + toast_h - 4.0,
                 };
-                if let Ok(text_brush) = rt.CreateSolidColorBrush(&text_col, None) {
+                if let Some(text_brush) = self.solid_brush(rt, &text_col) {
                     rt.DrawText(
                         &msg_utf16,
                         &self.text_format_toast_title,
@@ -484,14 +484,14 @@ impl D2DRenderer {
                 bottom: my + modal_h,
             };
 
-            if let Ok(bg_brush) = rt.CreateSolidColorBrush(&bg_col, None) {
+            if let Some(bg_brush) = self.solid_brush(rt, &bg_col) {
                 let rrect = D2D1_ROUNDED_RECT {
                     rect: modal_rect,
                     radiusX: 16.0,
                     radiusY: 16.0,
                 };
                 rt.FillRoundedRectangle(&rrect, &bg_brush);
-                if let Ok(b_brush) = rt.CreateSolidColorBrush(&border_col, None) {
+                if let Some(b_brush) = self.solid_brush(rt, &border_col) {
                     rt.DrawRoundedRectangle(&rrect, &b_brush, 2.0, None);
                 }
             }
@@ -505,39 +505,33 @@ impl D2DRenderer {
                 bottom: my + 50.0,
             };
 
-            let white_brush = rt
-                .CreateSolidColorBrush(
-                    &D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 1.0,
-                        b: 1.0,
-                        a: 1.0,
-                    },
-                    None,
-                )
-                .ok();
-            let accent_brush = rt
-                .CreateSolidColorBrush(
-                    &D2D1_COLOR_F {
-                        r: 0.35,
-                        g: 0.75,
-                        b: 1.0,
-                        a: 1.0,
-                    },
-                    None,
-                )
-                .ok();
-            let desc_brush = rt
-                .CreateSolidColorBrush(
-                    &D2D1_COLOR_F {
-                        r: 0.78,
-                        g: 0.82,
-                        b: 0.9,
-                        a: 0.95,
-                    },
-                    None,
-                )
-                .ok();
+            let white_brush = self.solid_brush(
+                rt,
+                &D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+            );
+            let accent_brush = self.solid_brush(
+                rt,
+                &D2D1_COLOR_F {
+                    r: 0.35,
+                    g: 0.75,
+                    b: 1.0,
+                    a: 1.0,
+                },
+            );
+            let desc_brush = self.solid_brush(
+                rt,
+                &D2D1_COLOR_F {
+                    r: 0.78,
+                    g: 0.82,
+                    b: 0.9,
+                    a: 0.95,
+                },
+            );
 
             if let (Some(wbrush), Some(abrush), Some(dbrush)) =
                 (white_brush, accent_brush, desc_brush)
@@ -565,7 +559,10 @@ impl D2DRenderer {
                     ("V", "Select (drag/resize, Del removes)"),
                     ("Ctrl+D / Ctrl+[ ]", "Duplicate / send back / bring front"),
                     ("Drag arrow end", "Re-anchor it, or drop in space to detach"),
-                    ("Ctrl+Alt+Arrows", "Align selection (C/M: centre, H/V: spread)"),
+                    (
+                        "Ctrl+Alt+Arrows",
+                        "Align selection (C/M: centre, H/V: spread)",
+                    ),
                     ("Ctrl+Shift+Up/Dn", "Fade selection in / out"),
                     ("Ctrl+E", "Cycle arrowhead shape"),
                     ("Drag line middle", "Bow it into a curve"),

@@ -20,9 +20,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, LoadCursorW,
     RegisterClassExW, SW_HIDE, SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
+    WM_PAINT, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, Result, w};
 
@@ -34,15 +34,14 @@ use crate::shapes::{
     ARROW_BINDING_GAP, AlignTo, SELECTION_HANDLE_SIZE, SELECTION_HANDLE_SLOP, SNAP_TOLERANCE_DIP,
     SnapGuide, align_offsets, can_bind_arrow, can_contain_text, collect_anchors,
     container_height_for, curve_from_handle, curve_handle, distribute_offsets, handle_at,
-    label_rides_on_shape, normalize_rect, push_pressure, recognize_smart_shape,
-    resolve_arrow_ends, resize_shape, resized_bounds, set_shape_color, set_shape_fill,
-    set_shape_pattern, set_shape_width, shape_bounds, shape_intersects_circle, shape_kind,
-    snap_point, snap_to_angle, snap_to_square, snap_translation, translate_shape,
-    with_arrow_ends,
+    label_rides_on_shape, normalize_rect, push_pressure, recognize_smart_shape, resize_shape,
+    resized_bounds, resolve_arrow_ends, set_shape_color, set_shape_fill, set_shape_pattern,
+    set_shape_width, shape_bounds, shape_intersects_circle, shape_kind, snap_point, snap_to_angle,
+    snap_to_square, snap_translation, translate_shape, with_arrow_ends,
 };
 use crate::types::{
-    Annotation, AppMode, ArrowHead, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize, Board,
-    BlurToolSettings, CanvasBackground, ColorPickerState, ColorPreset, DragKind, DrawTool,
+    Annotation, AppMode, ArrowHead, ArrowStyle, ArrowToolSettings, BadgeShape, BadgeSize,
+    BlurToolSettings, Board, CanvasBackground, ColorPickerState, ColorPreset, DragKind, DrawTool,
     FillMode, FluentAction, FluentToolbarState, HistoryAction, ImagePixels, LaserRipple,
     LaserTrailPoint, LoupeState, MinimapState, Point2D, Selection, Shape, ShapeId,
     ShapeToolSettings, SpotlightState, StepBadgeToolSettings, StrokePattern, StrokeToolSettings,
@@ -163,6 +162,7 @@ pub struct OverlayWindow {
     /// Cycled with `Ctrl+Shift+E`.
     pub export_scale: u32,
     pub snap_guides: Vec<SnapGuide>,
+    pub snap_guides_screen: Vec<(f32, f32, f32, f32, bool)>,
     /// Cached anchors of every shape except the one being drawn or dragged,
     /// rebuilt when a gesture starts rather than on every mouse move.
     snap_anchors: Vec<Point2D>,
@@ -410,6 +410,7 @@ impl OverlayWindow {
                 snap_to_shapes: cfg.snap_to_shapes,
                 export_scale: cfg.export_scale.clamp(1, 3),
                 snap_guides: Vec::new(),
+                snap_guides_screen: Vec::new(),
                 snap_anchors: Vec::new(),
                 selection: None,
                 marquee: None,
@@ -595,10 +596,7 @@ impl OverlayWindow {
         if self.background_bitmap.is_none() {
             self.capture_current_screen();
         }
-        let mut cursor_screen = Point2D::new(
-            self.logical_w() / 2.0,
-            self.logical_h() / 2.0,
-        );
+        let mut cursor_screen = Point2D::new(self.logical_w() / 2.0, self.logical_h() / 2.0);
         unsafe {
             let mut pt = POINT::default();
             if GetCursorPos(&mut pt).is_ok() {
@@ -898,10 +896,7 @@ impl OverlayWindow {
                 self.px_to_dip((pt.y - self.screen_y) as f32),
             )
         } else {
-            (
-                self.logical_w() / 2.0,
-                self.logical_h() / 2.0,
-            )
+            (self.logical_w() / 2.0, self.logical_h() / 2.0)
         };
         self.loupe.x = cx;
         self.loupe.y = cy;
@@ -925,11 +920,8 @@ impl OverlayWindow {
     /// progress ring and the value persisted as the default duration, so it must
     /// stay a *duration* — never be overwritten with whatever is left on the clock.
     pub fn adjust_timer(&mut self, delta_secs: f64) {
-        let (total, remaining) = crate::types::adjust_timer_values(
-            self.timer_seconds,
-            self.timer_remaining,
-            delta_secs,
-        );
+        let (total, remaining) =
+            crate::types::adjust_timer_values(self.timer_seconds, self.timer_remaining, delta_secs);
         self.timer_seconds = total;
         self.timer_remaining = remaining;
 
@@ -955,12 +947,7 @@ impl OverlayWindow {
         // never clears the stale position from config.json.
         cfg.toolbar_custom_position = self.toolbar.custom_position.map(|p| (p.x, p.y));
         cfg.default_color = self.current_color.name();
-        cfg.recent_custom_colors = self
-            .color_picker
-            .recent
-            .iter()
-            .map(|c| c.name())
-            .collect();
+        cfg.recent_custom_colors = self.color_picker.recent.iter().map(|c| c.name()).collect();
         cfg.default_fill_mode = match self.fill_mode {
             FillMode::None => "None".to_string(),
             FillMode::Tinted => "Tinted".to_string(),
@@ -1074,7 +1061,8 @@ impl OverlayWindow {
             self.dpi = if dpi == 0 { 96 } else { dpi };
             self.renderer.set_dpi(self.dpi);
 
-            self.toolbar.update_layout(self.logical_w(), self.logical_h());
+            self.toolbar
+                .update_layout(self.logical_w(), self.logical_h());
         }
     }
 
@@ -1196,6 +1184,11 @@ impl OverlayWindow {
     }
 
     pub fn show_window(&mut self) {
+        crate::logging::log_info!(
+            "Overlay show (monitor {}x{})",
+            self.logical_w(),
+            self.logical_h()
+        );
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOW);
         }
@@ -1207,6 +1200,7 @@ impl OverlayWindow {
     }
 
     pub fn hide_window(&mut self) {
+        crate::logging::log_info!("Overlay hide");
         self.set_animation_timer(false);
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_HIDE);
@@ -1565,7 +1559,11 @@ impl OverlayWindow {
 
         self.set_toast(
             "📑",
-            format!("New Board ({} of {})", self.active_board + 1, self.boards.len()),
+            format!(
+                "New Board ({} of {})",
+                self.active_board + 1,
+                self.boards.len()
+            ),
         );
         self.request_repaint();
     }
@@ -1597,7 +1595,11 @@ impl OverlayWindow {
 
         self.set_toast(
             "📑",
-            format!("Board Closed ({} of {})", self.active_board + 1, self.boards.len()),
+            format!(
+                "Board Closed ({} of {})",
+                self.active_board + 1,
+                self.boards.len()
+            ),
         );
         self.request_repaint();
     }
@@ -1630,9 +1632,14 @@ impl OverlayWindow {
             ..
         } = shape
         {
-            let (w, h) =
-                self.renderer
-                    .measure_text_block(text, *font_size, *is_bold, *is_italic, *font_family, f32::MAX);
+            let (w, h) = self.renderer.measure_text_block(
+                text,
+                *font_size,
+                *is_bold,
+                *is_italic,
+                *font_family,
+                f32::MAX,
+            );
             return (origin.x, origin.y, origin.x + w.max(20.0), origin.y + h);
         }
         shape_bounds(shape)
@@ -1688,6 +1695,7 @@ impl OverlayWindow {
     }
 
     /// Start, end and bow handles of a singly-selected line or arrow.
+    #[allow(clippy::type_complexity)]
     fn selection_line_grips(&self) -> Option<((f32, f32), (f32, f32), (f32, f32))> {
         let id = self.selection.as_ref()?.only()?;
         let a = self.annotation(id)?;
@@ -1711,9 +1719,8 @@ impl OverlayWindow {
     fn endpoint_at(&self, screen_pt: Point2D) -> Option<bool> {
         let ((sx, sy), (ex, ey)) = self.selection_endpoints_screen()?;
         let reach = SELECTION_HANDLE_SIZE * 0.5 + SELECTION_HANDLE_SLOP;
-        let near = |x: f32, y: f32| {
-            (screen_pt.x - x).abs() <= reach && (screen_pt.y - y).abs() <= reach
-        };
+        let near =
+            |x: f32, y: f32| (screen_pt.x - x).abs() <= reach && (screen_pt.y - y).abs() <= reach;
         if near(sx, sy) {
             Some(true)
         } else if near(ex, ey) {
@@ -1774,15 +1781,11 @@ impl OverlayWindow {
         // A grip on the current selection wins over picking a new shape,
         // because grips sit outside the shape's own outline.
         // A line's own grips win over any bounding box, since they sit inside it.
-        if !additive
-            && let Some(is_start) = self.endpoint_at(screen_pt)
-        {
+        if !additive && let Some(is_start) = self.endpoint_at(screen_pt) {
             self.begin_drag(DragKind::Endpoint(is_start), canvas_pt);
             return true;
         }
-        if !additive
-            && let Some((bx, by)) = self.selection_bow_screen()
-        {
+        if !additive && let Some((bx, by)) = self.selection_bow_screen() {
             let reach = SELECTION_HANDLE_SIZE * 0.5 + SELECTION_HANDLE_SLOP;
             if (screen_pt.x - bx).abs() <= reach && (screen_pt.y - by).abs() <= reach {
                 self.begin_drag(DragKind::Bow, canvas_pt);
@@ -2131,7 +2134,8 @@ impl OverlayWindow {
             return false;
         }
         items.reverse();
-        self.undo_history.push(HistoryAction::DeleteShapes { items });
+        self.undo_history
+            .push(HistoryAction::DeleteShapes { items });
         self.redo_history.clear();
         self.settle_bindings();
         true
@@ -2198,7 +2202,13 @@ impl OverlayWindow {
         self.selection = None;
 
         let mut editor = TextEditorState::new(
-            origin, color, font_size, is_bold, is_italic, card_style, font_family,
+            origin,
+            color,
+            font_size,
+            is_bold,
+            is_italic,
+            card_style,
+            font_family,
         );
         editor.cursor = text.len();
         editor.text = text;
@@ -2261,7 +2271,10 @@ impl OverlayWindow {
         }
         let boxes: Vec<(f32, f32, f32, f32)> = ids
             .iter()
-            .filter_map(|id| self.annotation(*id).map(|a| self.shape_bounds_exact(&a.shape)))
+            .filter_map(|id| {
+                self.annotation(*id)
+                    .map(|a| self.shape_bounds_exact(&a.shape))
+            })
             .collect();
         if boxes.len() != ids.len() {
             return;
@@ -2533,7 +2546,11 @@ impl OverlayWindow {
             self.set_toast("🔗", "Select two or more to group");
             return;
         }
-        let new_group = if grouped { Some(ShapeId::fresh()) } else { None };
+        let new_group = if grouped {
+            Some(ShapeId::fresh())
+        } else {
+            None
+        };
         let mut items: Vec<(ShapeId, Option<ShapeId>, Option<ShapeId>)> = Vec::new();
         for id in &ids {
             let Some(index) = self.annotation_index(*id) else {
@@ -2660,8 +2677,12 @@ impl OverlayWindow {
             };
             // A target that is gone keeps its binding and its last endpoint, so
             // undoing the deletion re-attaches instead of orphaning the arrow.
-            let start_target = sb.and_then(|id| self.annotation(id)).map(|a| a.shape.clone());
-            let end_target = eb.and_then(|id| self.annotation(id)).map(|a| a.shape.clone());
+            let start_target = sb
+                .and_then(|id| self.annotation(id))
+                .map(|a| a.shape.clone());
+            let end_target = eb
+                .and_then(|id| self.annotation(id))
+                .map(|a| a.shape.clone());
             if let Some((s, e)) = resolve_arrow_ends(
                 &shape,
                 start_target.as_ref(),
@@ -2796,7 +2817,12 @@ impl OverlayWindow {
         let pad = TextEditorState::CONTAINER_PADDING;
         let wrap = ((bounds.2 - bounds.0) - pad * 2.0).max(24.0);
         let (_, h) = self.renderer.measure_text_block(
-            &text, font_size, is_bold, is_italic, font_family, wrap,
+            &text,
+            font_size,
+            is_bold,
+            is_italic,
+            font_family,
+            wrap,
         );
         let needed = container_height_for(bounds, h, pad);
         if needed > bounds.3 - bounds.1 + 0.5 {
@@ -2857,9 +2883,7 @@ impl OverlayWindow {
 
         let sw = self.logical_w();
         let sh = self.logical_h();
-        let centre = self
-            .zoom
-            .screen_to_canvas(Point2D::new(sw / 2.0, sh / 2.0));
+        let centre = self.zoom.screen_to_canvas(Point2D::new(sw / 2.0, sh / 2.0));
         let id = self.place_image_shape(centre, img.width, img.height, img.bgra);
         self.finish_placing_images(vec![id], "📋", "Pasted Image".to_string());
     }
@@ -3000,8 +3024,7 @@ impl OverlayWindow {
             .iter()
             .rev()
             .find(|a| {
-                can_contain_text(&a.shape)
-                    && shape_intersects_circle(&a.shape, canvas_pt, 2.0)
+                can_contain_text(&a.shape) && shape_intersects_circle(&a.shape, canvas_pt, 2.0)
             })
             .map(|a| a.id)
     }
@@ -3040,7 +3063,10 @@ impl OverlayWindow {
             if self.export_scale > 1 {
                 self.set_toast(
                     "📋",
-                    format!("Copied Screen + Drawings to Clipboard! ({}x)", self.export_scale),
+                    format!(
+                        "Copied Screen + Drawings to Clipboard! ({}x)",
+                        self.export_scale
+                    ),
                 );
             } else {
                 self.set_toast("📋", "Copied Screen + Drawings to Clipboard!");
@@ -3050,9 +3076,9 @@ impl OverlayWindow {
         }
     }
 
-    /// Resolve the user's real Pictures folder. `%USERPROFILE%\Pictures` is wrong
-    /// whenever the folder is redirected - to OneDrive, another drive, or a
-    /// network share - which is common. The shell knows where it actually is.
+    // Resolve the user's real Pictures folder. `%USERPROFILE%\Pictures` is wrong
+    // whenever the folder is redirected - to OneDrive, another drive, or a
+    // network share - which is common. The shell knows where it actually is.
     // ─────────────────────── Sessions ───────────────────────
 
     /// Suspend always-on-top while a modal shell dialog is up. A topmost
@@ -3120,7 +3146,7 @@ impl OverlayWindow {
         }
 
         if cfg.session_export_png
-            && let Some(composite) = self.get_composite_capture(false)
+            && let Some(mut composite) = self.get_composite_capture(false)
         {
             let png = path.with_extension("png");
             let _ = composite.save_png(&png.to_string_lossy());
@@ -3134,10 +3160,7 @@ impl OverlayWindow {
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_default();
             let count = self.shapes.len();
-            self.set_toast(
-                "💾",
-                format!("Saved {} annotation(s) — {}", count, name),
-            );
+            self.set_toast("💾", format!("Saved {} annotation(s) — {}", count, name));
         }
     }
 
@@ -3188,7 +3211,7 @@ impl OverlayWindow {
     }
 
     pub fn save_snapshot(&mut self) {
-        let Some(composite) = self.get_composite_capture(self.spotlight.active) else {
+        let Some(mut composite) = self.get_composite_capture(self.spotlight.active) else {
             self.set_toast("❌", "Nothing to save");
             return;
         };
@@ -3282,7 +3305,10 @@ impl OverlayWindow {
             text_layout.insert(a.id, size);
         }
 
-        let bg_pixels = self.background_capture.as_ref().map(|c| c.pixels.as_slice());
+        let bg_pixels = self
+            .background_capture
+            .as_ref()
+            .map(|c| c.pixels.as_slice());
         let (bg_px_w, bg_px_h) = self
             .background_capture
             .as_ref()
@@ -3346,7 +3372,8 @@ impl OverlayWindow {
         // Scale the DPI the page is sized from along with export_scale, so a
         // 2x/3x export prints at the same physical page size, just sharper.
         let effective_dpi = self.dpi as f32 * self.export_scale as f32;
-        let pdf = crate::pdf_export::build_pdf(composite.width, composite.height, &rgb, effective_dpi);
+        let pdf =
+            crate::pdf_export::build_pdf(composite.width, composite.height, &rgb, effective_dpi);
 
         let dir = crate::session::pictures_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -3918,10 +3945,22 @@ impl OverlayWindow {
                         timer_info = Some((mins, secs, progress, this.timer_paused, is_overtime));
                     }
 
-                    let text_input = this.text_editor.as_ref();
-
                     let is_shift = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
                     let snap_guides = this.is_drawing && (is_shift || this.was_shifted_during_draw);
+
+                    this.snap_guides_screen.clear();
+                    for i in 0..this.snap_guides.len() {
+                        let (ga, gb, marker) = (
+                            this.snap_guides[i].a,
+                            this.snap_guides[i].b,
+                            this.snap_guides[i].marker,
+                        );
+                        let a = this.zoom.canvas_to_screen(ga);
+                        let b = this.zoom.canvas_to_screen(gb);
+                        this.snap_guides_screen.push((a.x, a.y, b.x, b.y, marker));
+                    }
+
+                    let text_input = this.text_editor.as_ref();
 
                     this.renderer.render_frame(
                         this.mode,
@@ -3957,15 +3996,7 @@ impl OverlayWindow {
                         } else {
                             None
                         },
-                        &this
-                            .snap_guides
-                            .iter()
-                            .map(|g| {
-                                let a = this.zoom.canvas_to_screen(g.a);
-                                let b = this.zoom.canvas_to_screen(g.b);
-                                (a.x, a.y, b.x, b.y, g.marker)
-                            })
-                            .collect::<Vec<_>>(),
+                        &this.snap_guides_screen,
                         if this.current_tool == DrawTool::Select {
                             this.marquee_screen()
                         } else {
@@ -4728,8 +4759,7 @@ impl OverlayWindow {
                     if this.current_tool == DrawTool::Select {
                         this.validate_selection();
                         // Shift extends the selection rather than replacing it.
-                        let additive =
-                            (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
+                        let additive = (GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000) != 0;
                         let consumed = this.select_press(screen_pt, canvas_pt, additive);
                         // Double-clicking a text annotation puts it back in the
                         // editor instead of starting a drag.
@@ -5144,11 +5174,7 @@ impl OverlayWindow {
                 WM_CHAR => {
                     let ch = char::from_u32(wparam.0 as u32).unwrap_or('\0');
                     if let Some(editor) = &mut this.text_editor {
-                        if ch == '\x08'
-                            || ch == '\x1b'
-                            || ch == '\x7f'
-                            || ch == '\r'
-                            || ch == '\n'
+                        if ch == '\x08' || ch == '\x1b' || ch == '\x7f' || ch == '\r' || ch == '\n'
                         {
                             // Handled in WM_KEYDOWN (Enter inserts a newline there)
                         } else if !ch.is_control() {
@@ -5296,7 +5322,8 @@ impl OverlayWindow {
                                 && let Some(clip_text) = get_clipboard_text()
                             {
                                 // Normalise CRLF/CR so line splitting stays on '\n'.
-                                let normalised = clip_text.replace("\r\n", "\n").replace('\r', "\n");
+                                let normalised =
+                                    clip_text.replace("\r\n", "\n").replace('\r', "\n");
                                 editor.insert_str(&normalised);
                             }
                             this.request_repaint();
@@ -6150,9 +6177,9 @@ impl OverlayWindow {
                                 let sh = this.logical_h();
                                 let (cursor_x, cursor_y) = if GetCursorPos(&mut pt).is_ok() {
                                     (
-                                this.px_to_dip((pt.x - sx) as f32),
-                                this.px_to_dip((pt.y - sy) as f32),
-                            )
+                                        this.px_to_dip((pt.x - sx) as f32),
+                                        this.px_to_dip((pt.y - sy) as f32),
+                                    )
                                 } else {
                                     (sw / 2.0, sh / 2.0)
                                 };
@@ -6189,9 +6216,9 @@ impl OverlayWindow {
                                 let sh = this.logical_h();
                                 let (cursor_x, cursor_y) = if GetCursorPos(&mut pt).is_ok() {
                                     (
-                                this.px_to_dip((pt.x - sx) as f32),
-                                this.px_to_dip((pt.y - sy) as f32),
-                            )
+                                        this.px_to_dip((pt.x - sx) as f32),
+                                        this.px_to_dip((pt.y - sy) as f32),
+                                    )
                                 } else {
                                     (sw / 2.0, sh / 2.0)
                                 };
@@ -6237,9 +6264,13 @@ impl OverlayWindow {
                     LRESULT(0)
                 }
 
-                windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                    let _ = Rc::from_raw(raw_ptr);
+                WM_NCDESTROY => {
+                    drop(this);
+                    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+                    if ptr != 0 {
+                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                        drop(Rc::from_raw(ptr as *const RefCell<OverlayWindow>));
+                    }
                     DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
 

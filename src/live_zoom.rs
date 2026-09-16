@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use windows::Win32::Foundation::{HMODULE, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{FreeLibrary, HMODULE, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -39,9 +39,7 @@ unsafe extern "system" fn live_zoom_mouse_hook(
     lparam: LPARAM,
 ) -> LRESULT {
     unsafe {
-        if code >= 0
-            && wparam.0 as u32 == WM_MOUSEWHEEL
-            && LIVE_ZOOM_ACTIVE.load(Ordering::Acquire)
+        if code >= 0 && wparam.0 as u32 == WM_MOUSEWHEEL && LIVE_ZOOM_ACTIVE.load(Ordering::Acquire)
         {
             let is_ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
             if is_ctrl {
@@ -339,5 +337,10 @@ impl LiveZoomEngine {
 impl Drop for LiveZoomEngine {
     fn drop(&mut self) {
         self.stop();
+        if let Some(h) = self.module {
+            unsafe {
+                let _ = FreeLibrary(h);
+            }
+        }
     }
 }

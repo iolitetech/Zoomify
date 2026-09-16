@@ -82,7 +82,11 @@ impl ColorPreset {
         let (r, g, b) = self.rgb_f32();
         // Rec. 709 luma: green dominates perceived brightness.
         let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-        if luma > 0.55 { Self::Black } else { Self::White }
+        if luma > 0.55 {
+            Self::Black
+        } else {
+            Self::White
+        }
     }
 
     /// Straight sRGB components in 0..=1.
@@ -97,9 +101,7 @@ impl ColorPreset {
             Self::Cyan => (0.05, 0.88, 0.95),
             Self::White => (0.98, 0.98, 0.98),
             Self::Black => (0.10, 0.10, 0.12),
-            Self::Custom(r, g, b) => {
-                (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
-            }
+            Self::Custom(r, g, b) => (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0),
         }
     }
 
@@ -420,9 +422,7 @@ impl TextFontFamily {
 /// to one — have to survive deletion, undo and reordering. A position in a
 /// `Vec` survives none of those: delete one shape and every later index shifts,
 /// silently re-pointing anything that referred to them.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ShapeId(pub u64);
 
 static NEXT_SHAPE_ID: AtomicU64 = AtomicU64::new(1);
@@ -645,8 +645,7 @@ impl ImagePixels {
 /// embed raster data (pasted images, mosaic blur patches) without a second
 /// implementation.
 pub(crate) mod b64 {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     pub fn encode(bytes: &[u8]) -> String {
         let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -678,27 +677,39 @@ pub(crate) mod b64 {
         for (i, c) in ALPHABET.iter().enumerate() {
             lookup[*c as usize] = i as u8;
         }
-        let cleaned: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-        if cleaned.len() % 4 != 0 {
+        // Count non-whitespace bytes to validate length and pre-allocate,
+        // without collecting into an intermediate Vec.
+        let clean_len = s.bytes().filter(|b| !b.is_ascii_whitespace()).count();
+        if clean_len % 4 != 0 {
             return None;
         }
-        let mut out = Vec::with_capacity(cleaned.len() / 4 * 3);
-        for chunk in cleaned.chunks(4) {
-            let pad = chunk.iter().filter(|b| **b == b'=').count();
-            let mut n: u32 = 0;
-            for b in chunk {
-                let v = if *b == b'=' { 0 } else { lookup[*b as usize] };
-                if v == 255 {
-                    return None;
+        let mut out = Vec::with_capacity(clean_len / 4 * 3);
+        let mut quad = [0u8; 4];
+        let mut qi = 0;
+        for b in s.bytes() {
+            if b.is_ascii_whitespace() {
+                continue;
+            }
+            quad[qi] = b;
+            qi += 1;
+            if qi == 4 {
+                let pad = quad.iter().filter(|b| **b == b'=').count();
+                let mut n: u32 = 0;
+                for b in &quad {
+                    let v = if *b == b'=' { 0 } else { lookup[*b as usize] };
+                    if v == 255 {
+                        return None;
+                    }
+                    n = (n << 6) | v as u32;
                 }
-                n = (n << 6) | v as u32;
-            }
-            out.push((n >> 16) as u8);
-            if pad < 2 {
-                out.push((n >> 8) as u8);
-            }
-            if pad < 1 {
-                out.push(n as u8);
+                out.push((n >> 16) as u8);
+                if pad < 2 {
+                    out.push((n >> 8) as u8);
+                }
+                if pad < 1 {
+                    out.push(n as u8);
+                }
+                qi = 0;
             }
         }
         Some(out)
@@ -885,13 +896,11 @@ impl TextEditorState {
     /// `end`. Columns are counted in characters so multi-byte text lands right.
     fn byte_at_col(&self, start: usize, end: usize, col: usize) -> usize {
         let mut idx = start;
-        let mut seen = 0;
-        for ch in self.text[start..end].chars() {
+        for (seen, ch) in self.text[start..end].chars().enumerate() {
             if seen == col {
                 return idx;
             }
             idx += ch.len_utf8();
-            seen += 1;
         }
         end
     }
@@ -2543,8 +2552,16 @@ mod tests {
         let mut c = b.clone();
         c.bgra[0] = 200;
 
-        assert_eq!(a.cache_key(), b.cache_key(), "identical content must share a key");
-        assert_ne!(a.cache_key(), c.cache_key(), "changed content must not collide");
+        assert_eq!(
+            a.cache_key(),
+            b.cache_key(),
+            "identical content must share a key"
+        );
+        assert_ne!(
+            a.cache_key(),
+            c.cache_key(),
+            "changed content must not collide"
+        );
     }
 
     #[test]
@@ -2576,7 +2593,12 @@ mod tests {
         // Remaining is never greater than the total.
         let (total, rem) = adjust_timer_values(120, 120.0, -60.0);
         assert_eq!(total, 60);
-        assert!(rem <= total as f64, "remaining {} exceeded total {}", rem, total);
+        assert!(
+            rem <= total as f64,
+            "remaining {} exceeded total {}",
+            rem,
+            total
+        );
 
         // Subtracting past the end parks at zero rather than inventing overtime.
         let (_, rem) = adjust_timer_values(600, 30.0, -60.0);
@@ -2602,8 +2624,7 @@ mod tests {
         // fit: previously only `left` was clamped, so the right-hand actions
         // (Copy, Save, Close) fell off the screen and could not be clicked.
         for screen_w in [1920.0_f32, 1366.0, 1024.0, 900.0, 800.0] {
-            let (bar, items, grip, _) =
-                compute_toolbar_layout(screen_w, 768.0, false, None, 1);
+            let (bar, items, grip, _) = compute_toolbar_layout(screen_w, 768.0, false, None, 1);
 
             assert!(
                 bar.left >= 0.0 && bar.right <= screen_w,
@@ -2624,7 +2645,10 @@ mod tests {
                     item.rect.right,
                     screen_w
                 );
-                assert!(item.rect.right > item.rect.left, "item collapsed to zero width");
+                assert!(
+                    item.rect.right > item.rect.left,
+                    "item collapsed to zero width"
+                );
             }
 
             // The last action must stay hit-testable.
@@ -2698,8 +2722,14 @@ mod tests {
         assert_eq!(ColorPreset::from_config_str("1ec84d"), Some(c));
 
         // Preset names still parse, case-insensitively.
-        assert_eq!(ColorPreset::from_config_str("Pink"), Some(ColorPreset::Pink));
-        assert_eq!(ColorPreset::from_config_str("cyan"), Some(ColorPreset::Cyan));
+        assert_eq!(
+            ColorPreset::from_config_str("Pink"),
+            Some(ColorPreset::Pink)
+        );
+        assert_eq!(
+            ColorPreset::from_config_str("cyan"),
+            Some(ColorPreset::Cyan)
+        );
 
         // Junk is rejected rather than silently becoming a colour.
         assert_eq!(ColorPreset::from_config_str("#12345"), None);
@@ -2713,10 +2743,7 @@ mod tests {
             open: true,
             ..Default::default()
         };
-        p.recent = vec![
-            ColorPreset::Custom(1, 2, 3),
-            ColorPreset::Custom(4, 5, 6),
-        ];
+        p.recent = vec![ColorPreset::Custom(1, 2, 3), ColorPreset::Custom(4, 5, 6)];
         let anchor = D2D_RECT_F {
             left: 900.0,
             top: 12.0,
@@ -2750,12 +2777,18 @@ mod tests {
             q.push_recent(ColorPreset::Custom(i, 0, 0));
         }
         assert_eq!(q.recent.len(), PICKER_MAX_RECENT);
-        assert_eq!(q.recent[0], ColorPreset::Custom(PICKER_MAX_RECENT as u8 + 3, 0, 0));
+        assert_eq!(
+            q.recent[0],
+            ColorPreset::Custom(PICKER_MAX_RECENT as u8 + 3, 0, 0)
+        );
 
         q.push_recent(ColorPreset::Custom(0, 0, 0));
         q.push_recent(ColorPreset::Custom(0, 0, 0));
         assert_eq!(
-            q.recent.iter().filter(|c| **c == ColorPreset::Custom(0, 0, 0)).count(),
+            q.recent
+                .iter()
+                .filter(|c| **c == ColorPreset::Custom(0, 0, 0))
+                .count(),
             1,
             "re-picking a colour must not duplicate it"
         );
@@ -2884,7 +2917,10 @@ mod tests {
             ..Default::default()
         };
         panned.tick_smooth_pan(1.0, 1920.0, 1080.0, true);
-        assert_eq!(panned.view_x, 300.0, "infinite=true must leave a native-zoom pan alone");
+        assert_eq!(
+            panned.view_x, 300.0,
+            "infinite=true must leave a native-zoom pan alone"
+        );
 
         let mut panned2 = ZoomState {
             target_view_x: 300.0,
@@ -3258,7 +3294,10 @@ mod tests {
 
         // Nothing selected: only the commands, which need no shape to exist.
         let bare = build(None);
-        assert!(bare.iter().any(|i| matches!(i.action, FluentAction::Align(_))));
+        assert!(
+            bare.iter()
+                .any(|i| matches!(i.action, FluentAction::Align(_)))
+        );
         assert!(
             !bare
                 .iter()
@@ -3709,7 +3748,6 @@ mod tests {
     }
 }
 
-
 /// The property controls for one kind of shape.
 ///
 /// Shared, so the Select tool can borrow whichever set matches what is
@@ -3857,34 +3895,35 @@ fn property_groups(tool: DrawTool) -> Vec<Vec<(FluentAction, f32)>> {
 /// Unlike a property control, none of these has a "default for the next
 /// shape" meaning: you cannot pre-set *align*.
 fn select_command_groups() -> Vec<Vec<(FluentAction, f32)>> {
-    let mut groups: Vec<Vec<(FluentAction, f32)>> = Vec::with_capacity(6);
-            groups.push(vec![
-                (FluentAction::Align(AlignTo::Left), 30.0),
-                (FluentAction::Align(AlignTo::HCentre), 30.0),
-                (FluentAction::Align(AlignTo::Right), 30.0),
-                (FluentAction::Align(AlignTo::Top), 30.0),
-                (FluentAction::Align(AlignTo::VCentre), 30.0),
-                (FluentAction::Align(AlignTo::Bottom), 30.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::Distribute(true), 30.0),
-                (FluentAction::Distribute(false), 30.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::Restack(false), 30.0),
-                (FluentAction::Restack(true), 30.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetGroup(true), 30.0),
-                (FluentAction::SetGroup(false), 30.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::AdjustOpacity(-0.1), 30.0),
-                (FluentAction::AdjustOpacity(0.1), 30.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::Duplicate, 30.0),
-                (FluentAction::DeleteSelection, 30.0),
-            ]);
+    let groups: Vec<Vec<(FluentAction, f32)>> = vec![
+        vec![
+            (FluentAction::Align(AlignTo::Left), 30.0),
+            (FluentAction::Align(AlignTo::HCentre), 30.0),
+            (FluentAction::Align(AlignTo::Right), 30.0),
+            (FluentAction::Align(AlignTo::Top), 30.0),
+            (FluentAction::Align(AlignTo::VCentre), 30.0),
+            (FluentAction::Align(AlignTo::Bottom), 30.0),
+        ],
+        vec![
+            (FluentAction::Distribute(true), 30.0),
+            (FluentAction::Distribute(false), 30.0),
+        ],
+        vec![
+            (FluentAction::Restack(false), 30.0),
+            (FluentAction::Restack(true), 30.0),
+        ],
+        vec![
+            (FluentAction::SetGroup(true), 30.0),
+            (FluentAction::SetGroup(false), 30.0),
+        ],
+        vec![
+            (FluentAction::AdjustOpacity(-0.1), 30.0),
+            (FluentAction::AdjustOpacity(0.1), 30.0),
+        ],
+        vec![
+            (FluentAction::Duplicate, 30.0),
+            (FluentAction::DeleteSelection, 30.0),
+        ],
+    ];
     groups
 }

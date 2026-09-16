@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
-    D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED,
+    D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
@@ -20,9 +20,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DASH_STYLE_SOLID, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
     D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_STROKE_STYLE_PROPERTIES,
-    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory,
-    ID2D1GeometryGroup, ID2D1HwndRenderTarget, ID2D1RenderTarget, ID2D1SolidColorBrush,
-    ID2D1StrokeStyle,
+    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Bitmap, ID2D1BitmapRenderTarget,
+    ID2D1Factory, ID2D1GeometryGroup, ID2D1HwndRenderTarget, ID2D1PathGeometry, ID2D1RenderTarget,
+    ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
@@ -79,6 +79,8 @@ pub struct D2DRenderer {
     /// the target changes (the offscreen target used for export is a different
     /// one) or the device is lost.
     solid_brush_cache: RefCell<(usize, HashMap<u32, ID2D1SolidColorBrush>)>,
+    pub blur_rt_cache: RefCell<Option<(usize, D2D_SIZE_F, ID2D1BitmapRenderTarget)>>,
+    pub geometry_cache: RefCell<(usize, HashMap<u64, ID2D1PathGeometry>)>,
     /// Pasted images, keyed by content, alongside the render target they were
     /// uploaded to. Re-uploading a full-screen paste every frame would be the
     /// single most expensive thing the renderer does.
@@ -307,7 +309,9 @@ impl D2DRenderer {
                 text_formats_cache: RefCell::new(HashMap::new()),
                 spotlight_geometry_cache: RefCell::new(None),
                 solid_brush_cache: RefCell::new((0, HashMap::new())),
-            image_cache: RefCell::new((0, HashMap::new())),
+                blur_rt_cache: RefCell::new(None),
+                geometry_cache: RefCell::new((0, HashMap::new())),
+                image_cache: RefCell::new((0, HashMap::new())),
                 target_hwnd: HWND::default(),
                 target_width: 0,
                 target_height: 0,
@@ -345,6 +349,9 @@ impl D2DRenderer {
         }
 
         let brush = unsafe { rt.CreateSolidColorBrush(color, None) }.ok()?;
+        if cache.1.len() > 256 {
+            cache.1.clear();
+        }
         cache.1.insert(key, brush.clone());
         Some(brush)
     }
@@ -372,7 +379,7 @@ impl D2DRenderer {
         pixels: &crate::types::ImagePixels,
     ) -> Option<ID2D1Bitmap> {
         unsafe {
-            let target_key = rt as *const _ as *const () as usize;
+            let target_key = rt.as_raw() as usize;
             let mut cache = self.image_cache.borrow_mut();
             if cache.0 != target_key {
                 cache.0 = target_key;
@@ -554,8 +561,6 @@ impl D2DRenderer {
         }
     }
 
-
-
     /// Rebuild the render target after a lost device. Returns true once a fresh
     /// target is live, meaning every device-dependent resource the caller owns
     /// (bitmaps, in particular) must be recreated from it.
@@ -572,6 +577,12 @@ impl D2DRenderer {
         self.spotlight_geometry_cache.borrow_mut().take();
         {
             let mut cache = self.solid_brush_cache.borrow_mut();
+            cache.0 = 0;
+            cache.1.clear();
+        }
+        self.blur_rt_cache.borrow_mut().take();
+        {
+            let mut cache = self.geometry_cache.borrow_mut();
             cache.0 = 0;
             cache.1.clear();
         }
@@ -1158,7 +1169,9 @@ impl D2DRenderer {
                             {
                                 let bounds = crate::shapes::shape_bounds(&owner.shape);
                                 let rides = crate::shapes::label_rides_on_shape(&owner.shape);
-                                self.render_contained_text(&dc_rt, &a.shape, bounds, rides, a.opacity);
+                                self.render_contained_text(
+                                    &dc_rt, &a.shape, bounds, rides, a.opacity,
+                                );
                             }
                         }
 
@@ -1197,7 +1210,7 @@ impl D2DRenderer {
                             total_bytes,
                         );
 
-                        for chunk in pixels.chunks_exact_mut(4) {
+                        for chunk in pixels.as_chunks_mut::<4>().0 {
                             chunk[3] = 255;
                         }
 

@@ -119,10 +119,23 @@ pub fn shape_intersects_circle(shape: &Shape, center: Point2D, radius: f32) -> b
             ..
         } => {
             let threshold = radius + *width / 2.0;
-            // Walk the arc; on a straight line this is the single chord.
-            let pts = sample_curve(*start, *end, *curve);
-            pts.windows(2)
-                .any(|w| point_to_segment_distance(center, w[0], w[1]) <= threshold)
+            // Check distance against the curve without allocating a Vec.
+            if curve.abs() < 0.01 {
+                // Straight line — just one segment.
+                point_to_segment_distance(center, *start, *end) <= threshold
+            } else {
+                let c = curve_control(*start, *end, *curve);
+                let mut prev = *start;
+                for i in 1..=CURVE_SAMPLES {
+                    let t = i as f32 / CURVE_SAMPLES as f32;
+                    let cur = quad_point(*start, c, *end, t);
+                    if point_to_segment_distance(center, prev, cur) <= threshold {
+                        return true;
+                    }
+                    prev = cur;
+                }
+                false
+            }
         }
         Shape::Rectangle {
             start, end, width, ..
@@ -437,7 +450,6 @@ pub fn set_shape_pattern(shape: &mut Shape, p: StrokePattern) -> bool {
     true
 }
 
-
 // Alignment
 
 pub use crate::types::AlignTo;
@@ -483,15 +495,15 @@ pub fn distribute_offsets(boxes: &[(f32, f32, f32, f32)], horizontal: bool) -> V
     }
     let key = |b: &(f32, f32, f32, f32)| if horizontal { b.0 } else { b.1 };
     let size = |b: &(f32, f32, f32, f32)| {
-        if horizontal {
-            b.2 - b.0
-        } else {
-            b.3 - b.1
-        }
+        if horizontal { b.2 - b.0 } else { b.3 - b.1 }
     };
 
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|a, b| key(&boxes[*a]).partial_cmp(&key(&boxes[*b])).unwrap());
+    order.sort_by(|a, b| {
+        key(&boxes[*a])
+            .partial_cmp(&key(&boxes[*b]))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let first = &boxes[order[0]];
     let last = &boxes[order[n - 1]];
@@ -508,7 +520,11 @@ pub fn distribute_offsets(boxes: &[(f32, f32, f32, f32)], horizontal: bool) -> V
     for i in order.iter().take(n - 1).skip(1) {
         let b = &boxes[*i];
         let delta = cursor - key(b);
-        out[*i] = if horizontal { (delta, 0.0) } else { (0.0, delta) };
+        out[*i] = if horizontal {
+            (delta, 0.0)
+        } else {
+            (0.0, delta)
+        };
         cursor += size(b) + gap;
     }
     out
@@ -698,7 +714,10 @@ pub const ARROW_BINDING_GAP: f32 = 6.0;
 pub fn can_bind_arrow(shape: &Shape) -> bool {
     matches!(
         shape,
-        Shape::Rectangle { .. } | Shape::Ellipse { .. } | Shape::StepBadge { .. } | Shape::Text { .. }
+        Shape::Rectangle { .. }
+            | Shape::Ellipse { .. }
+            | Shape::StepBadge { .. }
+            | Shape::Text { .. }
     )
 }
 
@@ -728,8 +747,16 @@ pub fn boundary_point(shape: &Shape, toward: Point2D, gap: f32) -> Point2D {
         Shape::StepBadge { radius, .. } => *radius,
         _ => {
             // Rectangle: whichever axis the ray crosses first.
-            let tx = if ux.abs() > 1e-6 { rx / ux.abs() } else { f32::MAX };
-            let ty = if uy.abs() > 1e-6 { ry / uy.abs() } else { f32::MAX };
+            let tx = if ux.abs() > 1e-6 {
+                rx / ux.abs()
+            } else {
+                f32::MAX
+            };
+            let ty = if uy.abs() > 1e-6 {
+                ry / uy.abs()
+            } else {
+                f32::MAX
+            };
             tx.min(ty)
         }
     };
@@ -781,7 +808,12 @@ pub fn resolve_arrow_ends(
 pub fn with_arrow_ends(shape: &Shape, start: Point2D, end: Point2D) -> Shape {
     let mut out = shape.clone();
     match &mut out {
-        Shape::Arrow { start: s, end: e, .. } | Shape::Line { start: s, end: e, .. } => {
+        Shape::Arrow {
+            start: s, end: e, ..
+        }
+        | Shape::Line {
+            start: s, end: e, ..
+        } => {
             *s = start;
             *e = end;
         }
@@ -819,16 +851,9 @@ pub fn label_rides_on_shape(shape: &Shape) -> bool {
 
 /// Where a label of the given size sits inside its container: centred on both
 /// axes, which is what makes it look deliberate rather than dropped in.
-pub fn contained_text_origin(
-    container: (f32, f32, f32, f32),
-    text_w: f32,
-    text_h: f32,
-) -> Point2D {
+pub fn contained_text_origin(container: (f32, f32, f32, f32), text_w: f32, text_h: f32) -> Point2D {
     let (l, t, r, b) = container;
-    Point2D::new(
-        l + ((r - l) - text_w) * 0.5,
-        t + ((b - t) - text_h) * 0.5,
-    )
+    Point2D::new(l + ((r - l) - text_w) * 0.5, t + ((b - t) - text_h) * 0.5)
 }
 
 /// The height a container needs to hold a label of `text_h`, never shrinking
@@ -1159,7 +1184,12 @@ pub fn shape_bounds(shape: &Shape) -> (f32, f32, f32, f32) {
             }
             (l - half, t - half, r + half, b + half)
         }
-        Shape::Rectangle { start, end, width, .. } | Shape::Ellipse { start, end, width, .. } => {
+        Shape::Rectangle {
+            start, end, width, ..
+        }
+        | Shape::Ellipse {
+            start, end, width, ..
+        } => {
             let (l, t, r, b) = normalize_rect(*start, *end);
             let half = width * 0.5;
             (l - half, t - half, r + half, b + half)
@@ -1189,9 +1219,7 @@ pub fn shape_bounds(shape: &Shape) -> (f32, f32, f32, f32) {
 }
 
 /// Centres of the eight grips for a bounding box, in the box's own space.
-pub fn selection_handle_points(
-    bounds: (f32, f32, f32, f32),
-) -> [(SelectionHandle, Point2D); 8] {
+pub fn selection_handle_points(bounds: (f32, f32, f32, f32)) -> [(SelectionHandle, Point2D); 8] {
     let (l, t, r, b) = bounds;
     let cx = (l + r) * 0.5;
     let cy = (t + b) * 0.5;
@@ -1375,8 +1403,6 @@ mod tests {
         assert!((snapped.y).abs() < 1.0);
         assert!((snapped.x - 100.5).abs() < 1.0);
     }
-
-
 
     #[test]
     fn test_bezier_smoothing() {
@@ -1600,9 +1626,17 @@ mod tests {
             curve: 40.0,
         };
         // On the arc's apex: a hit.
-        assert!(shape_intersects_circle(&bowed, Point2D::new(50.0, 40.0), 6.0));
+        assert!(shape_intersects_circle(
+            &bowed,
+            Point2D::new(50.0, 40.0),
+            6.0
+        ));
         // On the straight chord, where the line no longer is: a miss.
-        assert!(!shape_intersects_circle(&bowed, Point2D::new(50.0, 0.0), 6.0));
+        assert!(!shape_intersects_circle(
+            &bowed,
+            Point2D::new(50.0, 0.0),
+            6.0
+        ));
     }
 
     #[test]
@@ -1654,8 +1688,8 @@ mod tests {
         // Different widths: spacing centres evenly would bunch the wide one up
         // against a neighbour. Equal gaps is what looks right.
         let boxes = [
-            (0.0, 0.0, 10.0, 10.0),   // width 10
-            (20.0, 0.0, 80.0, 10.0),  // width 60, badly placed
+            (0.0, 0.0, 10.0, 10.0),    // width 10
+            (20.0, 0.0, 80.0, 10.0),   // width 60, badly placed
             (200.0, 0.0, 210.0, 10.0), // width 10
         ];
         let off = distribute_offsets(&boxes, true);
@@ -1702,7 +1736,12 @@ mod tests {
                 half_width * 2.0,
                 width
             );
-            assert!(head_len > width, "width {}: head length {}", width, head_len);
+            assert!(
+                head_len > width,
+                "width {}: head length {}",
+                width,
+                head_len
+            );
         }
     }
 
@@ -1741,7 +1780,12 @@ mod tests {
         let (head_len, _) = arrow_head_size(6.0, 400.0);
         let (a, b) = arrow_shaft(s, e, head_len, true, true).unwrap();
         assert!(a.x > 0.0 && b.x < 400.0);
-        assert!((a.x - (400.0 - b.x)).abs() < 0.01, "asymmetric: {:?} {:?}", a, b);
+        assert!(
+            (a.x - (400.0 - b.x)).abs() < 0.01,
+            "asymmetric: {:?} {:?}",
+            a,
+            b
+        );
     }
 
     #[test]
@@ -1756,12 +1800,8 @@ mod tests {
 
     #[test]
     fn test_head_points_straddle_the_line_and_meet_at_the_tip() {
-        let (tip, left, right) = arrow_head_points(
-            Point2D::new(0.0, 0.0),
-            Point2D::new(100.0, 0.0),
-            20.0,
-            8.0,
-        );
+        let (tip, left, right) =
+            arrow_head_points(Point2D::new(0.0, 0.0), Point2D::new(100.0, 0.0), 20.0, 8.0);
         assert_eq!(tip, Point2D::new(100.0, 0.0));
         // Base sits one head-length back, flanks symmetric about the axis.
         assert!((left.x - 80.0).abs() < 0.01 && (right.x - 80.0).abs() < 0.01);
@@ -1961,7 +2001,12 @@ mod tests {
             Point2D::new(50.0, 0.0),
             Point2D::new(50.0, 30.0),
         ] {
-            assert!(pts.contains(&expected), "missing {:?} in {:?}", expected, pts);
+            assert!(
+                pts.contains(&expected),
+                "missing {:?} in {:?}",
+                expected,
+                pts
+            );
         }
     }
 

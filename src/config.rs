@@ -249,8 +249,7 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Parse a stored colour (preset name or `#RRGGBB`), falling back to Red.
     pub fn parse_color(s: &str) -> crate::types::ColorPreset {
-        crate::types::ColorPreset::from_config_str(s)
-            .unwrap_or(crate::types::ColorPreset::Red)
+        crate::types::ColorPreset::from_config_str(s).unwrap_or(crate::types::ColorPreset::Red)
     }
 
     pub fn config_path() -> Option<PathBuf> {
@@ -277,15 +276,16 @@ impl AppConfig {
             let text = data.strip_prefix('\u{feff}').unwrap_or(&data);
 
             match serde_json::from_str::<Self>(text) {
-                Ok(loaded) => cfg = loaded,
+                Ok(loaded) => {
+                    crate::logging::log_info!("Config loaded from {}", path.display());
+                    cfg = loaded;
+                }
                 Err(e) => {
+                    crate::logging::log_error!("Config parse failed: {}", e);
                     // Keep the unparseable file instead of quietly overwriting it
                     // on the next save, so the user can recover their settings.
                     let backup = path.with_extension("json.bad");
-                    let _ = fs::write(
-                        &backup,
-                        format!("// Failed to parse: {}\n{}", e, data),
-                    );
+                    let _ = fs::write(&backup, format!("// Failed to parse: {}\n{}", e, data));
                 }
             }
         }
@@ -348,9 +348,11 @@ impl AppConfig {
             let val_name = w!("Zoomify");
             let res = if enable {
                 if let Ok(exe_path) = std::env::current_exe() {
-                    let exe_str = format!("\"{}\"", exe_path.to_string_lossy());
-                    let utf16: Vec<u16> =
-                        exe_str.encode_utf16().chain(std::iter::once(0)).collect();
+                    use std::os::windows::ffi::OsStrExt;
+                    let mut utf16: Vec<u16> = vec![b'"' as u16];
+                    utf16.extend(exe_path.as_os_str().encode_wide());
+                    utf16.push(b'"' as u16);
+                    utf16.push(0);
                     let byte_slice = std::slice::from_raw_parts(
                         utf16.as_ptr() as *const u8,
                         utf16.len() * std::mem::size_of::<u16>(),

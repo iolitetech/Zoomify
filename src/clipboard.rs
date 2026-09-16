@@ -9,7 +9,9 @@ use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, RegisterClipboardFormatW,
     SetClipboardData,
 };
-use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 use windows::core::w;
 
 const CF_BITMAP: u32 = 2;
@@ -33,7 +35,8 @@ fn open_clipboard_retrying() -> bool {
 }
 
 pub fn copy_bgra_to_clipboard(width: u32, height: u32, top_down_bgra: &[u8]) -> bool {
-    if width == 0 || height == 0 || top_down_bgra.len() != (width * height * 4) as usize {
+    if width == 0 || height == 0 || top_down_bgra.len() != (width as usize) * (height as usize) * 4
+    {
         return false;
     }
 
@@ -45,7 +48,7 @@ pub fn copy_bgra_to_clipboard(width: u32, height: u32, top_down_bgra: &[u8]) -> 
         let _ = EmptyClipboard();
 
         let header_size = std::mem::size_of::<BITMAPINFOHEADER>();
-        let image_size = (width * height * 4) as usize;
+        let image_size = (width as usize) * (height as usize) * 4;
         let total_size = header_size + image_size;
 
         let h_global = match GlobalAlloc(GMEM_MOVEABLE, total_size) {
@@ -84,7 +87,7 @@ pub fn copy_bgra_to_clipboard(width: u32, height: u32, top_down_bgra: &[u8]) -> 
         );
 
         // Copy pixel rows in bottom-up order
-        let row_pitch = (width * 4) as usize;
+        let row_pitch = width as usize * 4;
         let dest_pixel_ptr = (ptr as *mut u8).add(header_size);
 
         for row in 0..height {
@@ -105,7 +108,7 @@ pub fn copy_bgra_to_clipboard(width: u32, height: u32, top_down_bgra: &[u8]) -> 
         // Also place PNG format on clipboard for modern apps (Discord, Slack, Telegram, browsers)
         // so alpha transparency is preserved perfectly without black borders
         let mut rgba = top_down_bgra.to_vec();
-        for chunk in rgba.chunks_exact_mut(4) {
+        for chunk in rgba.as_chunks_mut::<4>().0 {
             chunk.swap(0, 2);
         }
 
@@ -156,8 +159,9 @@ pub fn get_clipboard_text() -> Option<String> {
                 let ptr = GlobalLock(hglobal);
                 if !ptr.is_null() {
                     let u16_ptr = ptr as *const u16;
+                    let max_chars = GlobalSize(hglobal) / 2;
                     let mut len = 0;
-                    while *u16_ptr.add(len) != 0 {
+                    while len < max_chars && *u16_ptr.add(len) != 0 {
                         len += 1;
                     }
                     let slice = std::slice::from_raw_parts(u16_ptr, len);
@@ -243,7 +247,14 @@ unsafe fn read_dib() -> Option<ClipboardImage> {
 
         let w = width as usize;
         let h = height as usize;
-        let src_stride = ((w * bpp as usize + 31) / 32) * 4; // rows pad to 4 bytes
+        let src_stride = (w * bpp as usize).div_ceil(32) * 4; // rows pad to 4 bytes
+
+        let block_size = GlobalSize(hglobal);
+        let needed = header.biSize as usize + mask_bytes + src_stride * h;
+        if block_size < needed {
+            let _ = GlobalUnlock(hglobal);
+            return None;
+        }
         let mut bgra = vec![0u8; w * h * 4];
 
         for row in 0..h {
@@ -344,7 +355,7 @@ unsafe fn read_cf_bitmap() -> Option<ClipboardImage> {
         }
         // A 32-bit source's fourth byte is not a reliable alpha channel;
         // honouring it as-is would often paste an invisible image.
-        for px in bgra.chunks_exact_mut(4) {
+        for px in bgra.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
 

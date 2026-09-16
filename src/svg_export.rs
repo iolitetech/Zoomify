@@ -60,8 +60,8 @@ pub fn build_svg(input: &SvgExportInput) -> String {
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" \
 width="{w}" height="{h}" viewBox="0 0 {w} {h}">
 "#,
-        w = fnum(input.logical_w),
-        h = fnum(input.logical_h),
+        w = FNum(input.logical_w),
+        h = FNum(input.logical_h),
     );
 
     // Everything — background included — sits under the same zoom transform
@@ -72,9 +72,9 @@ width="{w}" height="{h}" viewBox="0 0 {w} {h}">
         let _ = write!(
             out,
             r#"<g transform="matrix({a} 0 0 {a} {e} {f})">"#,
-            a = fnum(z),
-            e = fnum(-input.view_x * z),
-            f = fnum(-input.view_y * z),
+            a = FNum(z),
+            e = FNum(-input.view_x * z),
+            f = FNum(-input.view_y * z),
         );
     } else {
         out.push_str("<g>");
@@ -105,16 +105,16 @@ fn write_background(out: &mut String, input: &SvgExportInput) {
             let _ = write!(
                 out,
                 r##"<rect x="0" y="0" width="{w}" height="{h}" fill="#fafafc"/>"##,
-                w = fnum(input.logical_w),
-                h = fnum(input.logical_h),
+                w = FNum(input.logical_w),
+                h = FNum(input.logical_h),
             );
         }
         CanvasBackground::Blackboard => {
             let _ = write!(
                 out,
                 r##"<rect x="0" y="0" width="{w}" height="{h}" fill="#1c1e24"/>"##,
-                w = fnum(input.logical_w),
-                h = fnum(input.logical_h),
+                w = FNum(input.logical_w),
+                h = FNum(input.logical_h),
             );
         }
         CanvasBackground::Transparent => {
@@ -124,8 +124,8 @@ fn write_background(out: &mut String, input: &SvgExportInput) {
                 let _ = write!(
                     out,
                     r#"<image x="0" y="0" width="{w}" height="{h}" href="{uri}"/>"#,
-                    w = fnum(input.logical_w),
-                    h = fnum(input.logical_h),
+                    w = FNum(input.logical_w),
+                    h = FNum(input.logical_h),
                 );
             }
         }
@@ -133,7 +133,7 @@ fn write_background(out: &mut String, input: &SvgExportInput) {
 }
 
 fn write_annotation(out: &mut String, a: &Annotation, input: &SvgExportInput) {
-    let _ = write!(out, r#"<g opacity="{}">"#, fnum(a.opacity.clamp(0.0, 1.0)));
+    let _ = write!(out, r#"<g opacity="{}">"#, FNum(a.opacity.clamp(0.0, 1.0)));
     match &a.shape {
         Shape::Stroke { .. } => write_stroke(out, &a.shape),
         Shape::Line { .. } => write_line(out, &a.shape),
@@ -149,10 +149,10 @@ fn write_annotation(out: &mut String, a: &Annotation, input: &SvgExportInput) {
                 let _ = write!(
                     out,
                     r#"<image x="{x}" y="{y}" width="{w}" height="{h}" href="{uri}"/>"#,
-                    x = fnum(l),
-                    y = fnum(t),
-                    w = fnum(r - l),
-                    h = fnum(b - t),
+                    x = FNum(l),
+                    y = FNum(t),
+                    w = FNum(r - l),
+                    h = FNum(b - t),
                 );
             }
         }
@@ -176,16 +176,20 @@ fn write_stroke(out: &mut String, shape: &Shape) {
         return;
     }
     let alpha = if *is_highlighter { 0.45 } else { 1.0 };
-    let w = if *is_highlighter { *width * 2.2 } else { *width };
+    let w = if *is_highlighter {
+        *width * 2.2
+    } else {
+        *width
+    };
     if points.len() == 1 {
         let _ = write!(
             out,
             r#"<circle cx="{x}" cy="{y}" r="{r}" fill="{c}" fill-opacity="{a}"/>"#,
-            x = fnum(points[0].x),
-            y = fnum(points[0].y),
-            r = fnum(w / 2.0),
+            x = FNum(points[0].x),
+            y = FNum(points[0].y),
+            r = FNum(w / 2.0),
             c = hex(*color),
-            a = fnum(alpha),
+            a = FNum(alpha),
         );
         return;
     }
@@ -194,8 +198,8 @@ fn write_stroke(out: &mut String, shape: &Shape) {
         out,
         r#"<path d="{d}" fill="none" stroke="{c}" stroke-opacity="{a}" stroke-width="{w}" stroke-linecap="round" stroke-linejoin="round"{dash}/>"#,
         c = hex(*color),
-        a = fnum(alpha),
-        w = fnum(w),
+        a = FNum(alpha),
+        w = FNum(w),
         dash = dash_attr(*pattern, w),
     );
 }
@@ -204,23 +208,23 @@ fn write_stroke(out: &mut String, shape: &Shape) {
 /// a straight `M x y L x y` for two points, the same Catmull-Rom-derived
 /// curve the renderer draws for three or more.
 fn path_d(points: &[Point2D]) -> String {
-    let mut d = format!("M {} {}", fnum(points[0].x), fnum(points[0].y));
+    let mut d = format!("M {} {}", FNum(points[0].x), FNum(points[0].y));
     if points.len() >= 3 {
         for (c1, c2, p) in points_to_bezier_segments(points) {
             let _ = write!(
                 d,
                 " C {} {} {} {} {} {}",
-                fnum(c1.x),
-                fnum(c1.y),
-                fnum(c2.x),
-                fnum(c2.y),
-                fnum(p.x),
-                fnum(p.y)
+                FNum(c1.x),
+                FNum(c1.y),
+                FNum(c2.x),
+                FNum(c2.y),
+                FNum(p.x),
+                FNum(p.y)
             );
         }
     } else {
         for p in &points[1..] {
-            let _ = write!(d, " L {} {}", fnum(p.x), fnum(p.y));
+            let _ = write!(d, " L {} {}", FNum(p.x), FNum(p.y));
         }
     }
     d
@@ -243,7 +247,7 @@ fn write_line(out: &mut String, shape: &Shape) {
         out,
         r#"<path d="{d}" fill="none" stroke="{c}" stroke-width="{w}" stroke-linecap="round"{dash}/>"#,
         c = hex(*color),
-        w = fnum(*width),
+        w = FNum(*width),
         dash = dash_attr(*pattern, *width),
     );
 }
@@ -254,21 +258,21 @@ fn curved_d(start: Point2D, end: Point2D, curve: f32) -> String {
     if curve.abs() < 0.01 {
         format!(
             "M {} {} L {} {}",
-            fnum(start.x),
-            fnum(start.y),
-            fnum(end.x),
-            fnum(end.y)
+            FNum(start.x),
+            FNum(start.y),
+            FNum(end.x),
+            FNum(end.y)
         )
     } else {
         let c = curve_control(start, end, curve);
         format!(
             "M {} {} Q {} {} {} {}",
-            fnum(start.x),
-            fnum(start.y),
-            fnum(c.x),
-            fnum(c.y),
-            fnum(end.x),
-            fnum(end.y)
+            FNum(start.x),
+            FNum(start.y),
+            FNum(c.x),
+            FNum(c.y),
+            FNum(end.x),
+            FNum(end.y)
         )
     }
 }
@@ -307,7 +311,13 @@ fn write_arrow(out: &mut String, shape: &Shape) {
             out,
             r#"<path d="{d}" fill="none" stroke="{c}" stroke-width="{w}" stroke-linecap="round"{dash}/>"#,
             d = if curve.abs() < 0.01 {
-                format!("M {} {} L {} {}", fnum(s.x), fnum(s.y), fnum(e.x), fnum(e.y))
+                format!(
+                    "M {} {} L {} {}",
+                    FNum(s.x),
+                    FNum(s.y),
+                    FNum(e.x),
+                    FNum(e.y)
+                )
             } else {
                 // A curved arrow's shaft follows the same bow as its chord;
                 // reusing the curve control point keeps it on the arc rather
@@ -315,7 +325,7 @@ fn write_arrow(out: &mut String, shape: &Shape) {
                 curved_d(s, e, *curve)
             },
             c = col,
-            w = fnum(*width),
+            w = FNum(*width),
             dash = dash_attr(*pattern, *width),
         );
     }
@@ -330,9 +340,13 @@ fn write_arrow(out: &mut String, shape: &Shape) {
         let c = curve_control(*start, *end, *curve);
         (quad_lerp(c, *end, 0.1), quad_lerp(c, *start, 0.1))
     };
-    write_arrow_head(out, aim_end, *end, head_len, half_width, *head, &col, *width);
+    write_arrow_head(
+        out, aim_end, *end, head_len, half_width, *head, &col, *width,
+    );
     if head_at_start {
-        write_arrow_head(out, aim_start, *start, head_len, half_width, *head, &col, *width);
+        write_arrow_head(
+            out, aim_start, *start, head_len, half_width, *head, &col, *width,
+        );
     }
 
     if *style == ArrowStyle::Dimension && length > 1.0 {
@@ -344,12 +358,12 @@ fn write_arrow(out: &mut String, shape: &Shape) {
             let _ = write!(
                 out,
                 r#"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{c}" stroke-width="{w}"/>"#,
-                x1 = fnum(p.x + px * tick),
-                y1 = fnum(p.y + py * tick),
-                x2 = fnum(p.x - px * tick),
-                y2 = fnum(p.y - py * tick),
+                x1 = FNum(p.x + px * tick),
+                y1 = FNum(p.y + py * tick),
+                x2 = FNum(p.x - px * tick),
+                y2 = FNum(p.y - py * tick),
                 c = col,
-                w = fnum(*width * 1.2),
+                w = FNum(*width * 1.2),
             );
         }
     }
@@ -359,10 +373,7 @@ fn write_arrow(out: &mut String, shape: &Shape) {
 /// tangent direction at the curve's end — cheap and close enough for aiming
 /// an arrowhead; it need not be the true derivative.
 fn quad_lerp(c: Point2D, towards: Point2D, t: f32) -> Point2D {
-    Point2D::new(
-        c.x + (towards.x - c.x) * t,
-        c.y + (towards.y - c.y) * t,
-    )
+    Point2D::new(c.x + (towards.x - c.x) * t, c.y + (towards.y - c.y) * t)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -382,12 +393,12 @@ fn write_arrow_head(
             let _ = write!(
                 out,
                 r#"<polygon points="{},{} {},{} {},{}" fill="{c}"/>"#,
-                fnum(tip.x),
-                fnum(tip.y),
-                fnum(left.x),
-                fnum(left.y),
-                fnum(right.x),
-                fnum(right.y),
+                FNum(tip.x),
+                FNum(tip.y),
+                FNum(left.x),
+                FNum(left.y),
+                FNum(right.x),
+                FNum(right.y),
                 c = col,
             );
         }
@@ -395,14 +406,14 @@ fn write_arrow_head(
             let _ = write!(
                 out,
                 r#"<polyline points="{},{} {},{} {},{}" fill="none" stroke="{c}" stroke-width="{w}" stroke-linecap="round"/>"#,
-                fnum(left.x),
-                fnum(left.y),
-                fnum(tip.x),
-                fnum(tip.y),
-                fnum(right.x),
-                fnum(right.y),
+                FNum(left.x),
+                FNum(left.y),
+                FNum(tip.x),
+                FNum(tip.y),
+                FNum(right.x),
+                FNum(right.y),
                 c = col,
-                w = fnum(width),
+                w = FNum(width),
             );
         }
         ArrowHead::Circle => {
@@ -413,9 +424,9 @@ fn write_arrow_head(
             let _ = write!(
                 out,
                 r#"<circle cx="{x}" cy="{y}" r="{r}" fill="{c}"/>"#,
-                x = fnum(tip.x - ux / len * r),
-                y = fnum(tip.y - uy / len * r),
-                r = fnum(r),
+                x = FNum(tip.x - ux / len * r),
+                y = FNum(tip.y - uy / len * r),
+                r = FNum(r),
                 c = col,
             );
         }
@@ -425,14 +436,14 @@ fn write_arrow_head(
             let _ = write!(
                 out,
                 r#"<polygon points="{},{} {},{} {},{} {},{}" fill="{c}"/>"#,
-                fnum(tip.x),
-                fnum(tip.y),
-                fnum(left.x),
-                fnum(left.y),
-                fnum(back.x),
-                fnum(back.y),
-                fnum(right.x),
-                fnum(right.y),
+                FNum(tip.x),
+                FNum(tip.y),
+                FNum(left.x),
+                FNum(left.y),
+                FNum(back.x),
+                FNum(back.y),
+                FNum(right.x),
+                FNum(right.y),
                 c = col,
             );
         }
@@ -440,12 +451,12 @@ fn write_arrow_head(
             let _ = write!(
                 out,
                 r#"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{c}" stroke-width="{w}"/>"#,
-                x1 = fnum(tip.x + (left.x - right.x) * 0.5),
-                y1 = fnum(tip.y + (left.y - right.y) * 0.5),
-                x2 = fnum(tip.x - (left.x - right.x) * 0.5),
-                y2 = fnum(tip.y - (left.y - right.y) * 0.5),
+                x1 = FNum(tip.x + (left.x - right.x) * 0.5),
+                y1 = FNum(tip.y + (left.y - right.y) * 0.5),
+                x2 = FNum(tip.x - (left.x - right.x) * 0.5),
+                y2 = FNum(tip.y - (left.y - right.y) * 0.5),
                 c = col,
-                w = fnum(width * 1.3),
+                w = FNum(width * 1.3),
             );
         }
     }
@@ -470,15 +481,15 @@ fn write_rectangle(out: &mut String, shape: &Shape) {
     let _ = write!(
         out,
         r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="{rx}" fill="{fc}" fill-opacity="{fo}" stroke="{c}" stroke-width="{sw}"{dash}/>"#,
-        x = fnum(l),
-        y = fnum(t),
-        w = fnum(r - l),
-        h = fnum(b - t),
-        rx = fnum(rx),
+        x = FNum(l),
+        y = FNum(t),
+        w = FNum(r - l),
+        h = FNum(b - t),
+        rx = FNum(rx),
         fc = fill_col,
-        fo = fnum(fill_op),
+        fo = FNum(fill_op),
         c = hex(*color),
-        sw = fnum(*width),
+        sw = FNum(*width),
         dash = dash_attr(*pattern, *width),
     );
 }
@@ -500,14 +511,14 @@ fn write_ellipse(out: &mut String, shape: &Shape) {
     let _ = write!(
         out,
         r#"<ellipse cx="{cx}" cy="{cy}" rx="{rx}" ry="{ry}" fill="{fc}" fill-opacity="{fo}" stroke="{c}" stroke-width="{sw}"{dash}/>"#,
-        cx = fnum((l + r) / 2.0),
-        cy = fnum((t + b) / 2.0),
-        rx = fnum((r - l) / 2.0),
-        ry = fnum((b - t) / 2.0),
+        cx = FNum((l + r) / 2.0),
+        cy = FNum((t + b) / 2.0),
+        rx = FNum((r - l) / 2.0),
+        ry = FNum((b - t) / 2.0),
         fc = fill_col,
-        fo = fnum(fill_op),
+        fo = FNum(fill_op),
         c = hex(*color),
-        sw = fnum(*width),
+        sw = FNum(*width),
         dash = dash_attr(*pattern, *width),
     );
 }
@@ -548,10 +559,26 @@ fn write_text(out: &mut String, id: ShapeId, shape: &Shape, layout: &HashMap<Sha
 
     match card_style {
         TextCardStyle::Badge => {
-            write_card_rect(out, *origin, layout_w, layout_h, "#141820", 0.65, Some("#ffffff"));
+            write_card_rect(
+                out,
+                *origin,
+                layout_w,
+                layout_h,
+                "#141820",
+                0.65,
+                Some("#ffffff"),
+            );
         }
         TextCardStyle::Solid => {
-            write_card_rect(out, *origin, layout_w, layout_h, "#1f222b", 0.96, Some(&hex(*color)));
+            write_card_rect(
+                out,
+                *origin,
+                layout_w,
+                layout_h,
+                "#1f222b",
+                0.96,
+                Some(&hex(*color)),
+            );
         }
         TextCardStyle::Transparent => {
             // A soft drop shadow rather than a card: an offset copy of the
@@ -569,7 +596,17 @@ fn write_text(out: &mut String, id: ShapeId, shape: &Shape, layout: &HashMap<Sha
             );
         }
     }
-    write_text_run(out, *origin, text, *font_size, *is_bold, *is_italic, *font_family, &hex(*color), 1.0);
+    write_text_run(
+        out,
+        *origin,
+        text,
+        *font_size,
+        *is_bold,
+        *is_italic,
+        *font_family,
+        &hex(*color),
+        1.0,
+    );
 }
 
 fn write_card_rect(
@@ -584,11 +621,11 @@ fn write_card_rect(
     let _ = write!(
         out,
         r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="6" fill="{fill}" fill-opacity="{fo}""#,
-        x = fnum(origin.x - 6.0),
-        y = fnum(origin.y - 4.0),
-        w = fnum(w + 12.0),
-        h = fnum(h + 6.0),
-        fo = fnum(fill_op),
+        x = FNum(origin.x - 6.0),
+        y = FNum(origin.y - 4.0),
+        w = FNum(w + 12.0),
+        h = FNum(h + 6.0),
+        fo = FNum(fill_op),
     );
     if let Some(b) = border {
         let _ = write!(out, r#" stroke="{b}" stroke-width="1.5""#);
@@ -611,24 +648,29 @@ fn write_text_run(
     let _ = write!(
         out,
         r#"<text x="{x}" y="{y}" font-family="{ff}" font-size="{fs}" font-weight="{fw}" font-style="{fs2}" fill="{fill}" fill-opacity="{fo}" style="dominant-baseline:hanging">"#,
-        x = fnum(origin.x),
-        y = fnum(origin.y),
+        x = FNum(origin.x),
+        y = FNum(origin.y),
         ff = font_family_css(font_family),
-        fs = fnum(font_size),
+        fs = FNum(font_size),
         fw = if is_bold { 700 } else { 600 },
         fs2 = if is_italic { "italic" } else { "normal" },
         fill = fill,
-        fo = fnum(fill_op),
+        fo = FNum(fill_op),
     );
     for (i, line) in text.split('\n').enumerate() {
         if i == 0 {
-            let _ = write!(out, r#"<tspan x="{x}" dy="0">{t}</tspan>"#, x = fnum(origin.x), t = esc(line));
+            let _ = write!(
+                out,
+                r#"<tspan x="{x}" dy="0">{t}</tspan>"#,
+                x = FNum(origin.x),
+                t = esc(line)
+            );
         } else {
             let _ = write!(
                 out,
                 r#"<tspan x="{x}" dy="{dy}">{t}</tspan>"#,
-                x = fnum(origin.x),
-                dy = fnum(font_size * 1.25),
+                x = FNum(origin.x),
+                dy = FNum(font_size * 1.25),
                 t = esc(line),
             );
         }
@@ -683,18 +725,28 @@ fn write_contained_text(
         .unwrap_or_else(|| estimate_text_size(text, *font_size));
     let origin = contained_text_origin(container, w, h);
 
-    let _ = write!(out, r#"<g opacity="{}">"#, fnum(a.opacity.clamp(0.0, 1.0)));
+    let _ = write!(out, r#"<g opacity="{}">"#, FNum(a.opacity.clamp(0.0, 1.0)));
     if rides_on {
         let _ = write!(
             out,
             r##"<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="4" fill="#1a1c24" fill-opacity="0.88"/>"##,
-            x = fnum(origin.x - 6.0),
-            y = fnum(origin.y - 3.0),
-            w = fnum(w + 12.0),
-            h = fnum(h + 6.0),
+            x = FNum(origin.x - 6.0),
+            y = FNum(origin.y - 3.0),
+            w = FNum(w + 12.0),
+            h = FNum(h + 6.0),
         );
     }
-    write_text_run(out, origin, text, *font_size, *is_bold, *is_italic, *font_family, &hex(*color), 1.0);
+    write_text_run(
+        out,
+        origin,
+        text,
+        *font_size,
+        *is_bold,
+        *is_italic,
+        *font_family,
+        &hex(*color),
+        1.0,
+    );
     out.push_str("</g>");
 }
 
@@ -726,21 +778,21 @@ fn write_step_badge(out: &mut String, shape: &Shape) {
                 let _ = write!(
                     out,
                     r#"<circle cx="{x}" cy="{y}" r="{r}" fill="{bp}" fill-opacity="0.70"/>"#,
-                    x = fnum(center.x),
-                    y = fnum(center.y),
-                    r = fnum(*radius),
+                    x = FNum(center.x),
+                    y = FNum(center.y),
+                    r = FNum(*radius),
                 );
             }
             let _ = write!(
                 out,
                 r#"<circle cx="{x}" cy="{y}" r="{r}" fill="{fc}" fill-opacity="{fo}" stroke="{c}" stroke-width="{sw}"{dash}/>"#,
-                x = fnum(center.x),
-                y = fnum(center.y),
-                r = fnum(*radius),
+                x = FNum(center.x),
+                y = FNum(center.y),
+                r = FNum(*radius),
                 fc = fill_col,
-                fo = fnum(fill_op),
+                fo = FNum(fill_op),
                 c = hex(*color),
-                sw = fnum(border_w),
+                sw = FNum(border_w),
                 dash = dash_attr(*pattern, border_w),
             );
         }
@@ -749,36 +801,39 @@ fn write_step_badge(out: &mut String, shape: &Shape) {
                 let _ = write!(
                     out,
                     r#"<rect x="{x}" y="{y}" width="{s}" height="{s}" rx="6" fill="{bp}" fill-opacity="0.70"/>"#,
-                    x = fnum(center.x - radius),
-                    y = fnum(center.y - radius),
-                    s = fnum(radius * 2.0),
+                    x = FNum(center.x - radius),
+                    y = FNum(center.y - radius),
+                    s = FNum(radius * 2.0),
                 );
             }
             let _ = write!(
                 out,
                 r#"<rect x="{x}" y="{y}" width="{s}" height="{s}" rx="6" fill="{fc}" fill-opacity="{fo}" stroke="{c}" stroke-width="{sw}"{dash}/>"#,
-                x = fnum(center.x - radius),
-                y = fnum(center.y - radius),
-                s = fnum(radius * 2.0),
+                x = FNum(center.x - radius),
+                y = FNum(center.y - radius),
+                s = FNum(radius * 2.0),
                 fc = fill_col,
-                fo = fnum(fill_op),
+                fo = FNum(fill_op),
                 c = hex(*color),
-                sw = fnum(border_w),
+                sw = FNum(border_w),
                 dash = dash_attr(*pattern, border_w),
             );
         }
         BadgeShape::Hexagon => {
             let pts = hexagon_points(*center, *radius);
             if let Some(bp) = backplate {
-                let _ = write!(out, r#"<polygon points="{pts}" fill="{bp}" fill-opacity="0.70"/>"#);
+                let _ = write!(
+                    out,
+                    r#"<polygon points="{pts}" fill="{bp}" fill-opacity="0.70"/>"#
+                );
             }
             let _ = write!(
                 out,
                 r#"<polygon points="{pts}" fill="{fc}" fill-opacity="{fo}" stroke="{c}" stroke-width="{sw}"{dash}/>"#,
                 fc = fill_col,
-                fo = fnum(fill_op),
+                fo = FNum(fill_op),
                 c = hex(*color),
-                sw = fnum(border_w),
+                sw = FNum(border_w),
                 dash = dash_attr(*pattern, border_w),
             );
         }
@@ -796,9 +851,9 @@ fn write_step_badge(out: &mut String, shape: &Shape) {
     let _ = write!(
         out,
         r#"<text x="{x}" y="{y}" font-family="'Segoe UI Variable Display','Segoe UI',sans-serif" font-size="{fs}" font-weight="700" fill="{c}" text-anchor="middle" style="dominant-baseline:central">{n}</text>"#,
-        x = fnum(center.x),
-        y = fnum(center.y),
-        fs = fnum(font_size),
+        x = FNum(center.x),
+        y = FNum(center.y),
+        fs = FNum(font_size),
         c = text_col,
         n = number,
     );
@@ -814,8 +869,8 @@ fn hexagon_points(center: Point2D, radius: f32) -> String {
         let _ = write!(
             s,
             "{},{}",
-            fnum(center.x + radius * angle.cos()),
-            fnum(center.y + radius * angle.sin())
+            FNum(center.x + radius * angle.cos()),
+            FNum(center.y + radius * angle.sin())
         );
     }
     s
@@ -864,10 +919,10 @@ fn write_blur(out: &mut String, shape: &Shape, input: &SvgExportInput) {
         let _ = write!(
             out,
             r#"<image x="{x}" y="{y}" width="{w}" height="{h}" href="{uri}" style="image-rendering:pixelated" preserveAspectRatio="none"/>"#,
-            x = fnum(l),
-            y = fnum(t),
-            w = fnum(w),
-            h = fnum(h),
+            x = FNum(l),
+            y = FNum(t),
+            w = FNum(w),
+            h = FNum(h),
         );
     }
 }
@@ -918,6 +973,7 @@ fn mosaic_tiles(
                 }
             }
             let out_idx = (row * cols + col) as usize * 4;
+            #[allow(clippy::manual_checked_ops)]
             if n > 0 {
                 out[out_idx] = (sum[0] / n) as u8;
                 out[out_idx + 1] = (sum[1] / n) as u8;
@@ -935,12 +991,19 @@ fn png_data_uri(bgra: &[u8], width: u32, height: u32) -> Option<String> {
         return None;
     }
     let mut rgba = bgra.to_vec();
-    for chunk in rgba.chunks_exact_mut(4) {
+    for chunk in rgba.as_chunks_mut::<4>().0 {
         chunk.swap(0, 2);
     }
     let mut png_bytes = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
-    image::ImageEncoder::write_image(encoder, &rgba, width, height, image::ExtendedColorType::Rgba8).ok()?;
+    image::ImageEncoder::write_image(
+        encoder,
+        &rgba,
+        width,
+        height,
+        image::ExtendedColorType::Rgba8,
+    )
+    .ok()?;
     Some(format!(
         "data:image/png;base64,{}",
         crate::types::b64::encode(&png_bytes)
@@ -951,10 +1014,12 @@ fn dash_attr(pattern: StrokePattern, width: f32) -> String {
     let w = width.max(1.0);
     match pattern {
         StrokePattern::Solid => String::new(),
-        StrokePattern::Dashed => format!(r#" stroke-dasharray="{} {}""#, fnum(w * 2.5), fnum(w * 1.8)),
+        StrokePattern::Dashed => {
+            format!(r#" stroke-dasharray="{} {}""#, FNum(w * 2.5), FNum(w * 1.8))
+        }
         StrokePattern::Dotted => format!(
             r#" stroke-dasharray="0.1 {}" stroke-linecap="round""#,
-            fnum(w * 2.0)
+            FNum(w * 2.0)
         ),
     }
 }
@@ -964,14 +1029,15 @@ fn hex(color: ColorPreset) -> String {
     format!("#{:02x}{:02x}{:02x}", r, g, b)
 }
 
-/// A handful of decimal places is plenty for screen-space geometry and keeps
-/// the file from bloating with float noise.
-fn fnum(v: f32) -> String {
-    let r = (v * 1000.0).round() / 1000.0;
-    if r == r.trunc() {
-        format!("{}", r as i64)
-    } else {
-        format!("{:.3}", r)
+struct FNum(f32);
+impl std::fmt::Display for FNum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let r = (self.0 * 1000.0).round() / 1000.0;
+        if r == r.trunc() {
+            write!(f, "{}", r as i64)
+        } else {
+            write!(f, "{:.3}", r)
+        }
     }
 }
 
@@ -994,7 +1060,10 @@ mod tests {
     use super::*;
     use crate::types::{ArrowStyle as AS, StrokePattern as SP};
 
-    fn input<'a>(shapes: &'a [Annotation], layout: &'a HashMap<ShapeId, (f32, f32)>) -> SvgExportInput<'a> {
+    fn input<'a>(
+        shapes: &'a [Annotation],
+        layout: &'a HashMap<ShapeId, (f32, f32)>,
+    ) -> SvgExportInput<'a> {
         SvgExportInput {
             logical_w: 400.0,
             logical_h: 300.0,
@@ -1049,7 +1118,11 @@ mod tests {
 
         let shapes = vec![
             Annotation::new(Shape::Stroke {
-                points: vec![Point2D::new(0.0, 0.0), Point2D::new(5.0, 5.0), Point2D::new(10.0, 0.0)],
+                points: vec![
+                    Point2D::new(0.0, 0.0),
+                    Point2D::new(5.0, 5.0),
+                    Point2D::new(10.0, 0.0),
+                ],
                 color: ColorPreset::Blue,
                 width: 2.0,
                 is_highlighter: false,
@@ -1138,7 +1211,10 @@ mod tests {
         let svg = build_svg(&input(&shapes, &layout));
         let rect_pos = svg.find("<rect").unwrap();
         let text_pos = svg.find("<text").unwrap();
-        assert!(rect_pos < text_pos, "the container must be drawn before its label");
+        assert!(
+            rect_pos < text_pos,
+            "the container must be drawn before its label"
+        );
         // Centred in a 0..100 box with a 40-wide, 16-tall block: (30, 42).
         assert!(svg.contains(r#"x="30""#));
         assert!(svg.contains(r#"y="42""#));

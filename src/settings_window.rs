@@ -32,11 +32,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
-    GetClientRect, GetWindowLongPtrW, IDC_ARROW, IDC_HAND, LoadCursorW,
-    PostMessageW, RegisterClassExW, SW_HIDE, SW_SHOW, SetCursor,
-    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION,
-    WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    GetClientRect, GetWindowLongPtrW, IDC_ARROW, IDC_HAND, LoadCursorW, PostMessageW,
+    RegisterClassExW, SW_HIDE, SW_SHOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
+    ShowWindow, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY,
+    WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION, WS_EX_APPWINDOW,
+    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
 };
 use windows::core::{PCWSTR, Result, w};
 use windows_numerics::Vector2;
@@ -128,7 +128,8 @@ impl SettingsWindow {
             // Centring via SM_CXSCREEN always landed on the primary display, and
             // a fixed pixel size rendered the window at 80% on a 125% monitor.
             let mon = crate::monitor::MonitorManager::get_monitor_from_cursor();
-            let dpi = Self::dpi_for_point(mon.x + mon.width as i32 / 2, mon.y + mon.height as i32 / 2);
+            let dpi =
+                Self::dpi_for_point(mon.x + mon.width as i32 / 2, mon.y + mon.height as i32 / 2);
             let scale = dpi as f32 / 96.0;
 
             let mut wr = RECT {
@@ -276,7 +277,7 @@ impl SettingsWindow {
     /// the system value when per-monitor lookup is unavailable.
     fn dpi_for_point(x: i32, y: i32) -> u32 {
         use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint};
-        use windows::Win32::UI::HiDpi::{MDT_EFFECTIVE_DPI, GetDpiForMonitor};
+        use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 
         unsafe {
             let hmon = MonitorFromPoint(
@@ -460,6 +461,18 @@ impl SettingsWindow {
                 WM_CLOSE => {
                     this.hide();
                     LRESULT(0)
+                }
+
+                WM_NCDESTROY => {
+                    drop(this);
+                    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+                    if ptr != 0 {
+                        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                        drop(std::rc::Rc::from_raw(
+                            ptr as *const std::cell::RefCell<SettingsWindow>,
+                        ));
+                    }
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
 
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -797,8 +810,7 @@ impl SettingsWindow {
                         self.request_repaint();
                         return;
                     } else if x >= 652.0 && x <= 684.0 {
-                        self.config.session_keep_last =
-                            (self.config.session_keep_last + 1).min(99);
+                        self.config.session_keep_last = (self.config.session_keep_last + 1).min(99);
                         self.request_repaint();
                         return;
                     }
@@ -1837,7 +1849,14 @@ impl SettingsWindow {
         } else {
             keep.to_string()
         };
-        self.render_stepper(rt, 566.0, 242.0 + 18.0, &keep_label, "keep_minus", "keep_plus");
+        self.render_stepper(
+            rt,
+            566.0,
+            242.0 + 18.0,
+            &keep_label,
+            "keep_minus",
+            "keep_plus",
+        );
 
         // 4. Folder
         let dir = crate::session::sessions_dir(&self.config);

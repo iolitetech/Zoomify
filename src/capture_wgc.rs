@@ -18,6 +18,7 @@ use windows::Graphics::Capture::{
 };
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
+use windows::Win32::Foundation::POINT;
 use windows::Win32::Foundation::{HANDLE, HMODULE};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::Win32::Graphics::Direct3D11::{
@@ -30,7 +31,6 @@ use windows::Win32::Graphics::Gdi::{HMONITOR, MONITOR_DEFAULTTONEAREST, MonitorF
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
-use windows::Win32::Foundation::POINT;
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::core::{Interface, Result};
 
@@ -150,10 +150,7 @@ pub fn capture_monitor_at(x: i32, y: i32) -> Option<(u32, u32, Vec<u8>, i32, i32
     result
 }
 
-fn capture_monitor(
-    devices: &Devices,
-    monitor: HMONITOR,
-) -> Result<(u32, u32, Vec<u8>, i32, i32)> {
+fn capture_monitor(devices: &Devices, monitor: HMONITOR) -> Result<(u32, u32, Vec<u8>, i32, i32)> {
     unsafe {
         // The rig is cached per monitor; only the session below is per-capture.
         let (pool, item, waiter) = RIGS.with(|cell| -> Result<_> {
@@ -168,7 +165,7 @@ fn capture_monitor(
                 }
             }
 
-            if !rigs.contains_key(&key) {
+            if let std::collections::hash_map::Entry::Vacant(e) = rigs.entry(key) {
                 let interop: IGraphicsCaptureItemInterop =
                     windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
                 let item: GraphicsCaptureItem = interop.CreateForMonitor(monitor)?;
@@ -197,19 +194,22 @@ fn capture_monitor(
                     Ok(())
                 }))?;
 
-                rigs.insert(
-                    key,
-                    Rig {
-                        item,
-                        pool,
-                        signal,
-                        size,
-                    },
-                );
+                e.insert(Rig {
+                    item,
+                    pool,
+                    signal,
+                    size,
+                });
             }
 
-            let rig = rigs.get(&key).ok_or_else(windows::core::Error::from_thread)?;
-            Ok((rig.pool.clone(), rig.item.clone(), rig.signal.clone_handle()))
+            let rig = rigs
+                .get(&key)
+                .ok_or_else(windows::core::Error::from_thread)?;
+            Ok((
+                rig.pool.clone(),
+                rig.item.clone(),
+                rig.signal.clone_handle(),
+            ))
         })?;
 
         // A reused pool can still be holding the previous grab. Drain it and
@@ -233,10 +233,7 @@ fn capture_monitor(
         // Stop capturing before touching the texture; the pool itself is kept.
         let _ = session.Close();
 
-        let frame = match frame {
-            Ok(f) => f,
-            Err(e) => return Err(e),
-        };
+        let frame = frame?;
 
         let surface = frame.Surface()?;
         let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
@@ -283,7 +280,7 @@ fn capture_monitor(
         // WGC frames are already premultiplied-opaque for the desktop, but the
         // alpha channel comes back as whatever the compositor left there; the
         // rest of the app treats captures as opaque.
-        for px in pixels.chunks_exact_mut(4) {
+        for px in pixels.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
 

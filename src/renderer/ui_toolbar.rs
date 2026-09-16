@@ -1,7 +1,8 @@
 use super::{D2DRenderer, v2};
 use crate::types::{
-    AlignTo, AppMode, ArrowHead, ArrowStyle, BadgeShape, BadgeSize, ColorPreset, DrawTool, FillMode, FluentAction,
-    FluentToolbarState, SpotlightState, StrokePattern, TextCardStyle, TextFontFamily,
+    AlignTo, AppMode, ArrowHead, ArrowStyle, BadgeShape, BadgeSize, ColorPreset, DrawTool,
+    FillMode, FluentAction, FluentToolbarState, SpotlightState, StrokePattern, TextCardStyle,
+    TextFontFamily,
 };
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{

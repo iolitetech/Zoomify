@@ -1,20 +1,20 @@
 #![allow(dead_code)]
 
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{FreeLibrary, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
     DeleteObject, GetDC, RGBQUAD, ReleaseDC,
 };
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress, LoadLibraryA};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos,
-    HICON, ICONINFO, IDI_APPLICATION, LoadIconW, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    PostMessageW, RegisterWindowMessageW, SetForegroundWindow, TPM_LEFTALIGN, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_COMMAND, WM_NULL,
+    HICON, ICONINFO, IDI_APPLICATION, LoadIconW, MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW,
+    RegisterWindowMessageW, SetForegroundWindow, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_COMMAND, WM_NULL,
 };
 use windows::core::{PCWSTR, s, w};
 
@@ -41,15 +41,25 @@ pub const ID_TRAY_SETTINGS: usize = 2017;
 /// Enable authentic Windows 11 / Windows 10 Dark Mode for Win32 popup menus
 pub fn enable_windows_dark_mode_for_menus() {
     unsafe {
-        if let Ok(hmodule) = LoadLibraryA(s!("uxtheme.dll"))
-            && !hmodule.is_invalid()
+        let mut hmodule = GetModuleHandleA(s!("uxtheme.dll")).unwrap_or_default();
+        let mut loaded = false;
+        if hmodule.is_invalid()
+            && let Ok(h) = LoadLibraryA(s!("uxtheme.dll"))
         {
+            hmodule = h;
+            loaded = true;
+        }
+
+        if !hmodule.is_invalid() {
             // Ordinal 135 is SetPreferredAppMode
             let proc = GetProcAddress(hmodule, windows::core::PCSTR(135 as *const u8));
             if let Some(f) = proc {
                 type SetPreferredAppModeFn = unsafe extern "system" fn(i32) -> i32;
                 let set_preferred_app_mode: SetPreferredAppModeFn = std::mem::transmute(f);
                 let _ = set_preferred_app_mode(2); // 2 = ForceDark
+            }
+            if loaded {
+                let _ = FreeLibrary(hmodule);
             }
         }
     }

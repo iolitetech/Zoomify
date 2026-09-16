@@ -6,6 +6,7 @@ mod clipboard;
 mod config;
 mod hotkeys;
 mod live_zoom;
+mod logging;
 mod monitor;
 mod overlay;
 mod pdf_export;
@@ -325,7 +326,24 @@ unsafe extern "system" fn tray_wnd_proc(
                             let mut path = std::path::PathBuf::from(appdata);
                             path.push("Zoomify");
                             path.push("config.json");
-                            let _ = std::process::Command::new("notepad.exe").arg(path).spawn();
+                            use std::os::windows::ffi::OsStrExt;
+                            let w_path: Vec<u16> = path
+                                .as_os_str()
+                                .encode_wide()
+                                .chain(std::iter::once(0))
+                                .collect();
+                            let w_verb: Vec<u16> = std::ffi::OsStr::new("open")
+                                .encode_wide()
+                                .chain(std::iter::once(0))
+                                .collect();
+                            windows::Win32::UI::Shell::ShellExecuteW(
+                                None,
+                                windows::core::PCWSTR(w_verb.as_ptr()),
+                                windows::core::PCWSTR(w_path.as_ptr()),
+                                windows::core::PCWSTR::null(),
+                                windows::core::PCWSTR::null(),
+                                windows::Win32::UI::WindowsAndMessaging::SW_SHOW,
+                            );
                         }
                     }
                     ID_TRAY_CHEATSHEET => {
@@ -427,6 +445,36 @@ unsafe extern "system" fn tray_wnd_proc(
 }
 
 fn main() -> Result<()> {
+    // Initialize logging
+    crate::logging::init();
+    crate::logging::log_info!("Zoomify starting");
+
+    // Set panic hook for crash reporting
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("PANIC: {}", info);
+        crate::logging::log("FATAL", &msg);
+
+        // Show a native dialog
+        let log_path = crate::logging::log_path();
+        let wide_msg: Vec<u16> = format!(
+            "Zoomify crashed unexpectedly.\n\nA log file has been saved to:\n{}\n\nPlease report this issue.",
+            log_path.display()
+        ).encode_utf16().chain(std::iter::once(0)).collect();
+        let wide_title: Vec<u16> = "Zoomify Crash"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                None,
+                windows::core::PCWSTR(wide_msg.as_ptr()),
+                windows::core::PCWSTR(wide_title.as_ptr()),
+                windows::Win32::UI::WindowsAndMessaging::MB_OK
+                    | windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+            );
+        }
+    }));
+
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = windows::Win32::System::Ole::OleInitialize(None);
@@ -472,9 +520,7 @@ fn main() -> Result<()> {
             None,
         )?;
 
-        capture::set_use_graphics_capture(
-            config::AppConfig::load().use_graphics_capture,
-        );
+        capture::set_use_graphics_capture(config::AppConfig::load().use_graphics_capture);
 
         let overlay = OverlayWindow::create()?;
         overlay.borrow_mut().set_host_hwnd(tray_hwnd);

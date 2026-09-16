@@ -129,13 +129,8 @@ impl HotkeyManager {
         unsafe {
             for (id, vk) in LIVE_ZOOM_KEYS {
                 if active {
-                    if RegisterHotKey(
-                        Some(self.hwnd),
-                        id,
-                        MOD_CONTROL | MOD_NOREPEAT,
-                        vk as u32,
-                    )
-                    .is_ok()
+                    if RegisterHotKey(Some(self.hwnd), id, MOD_CONTROL | MOD_NOREPEAT, vk as u32)
+                        .is_ok()
                     {
                         self.registered.push(id);
                     }

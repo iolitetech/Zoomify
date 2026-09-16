@@ -20,6 +20,7 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
 };
+use windows_core::Interface;
 
 impl D2DRenderer {
     pub(super) unsafe fn render_single_shape(
@@ -57,8 +58,7 @@ impl D2DRenderer {
                     // segment by segment with a width that follows the press.
                     // Bezier smoothing needs one width for the whole figure, so
                     // it only applies to the uniform case.
-                    let has_pressure =
-                        !pressures.is_empty() && pressures.len() == points.len();
+                    let has_pressure = !pressures.is_empty() && pressures.len() == points.len();
 
                     if let Some(brush) = self.solid_brush(rt, &col) {
                         if points.len() == 1 {
@@ -90,30 +90,52 @@ impl D2DRenderer {
                                     Some(stroke_style),
                                 );
                             }
-                        } else if let Ok(path) = self.factory.CreatePathGeometry()
-                            && let Ok(sink) = path.Open()
-                        {
-                            sink.BeginFigure(
-                                v2(points[0].x, points[0].y),
-                                D2D1_FIGURE_BEGIN_HOLLOW,
-                            );
-                            if points.len() >= 3 {
-                                let segments = points_to_bezier_segments(points);
-                                for (c1, c2, p) in segments {
-                                    let bz = D2D1_BEZIER_SEGMENT {
-                                        point1: v2(c1.x, c1.y),
-                                        point2: v2(c2.x, c2.y),
-                                        point3: v2(p.x, p.y),
-                                    };
-                                    sink.AddBezier(&bz);
-                                }
-                            } else {
-                                for pt in &points[1..] {
-                                    sink.AddLine(v2(pt.x, pt.y));
-                                }
+                        } else {
+                            let key = {
+                                use std::hash::{Hash, Hasher};
+                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                (points.as_ptr() as u64).hash(&mut hasher);
+                                points.len().hash(&mut hasher);
+                                actual_width.to_bits().hash(&mut hasher);
+                                hasher.finish()
+                            };
+                            let mut cache = self.geometry_cache.borrow_mut();
+                            let rt_id = rt.as_raw() as usize;
+                            if cache.0 != rt_id {
+                                cache.0 = rt_id;
+                                cache.1.clear();
                             }
-                            sink.EndFigure(D2D1_FIGURE_END_OPEN);
-                            let _ = sink.Close();
+                            let path = if let Some(p) = cache.1.get(&key) {
+                                p.clone()
+                            } else if let Ok(path) = self.factory.CreatePathGeometry()
+                                && let Ok(sink) = path.Open()
+                            {
+                                sink.BeginFigure(
+                                    v2(points[0].x, points[0].y),
+                                    D2D1_FIGURE_BEGIN_HOLLOW,
+                                );
+                                if points.len() >= 3 {
+                                    let segments = points_to_bezier_segments(points);
+                                    for (c1, c2, p) in segments {
+                                        let bz = D2D1_BEZIER_SEGMENT {
+                                            point1: v2(c1.x, c1.y),
+                                            point2: v2(c2.x, c2.y),
+                                            point3: v2(p.x, p.y),
+                                        };
+                                        sink.AddBezier(&bz);
+                                    }
+                                } else {
+                                    for pt in &points[1..] {
+                                        sink.AddLine(v2(pt.x, pt.y));
+                                    }
+                                }
+                                sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                                let _ = sink.Close();
+                                cache.1.insert(key, path.clone());
+                                path
+                            } else {
+                                return;
+                            };
                             let stroke_style = self.get_stroke_style(*pattern);
                             rt.DrawGeometry(&path, &brush, actual_width, Some(stroke_style));
                         }
@@ -165,8 +187,8 @@ impl D2DRenderer {
                     if let Some(brush) = self.solid_brush(rt, &col) {
                         let length = start.distance(end);
                         let (head_len, half_width) = arrow_head_size(*width, length);
-                        let head_at_start = *style == ArrowStyle::Double
-                            || *style == ArrowStyle::Dimension;
+                        let head_at_start =
+                            *style == ArrowStyle::Double || *style == ArrowStyle::Dimension;
 
                         // The shaft stops where the head begins. Running it to
                         // the tip and filling the head over it leaves the round
@@ -175,8 +197,7 @@ impl D2DRenderer {
                         // Only a filled head hides the shaft's end. An open,
                         // circle or bar head would leave a visible gap if the
                         // shaft stopped short, so for those it runs to the tip.
-                        let hides_shaft =
-                            matches!(head, ArrowHead::Triangle | ArrowHead::Diamond);
+                        let hides_shaft = matches!(head, ArrowHead::Triangle | ArrowHead::Diamond);
                         let inset = if hides_shaft { head_len * 0.92 } else { 0.0 };
                         let stroke_style = self.get_stroke_style(*pattern);
                         if curve.abs() < 0.01 {
@@ -209,8 +230,29 @@ impl D2DRenderer {
                         let fill_head = |from: Point2D, to: Point2D| {
                             let (tip, left, right) =
                                 arrow_head_points(from, to, head_len, half_width);
-                            let filled = |pts: &[Point2D]| {
-                                if let Ok(path) = self.factory.CreatePathGeometry()
+                            let filled = |pts: &[Point2D], head_type: ArrowHead| {
+                                let key = {
+                                    use std::hash::{Hash, Hasher};
+                                    let mut hasher =
+                                        std::collections::hash_map::DefaultHasher::new();
+                                    from.x.to_bits().hash(&mut hasher);
+                                    from.y.to_bits().hash(&mut hasher);
+                                    to.x.to_bits().hash(&mut hasher);
+                                    to.y.to_bits().hash(&mut hasher);
+                                    head_len.to_bits().hash(&mut hasher);
+                                    half_width.to_bits().hash(&mut hasher);
+                                    (head_type as u8).hash(&mut hasher);
+                                    hasher.finish()
+                                };
+                                let mut cache = self.geometry_cache.borrow_mut();
+                                let rt_id = rt.as_raw() as usize;
+                                if cache.0 != rt_id {
+                                    cache.0 = rt_id;
+                                    cache.1.clear();
+                                }
+                                let path = if let Some(p) = cache.1.get(&key) {
+                                    p.clone()
+                                } else if let Ok(path) = self.factory.CreatePathGeometry()
                                     && let Ok(sink) = path.Open()
                                 {
                                     sink.BeginFigure(
@@ -222,11 +264,15 @@ impl D2DRenderer {
                                     }
                                     sink.EndFigure(D2D1_FIGURE_END_CLOSED);
                                     let _ = sink.Close();
-                                    rt.FillGeometry(&path, &brush, None);
-                                }
+                                    cache.1.insert(key, path.clone());
+                                    path
+                                } else {
+                                    return;
+                                };
+                                rt.FillGeometry(&path, &brush, None);
                             };
                             match head {
-                                ArrowHead::Triangle => filled(&[tip, left, right]),
+                                ArrowHead::Triangle => filled(&[tip, left, right], *head),
                                 ArrowHead::Open => {
                                     // Two strokes to the tip, leaving it open.
                                     rt.DrawLine(
@@ -267,7 +313,7 @@ impl D2DRenderer {
                                         mid.x - (tip.x - mid.x),
                                         mid.y - (tip.y - mid.y),
                                     );
-                                    filled(&[tip, left, back, right]);
+                                    filled(&[tip, left, back, right], *head);
                                 }
                                 ArrowHead::Bar => {
                                     rt.DrawLine(
@@ -293,6 +339,9 @@ impl D2DRenderer {
                             (*start, *end)
                         } else {
                             let pts = sample_curve(*start, *end, *curve);
+                            if pts.len() < 2 {
+                                return;
+                            }
                             (pts[pts.len() - 2], pts[1])
                         };
                         fill_head(aim_end, *end);
@@ -467,30 +516,39 @@ impl D2DRenderer {
 
                         match card_style {
                             TextCardStyle::Badge => {
-                                if let Some(card_bg) = self.solid_brush(rt, &D2D1_COLOR_F {
+                                if let Some(card_bg) = self.solid_brush(
+                                    rt,
+                                    &D2D1_COLOR_F {
                                         r: 0.08,
                                         g: 0.09,
                                         b: 0.12,
                                         a: 0.65,
-                                    }) {
+                                    },
+                                ) {
                                     rt.FillRoundedRectangle(&card_rrect, &card_bg);
                                 }
-                                if let Some(card_border) = self.solid_brush(rt, &D2D1_COLOR_F {
+                                if let Some(card_border) = self.solid_brush(
+                                    rt,
+                                    &D2D1_COLOR_F {
                                         r: 1.0,
                                         g: 1.0,
                                         b: 1.0,
                                         a: 0.15,
-                                    }) {
+                                    },
+                                ) {
                                     rt.DrawRoundedRectangle(&card_rrect, &card_border, 1.0, None);
                                 }
                             }
                             TextCardStyle::Solid => {
-                                if let Some(card_bg) = self.solid_brush(rt, &D2D1_COLOR_F {
+                                if let Some(card_bg) = self.solid_brush(
+                                    rt,
+                                    &D2D1_COLOR_F {
                                         r: 0.12,
                                         g: 0.13,
                                         b: 0.17,
                                         a: 0.96,
-                                    }) {
+                                    },
+                                ) {
                                     rt.FillRoundedRectangle(&card_rrect, &card_bg);
                                 }
                                 if let Some(card_border) = self.solid_brush(rt, &col) {
@@ -498,12 +556,15 @@ impl D2DRenderer {
                                 }
                             }
                             TextCardStyle::Transparent => {
-                                if let Some(sh_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
+                                if let Some(sh_brush) = self.solid_brush(
+                                    rt,
+                                    &D2D1_COLOR_F {
                                         r: 0.0,
                                         g: 0.0,
                                         b: 0.0,
                                         a: 0.70,
-                                    }) {
+                                    },
+                                ) {
                                     let sh_rect = D2D_RECT_F {
                                         left: text_rect.left + 1.2,
                                         top: text_rect.top + 1.5,
@@ -740,14 +801,26 @@ impl D2DRenderer {
                             height: rows,
                         };
 
-                        let tiny = rt
-                            .CreateCompatibleRenderTarget(
-                                Some(&small),
-                                None,
-                                None,
-                                D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
-                            )
-                            .ok()?;
+                        let rt_id = rt.as_raw() as usize;
+                        let mut cache = self.blur_rt_cache.borrow_mut();
+                        let tiny = if let Some((c_rt_id, c_size, ref c_rt)) = *cache
+                            && c_rt_id == rt_id
+                            && c_size.width == small.width
+                            && c_size.height == small.height
+                        {
+                            c_rt.clone()
+                        } else {
+                            let new_rt = rt
+                                .CreateCompatibleRenderTarget(
+                                    Some(&small),
+                                    None,
+                                    None,
+                                    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+                                )
+                                .ok()?;
+                            *cache = Some((rt_id, small, new_rt.clone()));
+                            new_rt
+                        };
 
                         tiny.BeginDraw();
                         tiny.Clear(None);
@@ -792,12 +865,15 @@ impl D2DRenderer {
                                 bottom: rows,
                             }),
                         );
-                    } else if let Some(brush) = self.solid_brush(rt, &D2D1_COLOR_F {
+                    } else if let Some(brush) = self.solid_brush(
+                        rt,
+                        &D2D1_COLOR_F {
                             r: 0.1,
                             g: 0.1,
                             b: 0.1,
                             a: 0.85,
-                        }) {
+                        },
+                    ) {
                         let rect = D2D_RECT_F {
                             left: l,
                             top: t,
@@ -808,12 +884,15 @@ impl D2DRenderer {
                     }
 
                     // Subtle glass outline around the redacted region
-                    if let Some(border_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
+                    if let Some(border_brush) = self.solid_brush(
+                        rt,
+                        &D2D1_COLOR_F {
                             r: 0.4,
                             g: 0.7,
                             b: 1.0,
                             a: 0.45,
-                        }) {
+                        },
+                    ) {
                         let border_rect = D2D_RECT_F {
                             left: l,
                             top: t,
@@ -870,12 +949,15 @@ impl D2DRenderer {
             let origin = contained_text_origin(container, w, h);
 
             if rides_on
-                && let Some(chip) = self.solid_brush(rt, &D2D1_COLOR_F {
-                    r: 0.10,
-                    g: 0.11,
-                    b: 0.14,
-                    a: 0.88,
-                })
+                && let Some(chip) = self.solid_brush(
+                    rt,
+                    &D2D1_COLOR_F {
+                        r: 0.10,
+                        g: 0.11,
+                        b: 0.14,
+                        a: 0.88,
+                    },
+                )
             {
                 let chip_rect = D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {
@@ -983,12 +1065,15 @@ impl D2DRenderer {
             };
             // A faint wash makes the swept area obvious without hiding what is
             // underneath it.
-            if let Some(fill) = self.solid_brush(rt, &D2D1_COLOR_F {
-                r: 0.38,
-                g: 0.72,
-                b: 0.98,
-                a: 0.14,
-            }) {
+            if let Some(fill) = self.solid_brush(
+                rt,
+                &D2D1_COLOR_F {
+                    r: 0.38,
+                    g: 0.72,
+                    b: 0.98,
+                    a: 0.14,
+                },
+            ) {
                 rt.FillRectangle(&rect, &fill);
             }
             if let Some(edge) = self.solid_brush(rt, &accent) {
@@ -1046,19 +1131,25 @@ impl D2DRenderer {
                 b: 0.98,
                 a: 1.0,
             };
-            let fill = self.solid_brush(rt, &D2D1_COLOR_F {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 1.0,
-            });
+            let fill = self.solid_brush(
+                rt,
+                &D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+            );
             let edge = self.solid_brush(rt, &accent);
-            let halo = self.solid_brush(rt, &D2D1_COLOR_F {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.45,
-            });
+            let halo = self.solid_brush(
+                rt,
+                &D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.45,
+                },
+            );
             if let Some((bx, by)) = bow {
                 let br = SELECTION_HANDLE_SIZE * 0.42;
                 let ring = D2D1_ELLIPSE {
@@ -1119,12 +1210,15 @@ impl D2DRenderer {
             };
 
             // Dark halo first so the box reads on light and dark content alike.
-            if let Some(halo) = self.solid_brush(rt, &D2D1_COLOR_F {
+            if let Some(halo) = self.solid_brush(
+                rt,
+                &D2D1_COLOR_F {
                     r: 0.0,
                     g: 0.0,
                     b: 0.0,
                     a: 0.55,
-                }) {
+                },
+            ) {
                 rt.DrawRoundedRectangle(&rrect, &halo, 3.0, None);
             }
             let accent = D2D1_COLOR_F {
@@ -1138,12 +1232,15 @@ impl D2DRenderer {
             }
 
             let half = SELECTION_HANDLE_SIZE * 0.5;
-            let fill = self.solid_brush(rt, &D2D1_COLOR_F {
-                r: 1.0,
-                g: 1.0,
-                b: 1.0,
-                a: 1.0,
-            });
+            let fill = self.solid_brush(
+                rt,
+                &D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+            );
             let edge = self.solid_brush(rt, &accent);
             for (_, c) in selection_handle_points((rect.left, rect.top, rect.right, rect.bottom)) {
                 let h = D2D1_ROUNDED_RECT {
@@ -1218,12 +1315,15 @@ impl D2DRenderer {
             // one gets, or the line strikes through the words while editing.
             if editor.container_bounds.is_some()
                 && !editor.container_wraps
-                && let Some(chip) = self.solid_brush(rt, &D2D1_COLOR_F {
-                    r: 0.10,
-                    g: 0.11,
-                    b: 0.14,
-                    a: 0.88,
-                })
+                && let Some(chip) = self.solid_brush(
+                    rt,
+                    &D2D1_COLOR_F {
+                        r: 0.10,
+                        g: 0.11,
+                        b: 0.14,
+                        a: 0.88,
+                    },
+                )
             {
                 let chip_rect = D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {
@@ -1239,57 +1339,72 @@ impl D2DRenderer {
             }
 
             if editor.container_bounds.is_none() {
-            match editor.card_style {
-                TextCardStyle::Badge => {
-                    if let Some(bg_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
-                            r: 0.08,
-                            g: 0.09,
-                            b: 0.12,
-                            a: 0.65,
-                        }) {
-                        rt.FillRoundedRectangle(&rrect, &bg_brush);
+                match editor.card_style {
+                    TextCardStyle::Badge => {
+                        if let Some(bg_brush) = self.solid_brush(
+                            rt,
+                            &D2D1_COLOR_F {
+                                r: 0.08,
+                                g: 0.09,
+                                b: 0.12,
+                                a: 0.65,
+                            },
+                        ) {
+                            rt.FillRoundedRectangle(&rrect, &bg_brush);
+                        }
+                        if let Some(border_brush) = self.solid_brush(
+                            rt,
+                            &D2D1_COLOR_F {
+                                r: 0.38,
+                                g: 0.72,
+                                b: 0.98,
+                                a: 0.85,
+                            },
+                        ) {
+                            rt.DrawRoundedRectangle(&rrect, &border_brush, 1.5, None);
+                        }
                     }
-                    if let Some(border_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
-                            r: 0.38,
-                            g: 0.72,
-                            b: 0.98,
-                            a: 0.85,
-                        }) {
-                        rt.DrawRoundedRectangle(&rrect, &border_brush, 1.5, None);
+                    TextCardStyle::Solid => {
+                        if let Some(bg_brush) = self.solid_brush(
+                            rt,
+                            &D2D1_COLOR_F {
+                                r: 0.12,
+                                g: 0.13,
+                                b: 0.17,
+                                a: 0.96,
+                            },
+                        ) {
+                            rt.FillRoundedRectangle(&rrect, &bg_brush);
+                        }
+                        if let Some(border_brush) = self.solid_brush(rt, &col) {
+                            rt.DrawRoundedRectangle(&rrect, &border_brush, 1.5, None);
+                        }
+                    }
+                    TextCardStyle::Transparent => {
+                        if let Some(bg_brush) = self.solid_brush(
+                            rt,
+                            &D2D1_COLOR_F {
+                                r: 0.05,
+                                g: 0.05,
+                                b: 0.08,
+                                a: 0.45,
+                            },
+                        ) {
+                            rt.FillRoundedRectangle(&rrect, &bg_brush);
+                        }
+                        if let Some(border_brush) = self.solid_brush(
+                            rt,
+                            &D2D1_COLOR_F {
+                                r: 0.38,
+                                g: 0.72,
+                                b: 0.98,
+                                a: 0.80,
+                            },
+                        ) {
+                            rt.DrawRoundedRectangle(&rrect, &border_brush, 1.0, None);
+                        }
                     }
                 }
-                TextCardStyle::Solid => {
-                    if let Some(bg_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
-                            r: 0.12,
-                            g: 0.13,
-                            b: 0.17,
-                            a: 0.96,
-                        }) {
-                        rt.FillRoundedRectangle(&rrect, &bg_brush);
-                    }
-                    if let Some(border_brush) = self.solid_brush(rt, &col) {
-                        rt.DrawRoundedRectangle(&rrect, &border_brush, 1.5, None);
-                    }
-                }
-                TextCardStyle::Transparent => {
-                    if let Some(bg_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
-                            r: 0.05,
-                            g: 0.05,
-                            b: 0.08,
-                            a: 0.45,
-                        }) {
-                        rt.FillRoundedRectangle(&rrect, &bg_brush);
-                    }
-                    if let Some(border_brush) = self.solid_brush(rt, &D2D1_COLOR_F {
-                            r: 0.38,
-                            g: 0.72,
-                            b: 0.98,
-                            a: 0.80,
-                        }) {
-                        rt.DrawRoundedRectangle(&rrect, &border_brush, 1.0, None);
-                    }
-                }
-            }
             }
 
             if let Some(brush) = self.solid_brush(rt, &col) {

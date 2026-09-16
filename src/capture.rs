@@ -45,8 +45,10 @@ impl ScreenCapture {
         if USE_WGC.load(Ordering::Relaxed)
             && let Some(cap) = Self::capture_rect_wgc(x, y, width, height)
         {
+            crate::logging::log_info!("Capture via WGC: {}x{} at ({},{})", width, height, x, y);
             return Some(cap);
         }
+        crate::logging::log_info!("Capture via BitBlt: {}x{} at ({},{})", width, height, x, y);
         Self::capture_rect_bitblt(x, y, width, height)
     }
 
@@ -58,11 +60,7 @@ impl ScreenCapture {
         let src_y = y - origin_y;
         // Anything reaching outside this monitor is a job for BitBlt, which
         // reads the whole virtual desktop.
-        if src_x < 0
-            || src_y < 0
-            || src_x as u32 + width > mon_w
-            || src_y as u32 + height > mon_h
-        {
+        if src_x < 0 || src_y < 0 || src_x as u32 + width > mon_w || src_y as u32 + height > mon_h {
             return None;
         }
 
@@ -155,7 +153,7 @@ impl ScreenCapture {
                     SRCCOPY,
                 );
 
-                let total_bytes = (width * height * 4) as usize;
+                let total_bytes = (width as usize) * (height as usize) * 4;
                 let mut pixels = vec![0u8; total_bytes];
                 std::ptr::copy_nonoverlapping(
                     bits_ptr as *const u8,
@@ -164,7 +162,7 @@ impl ScreenCapture {
                 );
 
                 // Ensure opaque alpha
-                for chunk in pixels.chunks_exact_mut(4) {
+                for chunk in pixels.as_chunks_mut::<4>().0 {
                     chunk[3] = 255;
                 }
 
@@ -251,7 +249,7 @@ impl ScreenCapture {
             return None;
         }
 
-        let mut cropped_pixels = vec![0u8; (actual_w * actual_h * 4) as usize];
+        let mut cropped_pixels = vec![0u8; (actual_w as usize) * (actual_h as usize) * 4];
         let src_pitch = (self.width * 4) as usize;
         let dst_pitch = (actual_w * 4) as usize;
 
@@ -271,22 +269,27 @@ impl ScreenCapture {
         })
     }
 
-    pub fn save_png(&self, path: &str) -> std::io::Result<()> {
-        let mut rgba_pixels = self.pixels.clone();
-        for chunk in rgba_pixels.chunks_exact_mut(4) {
-            let b = chunk[0];
-            let r = chunk[2];
-            chunk[0] = r;
-            chunk[2] = b;
+    pub fn save_png(&mut self, path: &str) -> std::io::Result<()> {
+        // Swap B↔R in-place to get RGBA, save, then swap back.
+        // Avoids cloning the entire pixel buffer (~33MB for 4K).
+        for chunk in self.pixels.as_chunks_mut::<4>().0 {
+            chunk.swap(0, 2);
         }
 
-        image::save_buffer(
+        let result = image::save_buffer(
             path,
-            &rgba_pixels,
+            &self.pixels,
             self.width,
             self.height,
             image::ExtendedColorType::Rgba8,
         )
-        .map_err(|e| std::io::Error::other(e.to_string()))
+        .map_err(|e| std::io::Error::other(e.to_string()));
+
+        // Swap back to BGRA so the capture remains usable.
+        for chunk in self.pixels.as_chunks_mut::<4>().0 {
+            chunk.swap(0, 2);
+        }
+
+        result
     }
 }

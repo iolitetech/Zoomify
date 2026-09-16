@@ -152,6 +152,11 @@ pub fn next_session_path(dir: &Path) -> PathBuf {
 }
 
 pub fn save(path: &Path, session: &Session) -> Result<(), String> {
+    crate::logging::log_info!(
+        "Session save: {} shapes to {}",
+        session.shapes.len(),
+        path.display()
+    );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("cannot create folder: {}", e))?;
     }
@@ -160,7 +165,11 @@ pub fn save(path: &Path, session: &Session) -> Result<(), String> {
 }
 
 pub fn load(path: &Path) -> Result<Session, String> {
-    let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    crate::logging::log_info!("Session load: {}", path.display());
+    let data = std::fs::read_to_string(path).map_err(|e| {
+        crate::logging::log_error!("Session load failed: {}", e);
+        e.to_string()
+    })?;
     // Editors love to add a BOM; serde_json chokes on it.
     let data = data.strip_prefix('\u{feff}').unwrap_or(&data);
     let session: Session = serde_json::from_str(data).map_err(|e| e.to_string())?;
@@ -185,8 +194,8 @@ pub fn list_sessions(dir: &Path) -> Vec<PathBuf> {
     };
     let mut found: Vec<PathBuf> = entries
         .flatten()
+        .filter(|e| e.file_type().is_ok_and(|ft| ft.is_file()) && is_session_file(&e.path()))
         .map(|e| e.path())
-        .filter(|p| p.is_file() && is_session_file(p))
         .collect();
     found.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
     found

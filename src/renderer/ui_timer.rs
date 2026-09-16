@@ -47,7 +47,7 @@ impl D2DRenderer {
                     b: 0.12,
                     a: 0.95,
                 };
-                if let Ok(bg_brush) = rt.CreateSolidColorBrush(&bg_col, None) {
+                if let Some(bg_brush) = self.solid_brush(rt, &bg_col) {
                     rt.FillRoundedRectangle(&rrect, &bg_brush);
                 }
 
@@ -73,7 +73,7 @@ impl D2DRenderer {
                         a: 0.9,
                     }
                 };
-                if let Ok(b_brush) = rt.CreateSolidColorBrush(&border_col, None) {
+                if let Some(b_brush) = self.solid_brush(rt, &border_col) {
                     rt.DrawRoundedRectangle(&rrect, &b_brush, 1.5, None);
                 }
 
@@ -105,18 +105,18 @@ impl D2DRenderer {
                         a: 0.5,
                     }
                 };
-                if let Ok(br) = rt.CreateSolidColorBrush(&b0_bg, None) {
+                if let Some(br) = self.solid_brush(rt, &b0_bg) {
                     rt.FillRoundedRectangle(&b0_rrect, &br);
                 }
                 let u0: Vec<u16> = "🔄".encode_utf16().collect();
-                if let Ok(wbrush) = rt.CreateSolidColorBrush(
+                if let Some(wbrush) = self.solid_brush(
+                    rt,
                     &D2D1_COLOR_F {
                         r: 1.0,
                         g: 1.0,
                         b: 1.0,
                         a: 0.9,
                     },
-                    None,
                 ) {
                     let centered = self.text_format_hud.clone();
                     let _ = centered.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -164,7 +164,7 @@ impl D2DRenderer {
                         a: 1.0,
                     }
                 };
-                if let Ok(tbrush) = rt.CreateSolidColorBrush(&text_col, None) {
+                if let Some(tbrush) = self.solid_brush(rt, &text_col) {
                     rt.DrawText(
                         &utf16,
                         &self.text_format_hud,
@@ -182,7 +182,7 @@ impl D2DRenderer {
                     b: 0.28,
                     a: 0.6,
                 };
-                let btn_brush = rt.CreateSolidColorBrush(&btn_bg, None).ok();
+                let btn_brush = self.solid_brush(rt, &btn_bg);
 
                 // 1. Play/Pause
                 let b1_rect = D2D_RECT_F {
@@ -201,14 +201,14 @@ impl D2DRenderer {
                 }
                 let icon1 = if paused { "▶" } else { "⏸" };
                 let u1: Vec<u16> = icon1.encode_utf16().collect();
-                if let Ok(wbrush) = rt.CreateSolidColorBrush(
+                if let Some(wbrush) = self.solid_brush(
+                    rt,
                     &D2D1_COLOR_F {
                         r: 1.0,
                         g: 1.0,
                         b: 1.0,
                         a: 0.9,
                     },
-                    None,
                 ) {
                     let centered = self.text_format_hud.clone();
                     let _ = centered.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -244,14 +244,14 @@ impl D2DRenderer {
                     rt.FillRoundedRectangle(&b2_rrect, br);
                 }
                 let u2: Vec<u16> = "🗖".encode_utf16().collect();
-                if let Ok(wbrush) = rt.CreateSolidColorBrush(
+                if let Some(wbrush) = self.solid_brush(
+                    rt,
                     &D2D1_COLOR_F {
                         r: 1.0,
                         g: 1.0,
                         b: 1.0,
                         a: 0.9,
                     },
-                    None,
                 ) {
                     let centered = self.text_format_hud.clone();
                     let _ = centered.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -287,14 +287,14 @@ impl D2DRenderer {
                     rt.FillRoundedRectangle(&b3_rrect, br);
                 }
                 let u3: Vec<u16> = "✕".encode_utf16().collect();
-                if let Ok(wbrush) = rt.CreateSolidColorBrush(
+                if let Some(wbrush) = self.solid_brush(
+                    rt,
                     &D2D1_COLOR_F {
                         r: 1.0,
                         g: 1.0,
                         b: 1.0,
                         a: 0.9,
                     },
-                    None,
                 ) {
                     let centered = self.text_format_hud.clone();
                     let _ = centered.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -375,14 +375,14 @@ impl D2DRenderer {
                 radiusX: 24.0,
                 radiusY: 24.0,
             };
-            if let Ok(s_brush) = rt.CreateSolidColorBrush(
+            if let Some(s_brush) = self.solid_brush(
+                rt,
                 &D2D1_COLOR_F {
                     r: 0.0,
                     g: 0.0,
                     b: 0.0,
                     a: 0.45,
                 },
-                None,
             ) {
                 rt.FillRoundedRectangle(&shadow_rect, &s_brush);
             }
@@ -393,10 +393,10 @@ impl D2DRenderer {
                 radiusY: 20.0,
             };
 
-            if let Ok(bg_brush) = rt.CreateSolidColorBrush(&bg_col, None) {
+            if let Some(bg_brush) = self.solid_brush(rt, &bg_col) {
                 rt.FillRoundedRectangle(&rrect, &bg_brush);
             }
-            if let Ok(b_brush) = rt.CreateSolidColorBrush(&border_col, None) {
+            if let Some(b_brush) = self.solid_brush(rt, &border_col) {
                 let stroke_sz = if is_overtime { 2.5 } else { 1.5 };
                 rt.DrawRoundedRectangle(&rrect, &b_brush, stroke_sz, None);
             }
@@ -412,14 +412,14 @@ impl D2DRenderer {
             if let Ok(t_fmt) = self.get_text_format(13.0) {
                 let _ = t_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                 let _ = t_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                if let Ok(t_brush) = rt.CreateSolidColorBrush(
+                if let Some(t_brush) = self.solid_brush(
+                    rt,
                     &D2D1_COLOR_F {
                         r: 0.65,
                         g: 0.72,
                         b: 0.85,
                         a: 0.85,
                     },
-                    None,
                 ) {
                     rt.DrawText(
                         &title_utf16,
@@ -456,18 +456,18 @@ impl D2DRenderer {
                     a: 0.08,
                 }
             };
-            if let Ok(cbrush) = rt.CreateSolidColorBrush(&close_bg, None) {
+            if let Some(cbrush) = self.solid_brush(rt, &close_bg) {
                 rt.FillEllipse(&close_el, &cbrush);
             }
             // Crisp vector cross lines
-            if let Ok(wbrush) = rt.CreateSolidColorBrush(
+            if let Some(wbrush) = self.solid_brush(
+                rt,
                 &D2D1_COLOR_F {
                     r: 1.0,
                     g: 1.0,
                     b: 1.0,
                     a: 0.90,
                 },
-                None,
             ) {
                 rt.DrawLine(
                     v2(close_cx - 5.0, close_cy - 5.0),
@@ -546,7 +546,7 @@ impl D2DRenderer {
                     }
                 };
 
-                if let Ok(pbrush) = rt.CreateSolidColorBrush(&p_bg, None) {
+                if let Some(pbrush) = self.solid_brush(rt, &p_bg) {
                     rt.FillRoundedRectangle(&p_rrect, &pbrush);
                 }
 
@@ -565,20 +565,20 @@ impl D2DRenderer {
                         a: 0.12,
                     }
                 };
-                if let Ok(pb_brush) = rt.CreateSolidColorBrush(&p_border, None) {
+                if let Some(pb_brush) = self.solid_brush(rt, &p_border) {
                     rt.DrawRoundedRectangle(&p_rrect, &pb_brush, 1.0, None);
                 }
 
                 let p_utf16: Vec<u16> = label.encode_utf16().collect();
                 if let Some(ref pf) = pill_fmt
-                    && let Ok(wbrush) = rt.CreateSolidColorBrush(
+                    && let Some(wbrush) = self.solid_brush(
+                        rt,
                         &D2D1_COLOR_F {
                             r: 0.92,
                             g: 0.94,
                             b: 0.98,
                             a: 0.95,
                         },
-                        None,
                     )
                 {
                     rt.DrawText(
@@ -603,7 +603,7 @@ impl D2DRenderer {
                 b: 1.0,
                 a: 0.08,
             };
-            if let Ok(track_brush) = rt.CreateSolidColorBrush(&track_col, None) {
+            if let Some(track_brush) = self.solid_brush(rt, &track_col) {
                 let el = D2D1_ELLIPSE {
                     point: ring_center,
                     radiusX: ring_radius,
@@ -613,7 +613,7 @@ impl D2DRenderer {
             }
 
             // Smooth Progress Arc (128 smooth segments)
-            if let Ok(arc_brush) = rt.CreateSolidColorBrush(&border_col, None) {
+            if let Some(arc_brush) = self.solid_brush(rt, &border_col) {
                 let segments = (128.0 * progress.clamp(0.0, 1.0)) as usize;
                 if segments > 1 {
                     if let Ok(path) = self.factory.CreatePathGeometry()
@@ -646,14 +646,14 @@ impl D2DRenderer {
                         radiusX: 6.0,
                         radiusY: 6.0,
                     };
-                    if let Ok(bead_brush) = rt.CreateSolidColorBrush(
+                    if let Some(bead_brush) = self.solid_brush(
+                        rt,
                         &D2D1_COLOR_F {
                             r: 1.0,
                             g: 1.0,
                             b: 1.0,
                             a: 0.95,
                         },
-                        None,
                     ) {
                         rt.FillEllipse(&bead_el, &bead_brush);
                     }
@@ -668,7 +668,7 @@ impl D2DRenderer {
                     b: 0.1,
                     a: 0.25,
                 };
-                if let Ok(pulse_brush) = rt.CreateSolidColorBrush(&pulse_col, None) {
+                if let Some(pulse_brush) = self.solid_brush(rt, &pulse_col) {
                     let el = D2D1_ELLIPSE {
                         point: ring_center,
                         radiusX: ring_radius + 9.0,
@@ -710,7 +710,7 @@ impl D2DRenderer {
             if let Ok(t_fmt) = self.get_text_format(52.0) {
                 let _ = t_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                 let _ = t_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                if let Ok(tbrush) = rt.CreateSolidColorBrush(&text_col, None) {
+                if let Some(tbrush) = self.solid_brush(rt, &text_col) {
                     rt.DrawText(
                         &time_utf16,
                         &t_fmt,
@@ -740,14 +740,14 @@ impl D2DRenderer {
             if let Ok(s_fmt) = self.get_text_format(11.0) {
                 let _ = s_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                 let _ = s_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                if let Ok(st_brush) = rt.CreateSolidColorBrush(
+                if let Some(st_brush) = self.solid_brush(
+                    rt,
                     &D2D1_COLOR_F {
                         r: 0.65,
                         g: 0.72,
                         b: 0.85,
                         a: 0.75,
                     },
-                    None,
                 ) {
                     rt.DrawText(
                         &sub_label_utf16,
@@ -785,30 +785,30 @@ impl D2DRenderer {
                 radiusX: 28.0,
                 radiusY: 28.0,
             };
-            if let Ok(hbrush) = rt.CreateSolidColorBrush(&hero_bg, None) {
+            if let Some(hbrush) = self.solid_brush(rt, &hero_bg) {
                 rt.FillEllipse(&hero_el, &hbrush);
             }
-            if let Ok(hb_brush) = rt.CreateSolidColorBrush(
+            if let Some(hb_brush) = self.solid_brush(
+                rt,
                 &D2D1_COLOR_F {
                     r: 0.45,
                     g: 0.82,
                     b: 1.0,
                     a: 0.95,
                 },
-                None,
             ) {
                 rt.DrawEllipse(&hero_el, &hb_brush, 1.5, None);
             }
 
             // Vector Hero Icons (Pause = two vertical bars, Play = triangle)
-            if let Ok(white_brush) = rt.CreateSolidColorBrush(
+            if let Some(white_brush) = self.solid_brush(
+                rt,
                 &D2D1_COLOR_F {
                     r: 1.0,
                     g: 1.0,
                     b: 1.0,
                     a: 1.0,
                 },
-                None,
             ) {
                 if paused {
                     // Vector Play Triangle
@@ -891,7 +891,7 @@ impl D2DRenderer {
                         a: 0.07,
                     }
                 };
-                if let Ok(sbrush) = rt.CreateSolidColorBrush(&sec_bg, None) {
+                if let Some(sbrush) = self.solid_brush(rt, &sec_bg) {
                     rt.FillEllipse(&sec_el, &sbrush);
                 }
                 let sec_border = if is_hover {
@@ -909,20 +909,20 @@ impl D2DRenderer {
                         a: 0.12,
                     }
                 };
-                if let Ok(sb_brush) = rt.CreateSolidColorBrush(&sec_border, None) {
+                if let Some(sb_brush) = self.solid_brush(rt, &sec_border) {
                     rt.DrawEllipse(&sec_el, &sb_brush, 1.0, None);
                 }
 
                 if action == TimerAction::ToggleMinimize {
                     // Vector PIP / Mini window icon (two crisp overlapping rectangles)
-                    if let Ok(wbrush) = rt.CreateSolidColorBrush(
+                    if let Some(wbrush) = self.solid_brush(
+                        rt,
                         &D2D1_COLOR_F {
                             r: 0.95,
                             g: 0.95,
                             b: 0.98,
                             a: 0.95,
                         },
-                        None,
                     ) {
                         let outer_win = D2D1_ROUNDED_RECT {
                             rect: D2D_RECT_F {
@@ -956,14 +956,14 @@ impl D2DRenderer {
                         bottom: btn_y + 22.0,
                     };
                     if let Some(ref rf) = reset_fmt
-                        && let Ok(wbrush) = rt.CreateSolidColorBrush(
+                        && let Some(wbrush) = self.solid_brush(
+                            rt,
                             &D2D1_COLOR_F {
                                 r: 0.95,
                                 g: 0.95,
                                 b: 0.98,
                                 a: 0.95,
                             },
-                            None,
                         )
                     {
                         rt.DrawText(
@@ -984,14 +984,14 @@ impl D2DRenderer {
                         bottom: btn_y + 22.0,
                     };
                     if let Some(ref sf) = sec_fmt
-                        && let Ok(wbrush) = rt.CreateSolidColorBrush(
+                        && let Some(wbrush) = self.solid_brush(
+                            rt,
                             &D2D1_COLOR_F {
                                 r: 0.95,
                                 g: 0.95,
                                 b: 0.98,
                                 a: 0.95,
                             },
-                            None,
                         )
                     {
                         rt.DrawText(
@@ -1037,7 +1037,7 @@ impl D2DRenderer {
             if let Ok(s_fmt) = self.get_text_format(12.0) {
                 let _ = s_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                 let _ = s_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                if let Ok(sbrush) = rt.CreateSolidColorBrush(&sub_col, None) {
+                if let Some(sbrush) = self.solid_brush(rt, &sub_col) {
                     rt.DrawText(
                         &sub_utf16,
                         &s_fmt,
