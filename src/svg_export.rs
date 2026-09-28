@@ -902,8 +902,14 @@ fn write_blur(out: &mut String, shape: &Shape, input: &SvgExportInput) {
         return;
     };
     let b_size = block_size.clamp(4.0, 64.0);
-    let cols = ((w / b_size).ceil().max(1.0)) as u32;
-    let rows = ((h / b_size).ceil().max(1.0)) as u32;
+    // start/end come straight from a Shape::Blur, which a crafted or
+    // corrupted session file controls - w/h (and so cols/rows) are not
+    // otherwise bounded by anything real like a screen size. Capped well
+    // past what any real redaction needs, so a garbage rect cannot demand
+    // a many-gigapixel mosaic or overflow the pixel-buffer arithmetic
+    // below.
+    let cols = ((w / b_size).ceil().max(1.0) as u32).min(4096);
+    let rows = ((h / b_size).ceil().max(1.0) as u32).min(4096);
 
     let Some(mosaic) = mosaic_tiles(
         bg,
@@ -971,7 +977,11 @@ fn mosaic_tiles(
     let px_w = (w * dpi_scale).max(1.0);
     let px_h = (h * dpi_scale).max(1.0);
 
-    let mut out = vec![0u8; (cols * rows * 4) as usize];
+    // Defense in depth alongside write_blur()'s cap on cols/rows: reject
+    // rather than silently wrap if this is ever called with cols/rows large
+    // enough (both near u32::MAX) to overflow the pixel-count arithmetic.
+    let total = (cols as usize).checked_mul(rows as usize)?.checked_mul(4)?;
+    let mut out = vec![0u8; total];
     for row in 0..rows {
         for col in 0..cols {
             let tile_l = (px_x + px_w * col as f32 / cols as f32).round() as i64;
@@ -1267,6 +1277,38 @@ mod tests {
         for px in tiles.chunks_exact(4) {
             assert_eq!(px, &[10, 20, 30, 255]);
         }
+    }
+
+    #[test]
+    fn test_mosaic_tiles_rejects_a_cols_rows_pair_that_would_overflow() {
+        // cols*rows*4 overflows a u64 once both are near u32::MAX; must
+        // fail cleanly rather than allocate a wrapped (too-small) buffer
+        // and panic indexing into it as if it were cols*rows big.
+        let bg = vec![0u8; 4];
+        assert!(mosaic_tiles(&bg, 1, 1, 0.0, 0.0, 1.0, 1.0, 1.0, u32::MAX, u32::MAX).is_none());
+    }
+
+    #[test]
+    fn test_write_blur_with_an_absurd_rect_does_not_panic() {
+        // start/end come straight from a Shape::Blur, which a crafted or
+        // corrupted session file controls - a garbage rect must fall back
+        // to the flat redaction block rather than panic trying to mosaic a
+        // many-gigapixel region.
+        let bg = vec![0u8; 4 * 4 * 4];
+        let mut out = String::new();
+        let shape = Shape::Blur {
+            start: Point2D::new(0.0, 0.0),
+            end: Point2D::new(1.0e20, 1.0e20),
+            block_size: 4.0,
+        };
+        let shapes: Vec<Annotation> = Vec::new();
+        let layout = HashMap::new();
+        let mut i = input(&shapes, &layout);
+        i.bg_pixels = Some(&bg);
+        i.bg_px_w = 4;
+        i.bg_px_h = 4;
+        write_blur(&mut out, &shape, &i);
+        assert!(!out.is_empty());
     }
 
     #[test]

@@ -764,9 +764,27 @@ impl<'de> Deserialize<'de> for ImagePixels {
             bgra_base64: String,
         }
         let raw = Raw::deserialize(d)?;
+        // A crafted or corrupted session file could claim dimensions large
+        // enough that width*height*4 wraps around usize::MAX on a 64-bit
+        // build (both near u32::MAX) - the wrapped "want" could then match
+        // a much smaller actual buffer, and every later reader of this
+        // ImagePixels (the renderer's CreateBitmap, in particular) would
+        // read width*height*4 real bytes out of a far smaller Vec. Reject
+        // absurd dimensions outright, matching the cap the clipboard paste
+        // path already uses, and check the multiplication itself rather
+        // than letting it silently wrap.
+        if raw.width > 32768 || raw.height > 32768 {
+            return Err(serde::de::Error::custom(format!(
+                "image dimensions {}x{} are too large",
+                raw.width, raw.height
+            )));
+        }
         let bgra = b64::decode(&raw.bgra_base64)
             .ok_or_else(|| serde::de::Error::custom("image bytes are not valid base64"))?;
-        let want = raw.width as usize * raw.height as usize * 4;
+        let want = (raw.width as usize)
+            .checked_mul(raw.height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| serde::de::Error::custom("image dimensions overflow"))?;
         if bgra.len() != want {
             return Err(serde::de::Error::custom(format!(
                 "image is {} bytes, but {}x{} needs {}",
@@ -2613,6 +2631,16 @@ mod tests {
         // later on an out-of-bounds row read in the renderer.
         let bad = r#"{"width":10,"height":10,"bgra_base64":"AAAA"}"#;
         assert!(serde_json::from_str::<ImagePixels>(bad).is_err());
+    }
+
+    #[test]
+    fn test_image_pixels_rejects_dimensions_that_would_overflow_the_size_check() {
+        // width*height*4 would wrap a 64-bit usize if this were computed
+        // without checked_mul - must fail cleanly rather than let a wrapped
+        // "want" of 0 or some small value slip a tiny bgra_base64 past the
+        // length check.
+        let huge = r#"{"width":4294967295,"height":4294967295,"bgra_base64":""}"#;
+        assert!(serde_json::from_str::<ImagePixels>(huge).is_err());
     }
 
     #[test]
