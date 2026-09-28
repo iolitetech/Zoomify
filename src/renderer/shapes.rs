@@ -821,6 +821,18 @@ impl D2DRenderer {
 
                     let b_size = block_size.clamp(4.0, 64.0);
 
+                    // bg_bitmap is captured at 96 DPI (capture.rs), so its
+                    // own coordinate space is physical pixels, while l/t/r/b
+                    // are canvas DIPs at rt's actual DPI - 1:1 only at 100%
+                    // scaling. Used below to convert the region read *from*
+                    // the bitmap; the mosaic's block count and its drawn
+                    // extent on screen both stay in DIPs, which is what a
+                    // "block_size" the user sees on screen should mean.
+                    let mut dpi_x = 96.0f32;
+                    let mut dpi_y = 96.0f32;
+                    rt.GetDpi(&mut dpi_x, &mut dpi_y);
+                    let s = (dpi_x / 96.0).max(0.01);
+
                     // Mosaic via downsample-then-upsample: shrink the region to one
                     // texel per block (linear, so each texel averages its block),
                     // then blow it back up with nearest-neighbour.
@@ -887,11 +899,16 @@ impl D2DRenderer {
                                 }),
                                 1.0,
                                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                                // Source rect is within bg_bitmap's own
+                                // (physical-pixel) space, so the DIP rect
+                                // has to be scaled up to match - reading it
+                                // unscaled is what made this sample the
+                                // wrong region above 100% DPI.
                                 Some(&D2D_RECT_F {
-                                    left: l,
-                                    top: t,
-                                    right: r,
-                                    bottom: b,
+                                    left: l * s,
+                                    top: t * s,
+                                    right: r * s,
+                                    bottom: b * s,
                                 }),
                             );
                             if new_rt.EndDraw(None, None).is_err() {

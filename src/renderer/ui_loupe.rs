@@ -13,7 +13,7 @@ impl D2DRenderer {
     pub(super) unsafe fn render_loupe(
         &self,
         rt: &ID2D1RenderTarget,
-        _screen_w: f32,
+        screen_w: f32,
         _screen_h: f32,
         loupe: &LoupeState,
         bg_bitmap: Option<&ID2D1Bitmap>,
@@ -45,14 +45,28 @@ impl D2DRenderer {
                 return;
             };
 
-            // Direct2D matrix: M31 is X translation, M32 is Y translation, M11 is X scale, M22 is Y scale
-            // Transform matrix T = Translate(-cx, -cy) * Scale(m) * Translate(cx, cy):
-            // (x - cx) * m + cx = x * m + cx * (1 - m)
+            // `bg` is captured at 96 DPI (capture.rs), so its own coordinate
+            // space is physical pixels, while cx/cy and the render target
+            // are in DIPs at this window's actual DPI - 1:1 only at 100%
+            // scaling. `s` converts a DIP distance into the matching
+            // physical-pixel distance in the bitmap; without it the loupe
+            // sampled bg at cx/s, drifting from the cursor as scaling rises
+            // above 100%.
+            let s = bg.GetSize().width / screen_w.max(1.0);
+
+            // The transform maps physical bitmap pixel (cx*s, cy*s) - what
+            // is actually under the cursor - to screen point (cx, cy),
+            // scaled by m/s around that pivot:
+            //   target = (brush - cx*s) * (m/s) + cx
+            //          = brush * (m/s) + cx * (1 - m)
+            // so M11/M22 pick up the `s` factor but the translation does
+            // not (`m`, not `m/s` - the `s` scaling and the `-cx*s` pivot
+            // cancel each other out in the translation term).
             let loupe_matrix = Matrix3x2 {
-                M11: m,
+                M11: m / s,
                 M12: 0.0,
                 M21: 0.0,
-                M22: m,
+                M22: m / s,
                 M31: cx * (1.0 - m),
                 M32: cy * (1.0 - m),
             };
