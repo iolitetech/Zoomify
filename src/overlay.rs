@@ -212,6 +212,13 @@ pub struct OverlayWindow {
     pub draw_start_pt: Point2D,
     pub step_counter: u32,
     pub text_editor: Option<TextEditorState>,
+    /// A high surrogate received from WM_CHAR, waiting for the low surrogate
+    /// that completes it. WM_CHAR delivers a character outside the Basic
+    /// Multilingual Plane (any emoji, among others) as two separate
+    /// messages, one per UTF-16 surrogate half; `char::from_u32` on either
+    /// half alone fails and used to just drop it as a bogus control
+    /// character.
+    pub pending_high_surrogate: Option<u16>,
     pub font_size: f32,
     pub text_is_bold: bool,
     pub text_is_italic: bool,
@@ -447,6 +454,7 @@ impl OverlayWindow {
                 draw_start_pt: Point2D::default(),
                 step_counter: 1,
                 text_editor: None,
+                pending_high_surrogate: None,
                 font_size: 22.0,
                 text_is_bold: false,
                 text_is_italic: false,
@@ -5560,7 +5568,28 @@ impl OverlayWindow {
                 }
 
                 WM_CHAR => {
-                    let ch = char::from_u32(wparam.0 as u32).unwrap_or('\0');
+                    let unit = wparam.0 as u16;
+                    // A character outside the BMP (any emoji, among others -
+                    // the Win+. picker is the common way to type one) arrives
+                    // as two WM_CHAR messages, one per UTF-16 surrogate half.
+                    // char::from_u32 on either half alone fails, so combine
+                    // them across the two messages before decoding.
+                    let ch = if (0xD800..=0xDBFF).contains(&unit) {
+                        this.pending_high_surrogate = Some(unit);
+                        None
+                    } else if (0xDC00..=0xDFFF).contains(&unit) {
+                        this.pending_high_surrogate.take().and_then(|high| {
+                            let c =
+                                0x10000 + ((high as u32 - 0xD800) << 10) + (unit as u32 - 0xDC00);
+                            char::from_u32(c)
+                        })
+                    } else {
+                        this.pending_high_surrogate = None;
+                        char::from_u32(unit as u32)
+                    };
+                    let Some(ch) = ch else {
+                        return LRESULT(0);
+                    };
                     if let Some(editor) = &mut this.text_editor {
                         if ch == '\x08' || ch == '\x1b' || ch == '\x7f' || ch == '\r' || ch == '\n'
                         {
