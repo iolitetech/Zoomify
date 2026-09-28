@@ -45,7 +45,7 @@ return in an annotation tool. F is an architecture change to the overlay.
 | PDF export (`Ctrl+P`) — single-page, no external crate | `6ac9654` |
 | Multiple boards to tab between (`Ctrl+T`/`Ctrl+W`, `Ctrl+Shift+[`/`]`) | `1021bde` |
 | Infinite canvas — pan a Whiteboard/Blackboard past the screen edge | `48b3ed9` |
-| Eyedropper — pick a colour off the screen (`Ctrl+I`) | `PENDING` |
+| Eyedropper — pick a colour off the screen (`Ctrl+I`) | `c56b33a` |
 
 ### Design decisions worth not re-litigating
 
