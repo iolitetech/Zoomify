@@ -3207,8 +3207,31 @@ impl OverlayWindow {
     /// `manual` is the Ctrl+Shift+S path, which reports through a toast. The
     /// autosave path runs while the overlay is tearing down, where a toast can
     /// no longer be drawn, so it routes failures to a tray balloon instead.
+    /// Every board's shapes, in order, with the active board's *live*
+    /// content (`self.shapes`) substituted for `boards[active_board]`'s
+    /// placeholder, which is stale while a board is loaded — see the `Board`
+    /// doc comment.
+    fn all_boards_snapshot(&self) -> Vec<Vec<Annotation>> {
+        self.boards
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                if i == self.active_board {
+                    self.shapes.clone()
+                } else {
+                    b.shapes.clone()
+                }
+            })
+            .collect()
+    }
+
     pub fn save_session(&mut self, manual: bool) {
-        if self.shapes.is_empty() {
+        // Every board, not just the active one - this used to save only
+        // self.shapes, so switching boards and exiting (with autosave, or a
+        // manual save right after switching) silently dropped every other
+        // board when exit_overlay() reset self.boards afterwards.
+        let all_boards = self.all_boards_snapshot();
+        if all_boards.iter().all(|b| b.is_empty()) {
             if manual {
                 self.set_toast("❌", "Nothing to save");
             }
@@ -3217,8 +3240,11 @@ impl OverlayWindow {
         let cfg = crate::config::AppConfig::load();
         let dir = crate::session::sessions_dir(&cfg);
         let path = crate::session::next_session_path(&dir);
+        let board_count = all_boards.len();
+        let total_count: usize = all_boards.iter().map(|b| b.len()).sum();
         let sess = crate::session::Session::new(
-            self.shapes.clone(),
+            all_boards,
+            self.active_board,
             self.background_type,
             self.step_counter,
         );
@@ -3247,8 +3273,15 @@ impl OverlayWindow {
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let count = self.shapes.len();
-            self.set_toast("💾", format!("Saved {} annotation(s) — {}", count, name));
+            let label = if board_count > 1 {
+                format!(
+                    "Saved {} annotation(s) across {} board(s) — {}",
+                    total_count, board_count, name
+                )
+            } else {
+                format!("Saved {} annotation(s) — {}", total_count, name)
+            };
+            self.set_toast("💾", label);
         }
     }
 
@@ -3256,11 +3289,34 @@ impl OverlayWindow {
     pub fn load_session_from(&mut self, path: &std::path::Path) {
         match crate::session::load(path) {
             Ok(sess) => {
-                let count = sess.shapes.len();
+                let mut boards_shapes = sess.boards_or_single();
+                if boards_shapes.is_empty() {
+                    boards_shapes.push(Vec::new());
+                }
+                let board_count = boards_shapes.len();
+                let count: usize = boards_shapes.iter().map(|b| b.len()).sum();
                 let background = sess.background_enum();
-                let previous = std::mem::replace(&mut self.shapes, sess.shapes);
+                let active = sess.active_board.min(board_count - 1);
+
+                // Only the active board's previous content becomes undoable
+                // in one step, matching what a single-board load always did;
+                // the other boards are replaced outright, the same way
+                // exit_overlay() already discards board state non-undoably.
+                let new_active_shapes = std::mem::take(&mut boards_shapes[active]);
+                let previous = std::mem::replace(&mut self.shapes, new_active_shapes);
                 self.record_undo(HistoryAction::Clear(previous));
                 self.redo_history.clear();
+
+                self.boards = boards_shapes
+                    .into_iter()
+                    .map(|shapes| Board {
+                        shapes,
+                        ..Default::default()
+                    })
+                    .collect();
+                self.active_board = active;
+                self.last_nudge = None;
+
                 self.selection = None;
                 self.active_shape = None;
                 self.text_editor = None;
@@ -3269,10 +3325,15 @@ impl OverlayWindow {
                 self.step_counter = sess.step_counter;
                 self.toolbar.badge_counter = self.step_counter;
                 self.settle_bindings();
-                self.set_toast(
-                    "📂",
-                    format!("Loaded {} annotation(s) — {}", count, sess.saved_at),
-                );
+                let label = if board_count > 1 {
+                    format!(
+                        "Loaded {} annotation(s) across {} board(s) — {}",
+                        count, board_count, sess.saved_at
+                    )
+                } else {
+                    format!("Loaded {} annotation(s) — {}", count, sess.saved_at)
+                };
+                self.set_toast("📂", label);
                 self.request_repaint();
             }
             Err(e) => self.set_toast("❌", format!("Load failed: {}", e)),
