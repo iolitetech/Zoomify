@@ -3661,10 +3661,18 @@ impl OverlayWindow {
             text_layout.insert(a.id, size);
         }
 
-        let bg_pixels = self
-            .background_capture
-            .as_ref()
-            .map(|c| c.pixels.as_slice());
+        // On a Whiteboard/Blackboard the frozen screenshot is exactly what
+        // the user covered the desktop to hide; write_background() already
+        // ignores it there (it matches on bg_type first), but write_blur()
+        // used to be handed it regardless and would mosaic a pixelated copy
+        // of the hidden desktop into the exported SVG.
+        let bg_pixels = if self.background_type == CanvasBackground::Transparent {
+            self.background_capture
+                .as_ref()
+                .map(|c| c.pixels.as_slice())
+        } else {
+            None
+        };
         let (bg_px_w, bg_px_h) = self
             .background_capture
             .as_ref()

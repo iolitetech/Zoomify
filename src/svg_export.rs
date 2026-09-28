@@ -891,7 +891,14 @@ fn write_blur(out: &mut String, shape: &Shape, input: &SvgExportInput) {
     if w < 1.0 || h < 1.0 {
         return;
     }
+    // input.bg_pixels is None on a Whiteboard/Blackboard (see export_svg()),
+    // since that frozen screenshot is exactly what the user covered the
+    // desktop to hide - Blur must not mosaic a pixelated copy of it. Falls
+    // back to the same flat redaction block the live renderer and PNG
+    // export draw when there is nothing to mosaic, rather than silently
+    // omitting the shape.
     let Some(bg) = input.bg_pixels else {
+        write_blur_fallback_block(out, l, t, r, b);
         return;
     };
     let b_size = block_size.clamp(4.0, 64.0);
@@ -910,6 +917,7 @@ fn write_blur(out: &mut String, shape: &Shape, input: &SvgExportInput) {
         cols,
         rows,
     ) else {
+        write_blur_fallback_block(out, l, t, r, b);
         return;
     };
     if let Some(uri) = png_data_uri(&mosaic, cols, rows) {
@@ -925,6 +933,19 @@ fn write_blur(out: &mut String, shape: &Shape, input: &SvgExportInput) {
             h = FNum(h),
         );
     }
+}
+
+/// The same flat redaction block the live renderer and PNG export fall back
+/// to when there is no background to mosaic.
+fn write_blur_fallback_block(out: &mut String, l: f32, t: f32, r: f32, b: f32) {
+    let _ = write!(
+        out,
+        r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="rgba(26,26,26,0.85)" stroke="rgba(102,179,255,0.45)" stroke-width="1"/>"#,
+        x = FNum(l),
+        y = FNum(t),
+        w = FNum(r - l),
+        h = FNum(b - t),
+    );
 }
 
 /// Box-average `bg` (top-down BGRA at `bg_w`x`bg_h` physical pixels) over the
@@ -1173,13 +1194,15 @@ mod tests {
             }),
         ];
         let svg = build_svg(&input(&shapes, &layout));
-        // Blur with no background pixels is silently skipped, not a panic —
-        // everything else must have left a mark.
+        // Blur with no background pixels draws the flat redaction fallback
+        // rather than panicking or silently vanishing — everything else
+        // must have left a mark too.
         assert!(svg.contains("<path"));
         assert!(svg.contains("<polygon"));
         assert!(svg.contains("<ellipse"));
         assert!(svg.contains("<text"));
         assert!(svg.contains("tspan"));
+        assert!(svg.contains("rgba(26,26,26,0.85)"));
     }
 
     #[test]

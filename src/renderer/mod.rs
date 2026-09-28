@@ -799,13 +799,24 @@ impl D2DRenderer {
 
             // ── Shapes Layer (Zoomed with canvas; Draw & StaticZoom only) ──
             if mode == AppMode::Draw || mode == AppMode::StaticZoom {
+                // render_single_shape's only use of a background bitmap is
+                // Shape::Blur's source to redact. On a Whiteboard/Blackboard
+                // the frozen screenshot underneath is exactly what the user
+                // covered the desktop to hide - handing it to Blur regardless
+                // used to let it mosaic a pixelated copy of the hidden
+                // desktop instead of the board itself.
+                let blur_bg = if bg_type == CanvasBackground::Transparent {
+                    bg_bitmap
+                } else {
+                    None
+                };
                 for a in shapes {
                     // A label is drawn from its container's bounds, so it has
                     // to wait until the container is on screen.
                     if a.container.is_some() {
                         continue;
                     }
-                    self.render_single_shape(rt, &a.shape, bg_bitmap, a.opacity, true);
+                    self.render_single_shape(rt, &a.shape, blur_bg, a.opacity, true);
                 }
                 for a in shapes {
                     if let Some(cid) = a.container
@@ -822,7 +833,7 @@ impl D2DRenderer {
                     // stroke gaining a point every mouse move, a drag preview),
                     // so its geometry differs every frame - caching it would
                     // only ever insert, never hit.
-                    self.render_single_shape(rt, shape, bg_bitmap, 1.0, false);
+                    self.render_single_shape(rt, shape, blur_bg, 1.0, false);
                     if snap_guides {
                         self.render_drawing_snap_guides(rt, shape);
                     }
