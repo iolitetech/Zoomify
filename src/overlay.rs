@@ -2048,7 +2048,12 @@ impl OverlayWindow {
         let dx = canvas_pt.x - sel.grab.x;
         let dy = canvas_pt.y - sel.grab.y;
         let grab = sel.grab;
-        let originals = sel.originals.clone();
+        // Borrowed, not cloned: originals never changes during a drag, and
+        // every match arm below already clones just the individual shapes
+        // it actually updates - cloning the whole selection here first was
+        // a second full copy of every selected shape (a pasted image among
+        // them, pre-Arc) on top of that, every single mouse move.
+        let originals = &sel.originals;
         let original_bounds = sel.original_bounds;
         let snapping = self.snapping_enabled();
         let tol = self.snap_tolerance();
@@ -2161,15 +2166,16 @@ impl OverlayWindow {
             }
         };
 
-        let mut changed = false;
+        let mut moved_ids: Vec<ShapeId> = Vec::new();
         for (id, shape) in updates {
             if let Some(i) = self.annotation_index(id) {
                 self.shapes[i].shape = shape;
-                changed = true;
+                moved_ids.push(id);
             }
         }
+        let changed = !moved_ids.is_empty();
         if changed {
-            self.settle_bindings();
+            self.settle_bindings_for(&moved_ids);
         }
         changed
     }
@@ -2225,7 +2231,10 @@ impl OverlayWindow {
         let Some(kind) = sel.drag.take() else {
             return;
         };
-        let originals = sel.originals.clone();
+        // Taken, not cloned: this selection's `originals` is stale the
+        // moment the drag ends anyway (the next drag repopulates it fresh
+        // in begin_drag), so there is nothing to preserve by copying it.
+        let originals = std::mem::take(&mut sel.originals);
         // Captured while `sel` is still the pre-rebind selection: only an
         // endpoint drag rebinds anything, and only ever the one shape being
         // dragged (rebind_endpoint only ever acts on the sole selected id).
@@ -2952,10 +2961,42 @@ impl OverlayWindow {
             .filter(|(_, a)| a.start_bound.is_some() || a.end_bound.is_some())
             .map(|(i, _)| i)
             .collect();
+        self.settle_bindings_at(&bound);
+    }
+
+    /// Like `settle_bindings`, but only for an arrow whose own shape just
+    /// changed or whose bound target is in `moved_ids` - the interactive
+    /// drag path's fast case, where most bound arrows on the canvas have
+    /// nothing to do with whatever was just moved and a full O(shapes)
+    /// rescan (each one re-cloning both its own geometry and both targets'
+    /// geometry) is wasted work on every single mouse move. Every other
+    /// caller (session load, undo/redo, delete, clear) still uses
+    /// `settle_bindings` itself - they can't cheaply say what moved, and
+    /// only run once per discrete action rather than once per frame.
+    fn settle_bindings_for(&mut self, moved_ids: &[ShapeId]) {
+        if moved_ids.is_empty() {
+            return;
+        }
+        let bound: Vec<usize> = self
+            .shapes
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                (a.start_bound.is_some() || a.end_bound.is_some())
+                    && (moved_ids.contains(&a.id)
+                        || a.start_bound.is_some_and(|id| moved_ids.contains(&id))
+                        || a.end_bound.is_some_and(|id| moved_ids.contains(&id)))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        self.settle_bindings_at(&bound);
+    }
+
+    fn settle_bindings_at(&mut self, bound: &[usize]) {
         if bound.is_empty() {
             return;
         }
-        for i in bound {
+        for &i in bound {
             let (shape, sb, eb) = {
                 let a = &self.shapes[i];
                 (a.shape.clone(), a.start_bound, a.end_bound)
