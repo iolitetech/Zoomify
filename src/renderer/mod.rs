@@ -93,6 +93,16 @@ pub struct D2DRenderer {
     /// the target changes (the offscreen target used for export is a different
     /// one) or the device is lost.
     solid_brush_cache: RefCell<(usize, HashMap<u32, ID2D1SolidColorBrush>)>,
+    /// One reusable brush for elements whose colour/alpha changes
+    /// continuously frame to frame (the laser trail, its ripples, toast
+    /// fades) - repainted via SetColor before each draw rather than
+    /// inserted into `solid_brush_cache` under a new key for every alpha a
+    /// fade passes through, which used to flood that 256-entry cache
+    /// (shared with every on-canvas shape) and force repeated full
+    /// flushes for as long as the fade lasted. D2D brush state (colour,
+    /// opacity) is captured at the moment each draw call is issued, so
+    /// reusing one brush this way is standard and safe, not a race.
+    scratch_brush: RefCell<(usize, Option<ID2D1SolidColorBrush>)>,
     /// Finished blur mosaics, keyed by content (background bitmap identity +
     /// rect + block size) rather than shared by size the way this used to
     /// be - see the doc comment at its use in shapes.rs.
@@ -354,6 +364,7 @@ impl D2DRenderer {
                 text_formats_cache: RefCell::new(HashMap::new()),
                 spotlight_geometry_cache: RefCell::new(None),
                 solid_brush_cache: RefCell::new((0, HashMap::new())),
+                scratch_brush: RefCell::new((0, None)),
                 blur_mosaic_cache: RefCell::new((0, HashMap::new())),
                 geometry_cache: RefCell::new((0, HashMap::new())),
                 image_cache: RefCell::new((0, HashMap::new())),
@@ -399,6 +410,26 @@ impl D2DRenderer {
         }
         cache.1.insert(key, brush.clone());
         Some(brush)
+    }
+
+    /// See the `scratch_brush` field's doc comment. Only for an element
+    /// whose colour is expected to change every draw anyway (a fade, a
+    /// continuously-decaying alpha) - never for a shape whose colour is
+    /// reused across many frames, which belongs in `solid_brush`'s cache.
+    pub(crate) fn scratch_brush(
+        &self,
+        rt: &ID2D1RenderTarget,
+        color: &D2D1_COLOR_F,
+    ) -> Option<ID2D1SolidColorBrush> {
+        let rt_id = rt.as_raw() as usize;
+        let mut slot = self.scratch_brush.borrow_mut();
+        if slot.0 != rt_id || slot.1.is_none() {
+            slot.0 = rt_id;
+            slot.1 = unsafe { rt.CreateSolidColorBrush(color, None) }.ok();
+        } else if let Some(b) = &slot.1 {
+            unsafe { b.SetColor(color) };
+        }
+        slot.1.clone()
     }
 
     pub fn get_stroke_style(&self, pattern: StrokePattern) -> &ID2D1StrokeStyle {
@@ -672,6 +703,7 @@ impl D2DRenderer {
             cache.0 = 0;
             cache.1.clear();
         }
+        self.scratch_brush.borrow_mut().1 = None;
         {
             let mut cache = self.blur_mosaic_cache.borrow_mut();
             cache.0 = 0;

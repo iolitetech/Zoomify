@@ -1550,7 +1550,7 @@ impl D2DRenderer {
                     b: rip_col.b,
                     a: alpha,
                 };
-                if let Some(brush) = self.solid_brush(rt, &ring_col) {
+                if let Some(brush) = self.scratch_brush(rt, &ring_col) {
                     let el = D2D1_ELLIPSE {
                         point: v2(ripple.center.x, ripple.center.y),
                         radiusX: radius,
@@ -1573,7 +1573,7 @@ impl D2DRenderer {
                         b: rip_col.b,
                         a: alpha2,
                     };
-                    if let Some(brush2) = self.solid_brush(rt, &echo_col) {
+                    if let Some(brush2) = self.scratch_brush(rt, &echo_col) {
                         let el2 = D2D1_ELLIPSE {
                             point: v2(ripple.center.x, ripple.center.y),
                             radiusX: radius2,
@@ -1594,7 +1594,7 @@ impl D2DRenderer {
                         b: 1.0,
                         a: flash_alpha,
                     };
-                    if let Some(fbrush) = self.solid_brush(rt, &flash_col) {
+                    if let Some(fbrush) = self.scratch_brush(rt, &flash_col) {
                         let fel = D2D1_ELLIPSE {
                             point: v2(ripple.center.x, ripple.center.y),
                             radiusX: flash_radius,
@@ -1621,7 +1621,7 @@ impl D2DRenderer {
                         b: base_col.b,
                         a: seg_alpha,
                     };
-                    if let Some(brush) = self.solid_brush(rt, &seg_col) {
+                    if let Some(brush) = self.scratch_brush(rt, &seg_col) {
                         rt.DrawLine(
                             v2(trail[i].pt.x, trail[i].pt.y),
                             v2(trail[i + 1].pt.x, trail[i + 1].pt.y),
