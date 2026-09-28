@@ -622,6 +622,7 @@ impl D2DRenderer {
                     ("Ctrl+J", "Export annotations as SVG"),
                     ("Ctrl+P", "Export screen + drawings as PDF"),
                     ("Ctrl+T / Ctrl+W", "New board / close board"),
+                    ("Ctrl+Shift+T", "Restore last closed board"),
                     ("Ctrl+Shift+] / [", "Next / previous board"),
                     ("E / Delete", "Clear canvas (undoable)"),
                     ("Esc / Right-Click", "Return to Pan mode / Exit overlay"),

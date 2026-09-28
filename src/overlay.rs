@@ -119,6 +119,12 @@ const MAX_HISTORY_ENTRIES: usize = 200;
 /// merge two separate, deliberate taps of the arrow key days apart.
 const NUDGE_MERGE_WINDOW: Duration = Duration::from_millis(750);
 
+/// How many Ctrl+W-closed boards `closed_boards` remembers before the
+/// oldest is dropped. Ctrl+W used to discard a board outright with nothing
+/// kept anywhere - closing the wrong one by reflex (it is a common "close
+/// this" shortcut in other apps) lost everything on it for good.
+const MAX_CLOSED_BOARDS: usize = 10;
+
 /// Posted to the tray host window whenever a Live Zoom session starts (wparam 1)
 /// or stops (wparam 0), so the host can claim / release the Ctrl+Up/Down/+/- keys.
 pub const WM_LIVE_ZOOM_STATE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 400;
@@ -165,6 +171,10 @@ pub struct OverlayWindow {
     pub boards: Vec<Board>,
     /// Index into `boards` of the page currently loaded onto `shapes` et al.
     pub active_board: usize,
+    /// Boards closed with Ctrl+W this session, most-recent-last, restorable
+    /// with Ctrl+Shift+T. Capped at `MAX_CLOSED_BOARDS`; not persisted, and
+    /// cleared whenever the overlay exits.
+    pub closed_boards: Vec<Board>,
     pub active_shape: Option<Shape>,
     /// Pressure from the most recent pen sample, 0..=1. `None` for mouse,
     /// touch, or a pen with no pressure axis.
@@ -366,6 +376,7 @@ impl OverlayWindow {
                 last_nudge: None,
                 boards: vec![Board::default()],
                 active_board: 0,
+                closed_boards: Vec::new(),
                 active_shape: None,
                 current_tool: DrawTool::Pen,
                 current_color: initial_color,
@@ -1014,6 +1025,7 @@ impl OverlayWindow {
         self.last_nudge = None;
         self.boards = vec![Board::default()];
         self.active_board = 0;
+        self.closed_boards.clear();
         // The shapes that filled it are gone for good (not parked in undo
         // history like clear_all()'s Ctrl+Z-able clear), so nothing will
         // reuse these entries again this session.
@@ -1669,6 +1681,22 @@ impl OverlayWindow {
         }
         self.commit_text_editor();
 
+        // self.boards[active_board] is only ever a stale placeholder while a
+        // board is loaded (see the Board doc comment) - the real content is
+        // in self.shapes/undo_history/redo_history directly, so it has to be
+        // lifted out of *those* before it is overwritten below, or Ctrl+W
+        // would discard whatever was actually on screen while leaving an
+        // empty placeholder in closed_boards instead.
+        let closed = Board {
+            shapes: std::mem::take(&mut self.shapes),
+            undo_history: std::mem::take(&mut self.undo_history),
+            redo_history: std::mem::take(&mut self.redo_history),
+        };
+        self.closed_boards.push(closed);
+        if self.closed_boards.len() > MAX_CLOSED_BOARDS {
+            self.closed_boards.remove(0);
+        }
+
         self.boards.remove(self.active_board);
         let next = self.active_board.min(self.boards.len() - 1);
 
@@ -1687,7 +1715,50 @@ impl OverlayWindow {
         self.set_toast(
             "📑",
             format!(
-                "Board Closed ({} of {})",
+                "Board Closed ({} of {}) — Ctrl+Shift+T to restore",
+                self.active_board + 1,
+                self.boards.len()
+            ),
+        );
+        self.request_repaint();
+    }
+
+    /// Bring back the most recently Ctrl+W-closed board (Ctrl+Shift+T),
+    /// right after the currently active one, and switch to it.
+    pub fn reopen_last_closed_board(&mut self) {
+        let Some(board) = self.closed_boards.pop() else {
+            self.set_toast("📑", "No Closed Board to Restore");
+            self.request_repaint();
+            return;
+        };
+        self.commit_text_editor();
+
+        // Park the active board back into self.boards first, exactly as
+        // switch_board does, so its live content is not lost when the
+        // restored board takes over self.shapes/undo_history/redo_history
+        // below.
+        self.boards[self.active_board].shapes = std::mem::take(&mut self.shapes);
+        self.boards[self.active_board].undo_history = std::mem::take(&mut self.undo_history);
+        self.boards[self.active_board].redo_history = std::mem::take(&mut self.redo_history);
+
+        let insert_at = self.active_board + 1;
+        self.boards.insert(insert_at, board);
+        self.shapes = std::mem::take(&mut self.boards[insert_at].shapes);
+        self.undo_history = std::mem::take(&mut self.boards[insert_at].undo_history);
+        self.redo_history = std::mem::take(&mut self.boards[insert_at].redo_history);
+        self.active_board = insert_at;
+
+        self.selection = None;
+        self.marquee = None;
+        self.active_shape = None;
+        self.is_drawing = false;
+        self.snap_guides.clear();
+        self.last_nudge = None;
+
+        self.set_toast(
+            "📑",
+            format!(
+                "Board Restored ({} of {})",
                 self.active_board + 1,
                 self.boards.len()
             ),
@@ -5809,8 +5880,11 @@ impl OverlayWindow {
                             k if k == 0xDB && is_shift => {
                                 this.prev_board();
                             }
-                            k if k == 'T' as i32 => {
+                            k if k == 'T' as i32 && !is_shift => {
                                 this.new_board();
+                            }
+                            k if k == 'T' as i32 && is_shift => {
+                                this.reopen_last_closed_board();
                             }
                             k if k == 'W' as i32 => {
                                 this.close_board();
