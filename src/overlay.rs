@@ -1026,6 +1026,26 @@ impl OverlayWindow {
             let sw = self.current_monitor.width;
             let sh = self.current_monitor.height;
 
+            // A cached background capture belongs to whichever monitor's
+            // dimensions were current when it was taken. Carrying it across a
+            // real monitor switch pairs old, possibly smaller pixel data with
+            // the new screen_width/screen_height downstream
+            // (get_composite_capture -> render_to_capture), which reads past
+            // the end of the buffer when building the export bitmap - and on
+            // screen it just shows the old monitor's frozen picture stretched
+            // over the new one. Force a recapture whenever the monitor
+            // actually changes; every caller already does
+            // `if background_bitmap.is_none() { capture_current_screen() }`
+            // right after calling this.
+            if sx != self.screen_x
+                || sy != self.screen_y
+                || sw != self.screen_width
+                || sh != self.screen_height
+            {
+                self.background_bitmap = None;
+                self.background_capture = None;
+            }
+
             self.screen_x = sx;
             self.screen_y = sy;
             self.screen_width = sw;

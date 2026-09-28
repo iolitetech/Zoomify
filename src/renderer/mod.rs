@@ -1114,6 +1114,7 @@ impl D2DRenderer {
 
                         let bg_bmp = if bg_type == CanvasBackground::Transparent
                             && let Some(pixels) = bg_pixels
+                            && pixels.len() >= (width as usize) * (height as usize) * 4
                         {
                             let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
                                 width,
