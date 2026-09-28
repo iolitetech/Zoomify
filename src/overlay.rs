@@ -3341,7 +3341,13 @@ impl OverlayWindow {
             let _ = composite.save_png(&png.to_string_lossy());
         }
 
-        crate::session::prune(&dir, cfg.session_keep_last as usize);
+        // Only the autosave path prunes. A manual Ctrl+Shift+S save used to
+        // run the same prune unconditionally, so a user who never turned
+        // autosave on could still lose their oldest manual save (silently)
+        // the moment total saves passed session_keep_last.
+        if !manual {
+            crate::session::prune(&dir, cfg.session_keep_last as usize);
+        }
 
         if manual {
             let name = path
