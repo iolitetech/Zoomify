@@ -8,7 +8,6 @@ use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1RenderTarget,
 };
-use windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_CENTER;
 
 impl D2DRenderer {
     #[allow(clippy::too_many_arguments)]
@@ -681,12 +680,11 @@ impl D2DRenderer {
                         && let Some(tb) = &text_brush
                     {
                         let l_utf16: Vec<u16> = label.encode_utf16().collect();
-                        let centered = self.text_format_toolbar_small.clone();
-                        let _ = centered.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                        let _ = centered.SetParagraphAlignment(windows::Win32::Graphics::DirectWrite::DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                        let _ = centered.SetWordWrapping(
-                            windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_NO_WRAP,
-                        );
+                        // A dedicated instance, not a clone-and-mutate of the
+                        // shared text_format_toolbar_small: IDWriteTextFormat
+                        // clones are a COM AddRef (same underlying object),
+                        // so mutating a "clone" here used to permanently
+                        // affect every other user of that shared field too.
                         let tr = D2D_RECT_F {
                             left: s_item.rect.left,
                             top: s_item.rect.top,
@@ -695,7 +693,7 @@ impl D2DRenderer {
                         };
                         rt.DrawText(
                             &l_utf16,
-                            &centered,
+                            &self.text_format_toolbar_small_nowrap,
                             &tr,
                             tb,
                             D2D1_DRAW_TEXT_OPTIONS_NONE,

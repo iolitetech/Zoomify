@@ -7,9 +7,6 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1RenderTarget,
 };
-use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-};
 
 impl D2DRenderer {
     #[allow(clippy::too_many_arguments)]
@@ -118,8 +115,10 @@ impl D2DRenderer {
                         a: 0.9,
                     },
                 ) {
-                    let centered = self.text_format_hud.clone();
-                    let _ = centered.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    // Dedicated pre-centered instance - see its field
+                    // comment for why this must not clone-and-mutate the
+                    // shared text_format_hud.
+                    let centered = self.text_format_hud_centered.clone();
                     let tr0 = D2D_RECT_F {
                         left: b0_rect.left,
                         top: b0_rect.top + 3.0,
@@ -210,8 +209,10 @@ impl D2DRenderer {
                         a: 0.9,
                     },
                 ) {
-                    let centered = self.text_format_hud.clone();
-                    let _ = centered.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    // Dedicated pre-centered instance - see its field
+                    // comment for why this must not clone-and-mutate the
+                    // shared text_format_hud.
+                    let centered = self.text_format_hud_centered.clone();
                     let tr1 = D2D_RECT_F {
                         left: b1_rect.left,
                         top: b1_rect.top + 4.0,
@@ -253,8 +254,10 @@ impl D2DRenderer {
                         a: 0.9,
                     },
                 ) {
-                    let centered = self.text_format_hud.clone();
-                    let _ = centered.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    // Dedicated pre-centered instance - see its field
+                    // comment for why this must not clone-and-mutate the
+                    // shared text_format_hud.
+                    let centered = self.text_format_hud_centered.clone();
                     let tr2 = D2D_RECT_F {
                         left: b2_rect.left,
                         top: b2_rect.top + 4.0,
@@ -296,8 +299,10 @@ impl D2DRenderer {
                         a: 0.9,
                     },
                 ) {
-                    let centered = self.text_format_hud.clone();
-                    let _ = centered.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    // Dedicated pre-centered instance - see its field
+                    // comment for why this must not clone-and-mutate the
+                    // shared text_format_hud.
+                    let centered = self.text_format_hud_centered.clone();
                     let tr3 = D2D_RECT_F {
                         left: b3_rect.left,
                         top: b3_rect.top + 4.0,
@@ -409,9 +414,8 @@ impl D2DRenderer {
                 right: cx + 200.0,
                 bottom: cy - 180.0,
             };
+            // get_text_format() is already centered.
             if let Ok(t_fmt) = self.get_text_format(13.0) {
-                let _ = t_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                let _ = t_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 if let Some(t_brush) = self.solid_brush(
                     rt,
                     &D2D1_COLOR_F {
@@ -500,11 +504,8 @@ impl D2DRenderer {
                 (25, "25m"),
                 (30, "30m"),
             ];
+            // get_text_format() is already centered.
             let pill_fmt = self.get_text_format(13.0).ok();
-            if let Some(ref pf) = pill_fmt {
-                let _ = pf.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                let _ = pf.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            }
 
             for (i, &(dur, label)) in durations.iter().enumerate() {
                 let px = pill_row_x + i as f32 * (pill_w + pill_gap);
@@ -707,9 +708,8 @@ impl D2DRenderer {
                     a: 1.0,
                 }
             };
+            // get_text_format() is already centered.
             if let Ok(t_fmt) = self.get_text_format(52.0) {
-                let _ = t_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                let _ = t_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 if let Some(tbrush) = self.solid_brush(rt, &text_col) {
                     rt.DrawText(
                         &time_utf16,
@@ -737,9 +737,8 @@ impl D2DRenderer {
                 right: cx + 120.0,
                 bottom: cy + 42.0,
             };
+            // get_text_format() is already centered.
             if let Ok(s_fmt) = self.get_text_format(11.0) {
-                let _ = s_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                let _ = s_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 if let Some(st_brush) = self.solid_brush(
                     rt,
                     &D2D1_COLOR_F {
@@ -857,17 +856,9 @@ impl D2DRenderer {
                 (cx + 120.0, "mini", TimerAction::ToggleMinimize),
             ];
 
+            // get_text_format() is already centered.
             let sec_fmt = self.get_text_format(13.0).ok();
-            if let Some(ref sf) = sec_fmt {
-                let _ = sf.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                let _ = sf.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            }
-
             let reset_fmt = self.get_text_format(18.0).ok();
-            if let Some(ref rf) = reset_fmt {
-                let _ = rf.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                let _ = rf.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            }
 
             for &(scx, label, action) in &secondary_buttons {
                 let is_hover = widget.hover_action == Some(action);
@@ -1034,9 +1025,8 @@ impl D2DRenderer {
                     a: 0.75,
                 }
             };
+            // get_text_format() is already centered.
             if let Ok(s_fmt) = self.get_text_format(12.0) {
-                let _ = s_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                let _ = s_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                 if let Some(sbrush) = self.solid_brush(rt, &sub_col) {
                     rt.DrawText(
                         &sub_utf16,

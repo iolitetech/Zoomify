@@ -18,9 +18,6 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1Brush, ID2D1Factory, ID2D1PathGeometry, ID2D1RenderTarget,
     ID2D1StrokeStyle,
 };
-use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-};
 use windows_core::Interface;
 
 /// Once the geometry cache holds more entries than this, a new insert clears
@@ -775,8 +772,8 @@ impl D2DRenderer {
                     };
                     let font_size = (*radius * 0.95).max(11.0);
                     if let Ok(custom_fmt) = self.get_text_format(font_size) {
-                        let _ = custom_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                        let _ = custom_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                        // Already centered - get_text_format's cache key
+                        // reserves this format for centered callers only.
                         let text_rect = D2D_RECT_F {
                             left: center.x - *radius,
                             top: center.y - *radius,

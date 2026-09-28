@@ -64,11 +64,25 @@ pub struct D2DRenderer {
     #[allow(dead_code)]
     pub text_format_timer: IDWriteTextFormat,
     pub text_format_hud: IDWriteTextFormat,
+    /// Same font as `text_format_hud`, pre-centered, as its own instance -
+    /// several Timer-mode glyphs used to clone() text_format_hud (a COM
+    /// AddRef, the same underlying object) and call SetTextAlignment on
+    /// that "clone" directly, which permanently centered every other HUD
+    /// text using the shared field too.
+    pub text_format_hud_centered: IDWriteTextFormat,
     pub text_format_cheat_title: IDWriteTextFormat,
     pub text_format_cheat_item: IDWriteTextFormat,
     #[allow(dead_code)]
     pub text_format_toolbar: IDWriteTextFormat,
     pub text_format_toolbar_small: IDWriteTextFormat,
+    /// Same font as `text_format_toolbar_small`, but with word-wrapping
+    /// disabled - kept as its own instance rather than mutated in place on
+    /// demand, since IDWriteTextFormat::clone() is a COM AddRef (the same
+    /// underlying object, not a copy): setting NO_WRAP on a "clone" of
+    /// `text_format_toolbar_small` for the sub-bar's single-line labels used
+    /// to permanently switch every other user of that shared field to
+    /// NO_WRAP too (tooltips, toast, loupe badge, snap badges).
+    pub text_format_toolbar_small_nowrap: IDWriteTextFormat,
     pub text_format_fluent_icons: IDWriteTextFormat,
     pub text_format_toast_title: IDWriteTextFormat,
     pub text_format_toast_sub: IDWriteTextFormat,
@@ -172,6 +186,16 @@ impl D2DRenderer {
                 14.0,
                 w!("en-us"),
             )?;
+            let text_format_hud_centered = dwrite_factory.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                14.0,
+                w!("en-us"),
+            )?;
+            let _ = text_format_hud_centered.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 
             let text_format_cheat_title = dwrite_factory.CreateTextFormat(
                 w!("Segoe UI"),
@@ -217,6 +241,22 @@ impl D2DRenderer {
             let _ = text_format_toolbar_small.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             let _ =
                 text_format_toolbar_small.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+            let text_format_toolbar_small_nowrap = dwrite_factory.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                12.0,
+                w!("en-us"),
+            )?;
+            let _ = text_format_toolbar_small_nowrap.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            let _ = text_format_toolbar_small_nowrap
+                .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let _ = text_format_toolbar_small_nowrap.SetWordWrapping(
+                windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_NO_WRAP,
+            );
 
             let text_format_fluent_icons = dwrite_factory
                 .CreateTextFormat(
@@ -302,10 +342,12 @@ impl D2DRenderer {
                 text_format_badge,
                 text_format_timer,
                 text_format_hud,
+                text_format_hud_centered,
                 text_format_cheat_title,
                 text_format_cheat_item,
                 text_format_toolbar,
                 text_format_toolbar_small,
+                text_format_toolbar_small_nowrap,
                 text_format_fluent_icons,
                 text_format_toast_title,
                 text_format_toast_sub,
@@ -367,8 +409,15 @@ impl D2DRenderer {
         }
     }
 
+    /// Bold, SegoeUI, pre-centered (both text and paragraph alignment) - for
+    /// the many small on-screen labels (timer digits, step badges) that
+    /// always want centered text. Deliberately a *different* cache key than
+    /// `get_custom_text_format`'s equivalent left-aligned request (see
+    /// `get_custom_text_format_impl`), so callers here can never bleed their
+    /// alignment into a Shape::Text annotation that happens to share the
+    /// same size.
     pub fn get_text_format(&self, font_size: f32) -> Result<IDWriteTextFormat> {
-        self.get_custom_text_format(font_size, true, false, TextFontFamily::SegoeUI)
+        self.get_custom_text_format_impl(font_size, true, false, TextFontFamily::SegoeUI, true)
     }
 
     /// Upload a pasted image once and hand back the cached bitmap.
@@ -428,6 +477,9 @@ impl D2DRenderer {
         }
     }
 
+    /// Left-aligned (DirectWrite's default) - what every `Shape::Text`
+    /// annotation renders with. See `get_custom_text_format_impl` for why
+    /// this needs its own cache key, distinct from `get_text_format`'s.
     pub fn get_custom_text_format(
         &self,
         font_size: f32,
@@ -435,11 +487,33 @@ impl D2DRenderer {
         is_italic: bool,
         font_family: TextFontFamily,
     ) -> Result<IDWriteTextFormat> {
+        self.get_custom_text_format_impl(font_size, is_bold, is_italic, font_family, false)
+    }
+
+    /// `centered` sets both text and paragraph alignment to CENTER at
+    /// creation time and folds into the cache key, so a caller that wants
+    /// centered text (badges, the timer) can never share a cache entry -
+    /// and therefore never share underlying alignment state - with one that
+    /// wants DirectWrite's default left alignment (any `Shape::Text`
+    /// annotation). Before this existed, a StepBadge or the timer would
+    /// fetch the *same* cached format a same-sized/weight/family
+    /// Shape::Text used and call SetTextAlignment/SetParagraphAlignment on
+    /// it directly - since the format is shared by reference, that flipped
+    /// every other holder of it to centered too, permanently.
+    fn get_custom_text_format_impl(
+        &self,
+        font_size: f32,
+        is_bold: bool,
+        is_italic: bool,
+        font_family: TextFontFamily,
+        centered: bool,
+    ) -> Result<IDWriteTextFormat> {
         let sz = (font_size.round() as u32).clamp(8, 200);
         let b_flag = if is_bold { 1u32 << 16 } else { 0 };
         let i_flag = if is_italic { 1u32 << 17 } else { 0 };
         let f_flag = (font_family as u32) << 18;
-        let key = sz | b_flag | i_flag | f_flag;
+        let c_flag = if centered { 1u32 << 20 } else { 0 };
+        let key = sz | b_flag | i_flag | f_flag | c_flag;
 
         let mut cache = self.text_formats_cache.borrow_mut();
         if let Some(format) = cache.get(&key) {
@@ -472,6 +546,10 @@ impl D2DRenderer {
                 sz as f32,
                 w!("en-us"),
             )?;
+            if centered {
+                let _ = format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            }
             cache.insert(key, format.clone());
             Ok(format)
         }
