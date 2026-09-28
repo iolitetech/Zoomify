@@ -32,7 +32,7 @@ use crate::live_zoom::LiveZoomEngine;
 use crate::renderer::D2DRenderer;
 use crate::shapes::{
     ARROW_BINDING_GAP, AlignTo, SELECTION_HANDLE_SIZE, SELECTION_HANDLE_SLOP, SNAP_TOLERANCE_DIP,
-    SnapGuide, align_offsets, can_bind_arrow, can_contain_text, collect_anchors,
+    SnapGuide, align_offsets, anchor_points, can_bind_arrow, can_contain_text,
     container_height_for, curve_from_handle, curve_handle, distribute_offsets, handle_at,
     label_rides_on_shape, normalize_rect, push_pressure, recognize_smart_shape, resize_shape,
     resized_bounds, resolve_arrow_ends, set_shape_color, set_shape_fill, set_shape_pattern,
@@ -3789,14 +3789,17 @@ impl OverlayWindow {
     }
 
     fn rebuild_snap_anchors_excluding(&mut self, skip: &[ShapeId]) {
+        // Builds anchors straight from &Shape, with no intermediate Vec<Shape>
+        // clone of the whole canvas - a pasted image's pixel buffer used to
+        // get copied here just to be thrown away a call later, and this runs
+        // on the latency path of the very first point of every freehand
+        // stroke (see rebuild_snap_anchors's Pen/Highlighter callers).
         self.snap_anchors = if self.snapping_enabled() {
-            let live: Vec<Shape> = self
-                .shapes
+            self.shapes
                 .iter()
                 .filter(|a| !skip.contains(&a.id) && !a.is_contained_text())
-                .map(|a| a.shape.clone())
-                .collect();
-            collect_anchors(&live)
+                .flat_map(|a| anchor_points(&a.shape))
+                .collect()
         } else {
             Vec::new()
         };
@@ -5177,13 +5180,16 @@ impl OverlayWindow {
 
                     // Freehand is never snapped; for everything else the first
                     // corner is pulled onto nearby geometry just like the last.
-                    this.rebuild_snap_anchors(None);
+                    // Building anchors only to immediately clear_snap() them
+                    // sat on the latency of every single pen stroke's first
+                    // point for no reason.
                     let canvas_pt = if this.current_tool == DrawTool::Pen
                         || this.current_tool == DrawTool::Highlighter
                     {
                         this.clear_snap();
                         canvas_pt
                     } else {
+                        this.rebuild_snap_anchors(None);
                         this.apply_point_snap(canvas_pt)
                     };
 
