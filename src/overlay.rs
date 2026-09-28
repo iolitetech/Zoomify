@@ -2826,11 +2826,20 @@ impl OverlayWindow {
         let mut copy = source.clone();
         copy.id = ShapeId::fresh();
         translate_shape(&mut copy.shape, OFFSET, OFFSET);
+        // A duplicate is a new, independent shape: joining the source's
+        // group used to mean dragging either one moved both, and keeping a
+        // bound arrow's start_bound/end_bound used to have settle_bindings()
+        // immediately pull the copy back onto the same target as the
+        // original - landing exactly on top of it, invisible.
+        copy.group = None;
+        copy.start_bound = None;
+        copy.end_bound = None;
         let new_id = copy.id;
 
         let label_copy = self.label_of(source.id).cloned().map(|mut l| {
             l.id = ShapeId::fresh();
             l.container = Some(new_id);
+            l.group = None;
             translate_shape(&mut l.shape, OFFSET, OFFSET);
             l
         });
