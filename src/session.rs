@@ -335,11 +335,7 @@ mod tests {
             Shape::Image {
                 start: Point2D::new(0.0, 0.0),
                 end: Point2D::new(4.0, 4.0),
-                pixels: crate::types::ImagePixels {
-                    width: 2,
-                    height: 2,
-                    bgra: (0..16u8).collect(),
-                },
+                pixels: crate::types::ImagePixels::new(2, 2, (0..16u8).collect::<Vec<u8>>()),
             },
         ]
         .into_iter()

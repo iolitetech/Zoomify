@@ -1019,6 +1019,7 @@ impl OverlayWindow {
         // history like clear_all()'s Ctrl+Z-able clear), so nothing will
         // reuse these entries again this session.
         self.renderer.clear_geometry_cache();
+        self.renderer.clear_image_cache();
         self.background_type = CanvasBackground::Transparent;
         self.laser_trail.clear();
         self.laser_ripples.clear();
@@ -2999,11 +3000,7 @@ impl OverlayWindow {
         self.push_shape(Shape::Image {
             start: Point2D::new(centre.x - w * 0.5, centre.y - h * 0.5),
             end: Point2D::new(centre.x + w * 0.5, centre.y + h * 0.5),
-            pixels: ImagePixels {
-                width: img_w,
-                height: img_h,
-                bgra: bgra.into(),
-            },
+            pixels: ImagePixels::new(img_w, img_h, bgra),
         })
     }
 

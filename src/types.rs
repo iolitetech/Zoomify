@@ -614,35 +614,56 @@ pub struct ImagePixels {
     /// and shares the same buffer until something actually needs to write to
     /// it (nothing does today; pixels are set once, at paste/load time).
     pub bgra: Arc<[u8]>,
+    /// Full-content hash, computed once by `new()` and reused by
+    /// `cache_key()` every frame instead of re-hashing the pixels each time.
+    /// Private so the only way to construct an `ImagePixels` keeps it
+    /// consistent with `bgra`.
+    content_hash: u64,
 }
 
 impl ImagePixels {
-    /// A stable key for the renderer's bitmap cache.
-    ///
-    /// Content-derived, so the same image pasted twice shares one GPU bitmap
-    /// and a session reload keys to the same entry it did before.
-    pub fn cache_key(&self) -> u64 {
-        // FNV-1a over the dimensions and a sample of the bytes. Hashing every
-        // byte of a large paste on each frame would cost more than it saves.
+    pub fn new(width: u32, height: u32, bgra: impl Into<Arc<[u8]>>) -> Self {
+        let bgra = bgra.into();
+        let content_hash = Self::hash_all(width, height, &bgra);
+        Self {
+            width,
+            height,
+            bgra,
+            content_hash,
+        }
+    }
+
+    /// FNV-1a over the dimensions and every byte. Used only here, once per
+    /// image at construction time (paste or session load) — see `cache_key`,
+    /// which is what actually runs every frame.
+    fn hash_all(width: u32, height: u32, bgra: &[u8]) -> u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         let mut eat = |b: u8| {
             h ^= b as u64;
             h = h.wrapping_mul(0x100000001b3);
         };
-        for b in self.width.to_le_bytes() {
+        for b in width.to_le_bytes() {
             eat(b);
         }
-        for b in self.height.to_le_bytes() {
+        for b in height.to_le_bytes() {
             eat(b);
         }
-        for b in (self.bgra.len() as u64).to_le_bytes() {
+        for b in (bgra.len() as u64).to_le_bytes() {
             eat(b);
         }
-        let step = (self.bgra.len() / 4096).max(1);
-        for i in (0..self.bgra.len()).step_by(step) {
-            eat(self.bgra[i]);
+        for &b in bgra {
+            eat(b);
         }
         h
+    }
+
+    /// A stable key for the renderer's bitmap cache, checked every frame a
+    /// pasted image is on screen. O(1): the hash was computed once, in
+    /// `new()`, over the *entire* buffer — sampling a subset of bytes (the
+    /// previous approach) let two different images of the same size collide
+    /// on the same key, so one could render or export as the other.
+    pub fn cache_key(&self) -> u64 {
+        self.content_hash
     }
 }
 
@@ -755,11 +776,7 @@ impl<'de> Deserialize<'de> for ImagePixels {
                 want
             )));
         }
-        Ok(Self {
-            width: raw.width,
-            height: raw.height,
-            bgra: bgra.into(),
-        })
+        Ok(Self::new(raw.width, raw.height, bgra))
     }
 }
 
@@ -2556,11 +2573,7 @@ mod tests {
         // Every byte value once, so a bad base64 alphabet or padding edge
         // would show up rather than hiding in an all-zero buffer.
         let bgra: Vec<u8> = (0..=255u8).cycle().take(4 * 3 * 2).collect();
-        let img = ImagePixels {
-            width: 3,
-            height: 2,
-            bgra: bgra.into(),
-        };
+        let img = ImagePixels::new(3, 2, bgra);
         let json = serde_json::to_string(&img).unwrap();
         // The wire format is base64, not a huge JSON array of numbers.
         assert!(json.contains("bgra_base64"));
@@ -2580,23 +2593,11 @@ mod tests {
 
     #[test]
     fn test_image_cache_key_is_stable_and_content_sensitive() {
-        let a = ImagePixels {
-            width: 4,
-            height: 4,
-            bgra: vec![10u8; 4 * 4 * 4].into(),
-        };
-        let b = ImagePixels {
-            width: 4,
-            height: 4,
-            bgra: vec![10u8; 4 * 4 * 4].into(),
-        };
+        let a = ImagePixels::new(4, 4, vec![10u8; 4 * 4 * 4]);
+        let b = ImagePixels::new(4, 4, vec![10u8; 4 * 4 * 4]);
         let mut raw = b.bgra.to_vec();
         raw[0] = 200;
-        let c = ImagePixels {
-            width: b.width,
-            height: b.height,
-            bgra: raw.into(),
-        };
+        let c = ImagePixels::new(b.width, b.height, raw);
 
         assert_eq!(
             a.cache_key(),

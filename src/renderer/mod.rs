@@ -378,6 +378,14 @@ impl D2DRenderer {
         rt: &ID2D1RenderTarget,
         pixels: &crate::types::ImagePixels,
     ) -> Option<ID2D1Bitmap> {
+        // Nothing evicts a single deleted/undone image's entry, so without
+        // some bound a long session of pasting many different images would
+        // keep every one of them - each a full-size GPU bitmap - alive for
+        // the rest of the process. A typical session pastes a handful of
+        // images at most, so clearing the whole cache past this is a rare
+        // one-off re-upload, not a steady-state cost.
+        const IMAGE_CACHE_MAX_ENTRIES: usize = 64;
+
         unsafe {
             let target_key = rt.as_raw() as usize;
             let mut cache = self.image_cache.borrow_mut();
@@ -409,6 +417,9 @@ impl D2DRenderer {
                     &props,
                 )
                 .ok()?;
+            if cache.1.len() > IMAGE_CACHE_MAX_ENTRIES {
+                cache.1.clear();
+            }
             cache.1.insert(key, bitmap.clone());
             Some(bitmap)
         }
@@ -582,6 +593,7 @@ impl D2DRenderer {
         }
         self.blur_rt_cache.borrow_mut().take();
         self.clear_geometry_cache();
+        self.clear_image_cache();
 
         if self.target_hwnd.is_invalid() || self.target_width == 0 || self.target_height == 0 {
             self.device_lost.set(false);
@@ -599,6 +611,18 @@ impl D2DRenderer {
     /// every distinct geometry ever drawn for the life of the process.
     pub fn clear_geometry_cache(&self) {
         let mut cache = self.geometry_cache.borrow_mut();
+        cache.0 = 0;
+        cache.1.clear();
+    }
+
+    /// Drop every cached pasted-image GPU bitmap. Without this a bitmap
+    /// belonging to a lost device stayed pinned in the cache, and if the
+    /// freshly-created replacement render target happened to land at the
+    /// same address (plausible - the old one is freed right before the new
+    /// one is created), the stale key would keep matching and the dead
+    /// bitmaps would be reused instead of ever being replaced.
+    pub fn clear_image_cache(&self) {
+        let mut cache = self.image_cache.borrow_mut();
         cache.0 = 0;
         cache.1.clear();
     }
