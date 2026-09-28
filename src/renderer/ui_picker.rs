@@ -1,15 +1,18 @@
 use super::{D2DRenderer, v2};
 use crate::types::{ColorPickerState, TextFontFamily, hsv_to_rgb};
-use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
+use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F, D2D1_GRADIENT_STOP};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1RenderTarget,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP, D2D1_GAMMA_2_2,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, ID2D1RenderTarget,
 };
 use windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL;
+use windows_numerics::Vector2;
 
-/// Strips used to fake a gradient across each slider. Enough to read as smooth
-/// at these widths, and the colours repeat every frame so the brush cache holds
-/// them after the first paint.
-const STRIPS: usize = 64;
+/// Gradient stops sampled across each slider - a true gradient brush
+/// interpolates between them, so this is only about matching the previous
+/// per-strip look's colour resolution, not faking smoothness the way
+/// discrete filled strips had to.
+const STOPS: usize = 64;
 
 #[inline]
 fn rgb_color(r: u8, g: u8, b: u8) -> D2D1_COLOR_F {
@@ -71,28 +74,48 @@ impl D2DRenderer {
 
             for (rect, kind, pos) in bars {
                 let w = rect.right - rect.left;
-                let step = w / STRIPS as f32;
 
-                for i in 0..STRIPS {
-                    let t = i as f32 / (STRIPS - 1) as f32;
-                    let (r, g, b) = match kind {
-                        0 => hsv_to_rgb(t * 360.0, 1.0, 1.0),
-                        1 => hsv_to_rgb(picker.hue, t, picker.val.max(0.15)),
-                        _ => hsv_to_rgb(picker.hue, picker.sat, t),
-                    };
-                    if let Some(brush) = self.solid_brush(rt, &rgb_color(r, g, b)) {
-                        let x = rect.left + i as f32 * step;
-                        rt.FillRectangle(
-                            &D2D_RECT_F {
-                                left: x,
-                                top: rect.top,
-                                // Slight overlap so no seams show between strips.
-                                right: (x + step + 0.75).min(rect.right),
-                                bottom: rect.bottom,
+                // A single gradient brush per bar instead of up to STRIPS
+                // separate solid-colour brushes: dragging the hue slider
+                // changes every stop of the saturation/value bars every
+                // frame (they depend on picker.hue), which used to mean up
+                // to ~128 new colours a frame flooding the shared
+                // solid_brush_cache (shared with every on-canvas shape) past
+                // its cap and forcing a full flush, repeatedly, for as long
+                // as the drag continued. A gradient stop collection is its
+                // own resource, never touching that cache at all.
+                let stops: Vec<D2D1_GRADIENT_STOP> = (0..STOPS)
+                    .map(|i| {
+                        let t = i as f32 / (STOPS - 1) as f32;
+                        let (r, g, b) = match kind {
+                            0 => hsv_to_rgb(t * 360.0, 1.0, 1.0),
+                            1 => hsv_to_rgb(picker.hue, t, picker.val.max(0.15)),
+                            _ => hsv_to_rgb(picker.hue, picker.sat, t),
+                        };
+                        D2D1_GRADIENT_STOP {
+                            position: t,
+                            color: rgb_color(r, g, b),
+                        }
+                    })
+                    .collect();
+                if let Ok(stop_collection) =
+                    rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+                    && let Ok(gradient) = rt.CreateLinearGradientBrush(
+                        &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                            startPoint: Vector2 {
+                                X: rect.left,
+                                Y: rect.top,
                             },
-                            &brush,
-                        );
-                    }
+                            endPoint: Vector2 {
+                                X: rect.right,
+                                Y: rect.top,
+                            },
+                        },
+                        None,
+                        &stop_collection,
+                    )
+                {
+                    rt.FillRectangle(&rect, &gradient);
                 }
 
                 // Thumb: dark halo then white ring, so it reads on any ramp.
