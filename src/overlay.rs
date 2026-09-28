@@ -276,6 +276,37 @@ pub struct OverlayWindow {
     pub current_monitor: crate::monitor::MonitorInfo,
 }
 
+/// Nearest-neighbour downscale of a top-down BGRA buffer so neither
+/// dimension exceeds `max_dim`. Returns the input unchanged (dimensions and
+/// buffer both, no copy) if it already fits.
+///
+/// Only ever used as a last-resort safety net for a pasted image bigger
+/// than the GPU can create a bitmap from, not for everyday paste scaling
+/// (which only ever resizes the on-canvas *display* size, not the pixel
+/// data) - a simple nearest-neighbour resample is a deliberate trade of
+/// quality for simplicity, since this path is rare.
+fn downscale_bgra_to_fit(w: u32, h: u32, bgra: Vec<u8>, max_dim: u32) -> (u32, u32, Vec<u8>) {
+    if w <= max_dim && h <= max_dim {
+        return (w, h, bgra);
+    }
+    let scale = (max_dim as f32 / w as f32).min(max_dim as f32 / h as f32);
+    let new_w = ((w as f32 * scale).floor().max(1.0)) as u32;
+    let new_h = ((h as f32 * scale).floor().max(1.0)) as u32;
+    let mut out = vec![0u8; new_w as usize * new_h as usize * 4];
+    for y in 0..new_h {
+        let sy = ((y as f32 / new_h as f32) * h as f32) as u32;
+        let sy = sy.min(h - 1);
+        for x in 0..new_w {
+            let sx = ((x as f32 / new_w as f32) * w as f32) as u32;
+            let sx = sx.min(w - 1);
+            let src = (sy as usize * w as usize + sx as usize) * 4;
+            let dst = (y as usize * new_w as usize + x as usize) * 4;
+            out[dst..dst + 4].copy_from_slice(&bgra[src..src + 4]);
+        }
+    }
+    (new_w, new_h, out)
+}
+
 impl OverlayWindow {
     pub fn create() -> Result<Rc<RefCell<Self>>> {
         unsafe {
@@ -3219,11 +3250,19 @@ impl OverlayWindow {
             return;
         }
 
+        let max_dim = self.renderer.max_bitmap_size();
+        let was_oversized = img.width > max_dim || img.height > max_dim;
+
         let sw = self.logical_w();
         let sh = self.logical_h();
         let centre = self.zoom.screen_to_canvas(Point2D::new(sw / 2.0, sh / 2.0));
         let id = self.place_image_shape(centre, img.width, img.height, img.bgra);
-        self.finish_placing_images(vec![id], "📋", "Pasted Image".to_string());
+        let label = if was_oversized {
+            "Pasted Image (scaled down to fit)".to_string()
+        } else {
+            "Pasted Image".to_string()
+        };
+        self.finish_placing_images(vec![id], "📋", label);
     }
 
     /// Fit an image inside most of the viewport, place it centred on
@@ -3240,6 +3279,17 @@ impl OverlayWindow {
         img_h: u32,
         bgra: Vec<u8>,
     ) -> ShapeId {
+        // A pasted image whose pixel dimensions exceed what the GPU can
+        // actually create a bitmap from (clipboard.rs allows up to 32768px;
+        // this device's real limit is usually 16384) used to leave a
+        // selectable annotation on the canvas that image_bitmap's
+        // CreateBitmap failed to upload and so rendered as nothing at all.
+        // Downscale the pixel data itself - not just the on-canvas display
+        // size computed below, which is unrelated: the underlying bitmap
+        // still had to be the full native size before this.
+        let max_dim = self.renderer.max_bitmap_size();
+        let (img_w, img_h, bgra) = downscale_bgra_to_fit(img_w, img_h, bgra, max_dim);
+
         let sw = self.logical_w();
         let sh = self.logical_h();
         let max_w = (sw * 0.7).max(80.0);
@@ -6792,5 +6842,33 @@ impl OverlayWindow {
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_downscale_bgra_to_fit_passes_through_an_image_that_already_fits() {
+        let bgra = vec![7u8; 4 * 4 * 4];
+        let (w, h, out) = downscale_bgra_to_fit(4, 4, bgra.clone(), 16384);
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(out, bgra);
+    }
+
+    #[test]
+    fn test_downscale_bgra_to_fit_shrinks_an_oversized_image_to_the_limit() {
+        // A pasted image whose pixel dimensions exceed the GPU's max bitmap
+        // size used to leave a selectable annotation that CreateBitmap
+        // silently failed to upload, rendering as nothing at all.
+        let w = 20000u32;
+        let h = 1000u32;
+        let bgra = vec![0u8; w as usize * h as usize * 4];
+        let (new_w, new_h, out) = downscale_bgra_to_fit(w, h, bgra, 16384);
+        assert!(new_w <= 16384 && new_h <= 16384);
+        // Aspect ratio preserved (same scale factor on both axes).
+        assert_eq!(out.len(), new_w as usize * new_h as usize * 4);
+        assert!((new_w as f32 / new_h as f32 - w as f32 / h as f32).abs() < 0.5);
     }
 }

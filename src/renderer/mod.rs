@@ -447,6 +447,19 @@ impl D2DRenderer {
     /// `get_custom_text_format_impl`), so callers here can never bleed their
     /// alignment into a Shape::Text annotation that happens to share the
     /// same size.
+    /// The largest a single dimension of a bitmap this device can create is
+    /// allowed to be. Used both to clamp an export's supersample factor and
+    /// to downscale an oversized pasted image before it ever becomes a
+    /// Shape::Image - CreateBitmap failing past this (image_bitmap, below)
+    /// otherwise left the image on the canvas, selectable, but rendering as
+    /// nothing at all.
+    pub fn max_bitmap_size(&self) -> u32 {
+        self.render_target
+            .as_ref()
+            .map(|rt| unsafe { rt.GetMaximumBitmapSize() })
+            .unwrap_or(16384)
+    }
+
     pub fn get_text_format(&self, font_size: f32) -> Result<IDWriteTextFormat> {
         self.get_custom_text_format_impl(font_size, true, false, TextFontFamily::SegoeUI, true)
     }
@@ -1136,7 +1149,18 @@ impl D2DRenderer {
         // scaled up by `supersample`: Direct2D re-renders every vector shape at
         // that higher DPI, and the native background bitmap is bilinearly
         // upscaled into it by the existing DrawBitmap call below.
+        // Clamp so neither exported dimension exceeds what the GPU can
+        // actually allocate as a bitmap - an export scale (1x/2x/3x) applied
+        // to an already-large or multi-monitor-spanning capture could
+        // otherwise ask for a target past that limit, and (before EndDraw's
+        // result was even checked, see below) silently produce a blank
+        // export rather than a smaller one.
+        let max_size = self.max_bitmap_size() as f32;
         let supersample = supersample.max(1.0);
+        let supersample = supersample
+            .min(max_size / width.max(1) as f32)
+            .min(max_size / height.max(1) as f32)
+            .max(1.0);
         let out_w = ((width as f32) * supersample).round().max(1.0) as u32;
         let out_h = ((height as f32) * supersample).round().max(1.0) as u32;
         let render_dpi = self.dpi * supersample;
@@ -1371,7 +1395,19 @@ impl D2DRenderer {
                             dc_rt.SetTransform(&canvas_matrix);
                         }
 
-                        let _ = dc_rt.EndDraw(None, None);
+                        // A silent EndDraw failure (an oversized supersampled
+                        // export can ask for a target bigger than the GPU's
+                        // max bitmap size, among other reasons) used to fall
+                        // straight through to copying whatever the DIB
+                        // happened to already hold - typically all zero -
+                        // and returning it as a successful, blank capture.
+                        if dc_rt.EndDraw(None, None).is_err() {
+                            let _ = SelectObject(mem_dc, old_bmp);
+                            let _ = DeleteObject(hbm.into());
+                            let _ = DeleteDC(mem_dc);
+                            let _ = ReleaseDC(None, screen_dc);
+                            return None;
+                        }
 
                         let total_bytes = (out_w * out_h * 4) as usize;
                         let mut pixels = vec![0u8; total_bytes];
