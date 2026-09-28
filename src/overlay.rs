@@ -1463,6 +1463,14 @@ impl OverlayWindow {
                     self.record_redo(HistoryAction::TransformShapes { items });
                     self.set_toast("↩️", "Undo Edit");
                 }
+                HistoryAction::SetBindings { id, before, after } => {
+                    if let Some(a) = self.shapes.iter_mut().find(|a| a.id == id) {
+                        a.start_bound = before.0;
+                        a.end_bound = before.1;
+                    }
+                    self.record_redo(HistoryAction::SetBindings { id, before, after });
+                    self.set_toast("↩️", "Undo Re-anchor");
+                }
             }
             self.selection = None;
             self.settle_bindings();
@@ -1550,6 +1558,14 @@ impl OverlayWindow {
                     }
                     self.record_undo(HistoryAction::TransformShapes { items });
                     self.set_toast("↪️", "Redo Edit");
+                }
+                HistoryAction::SetBindings { id, before, after } => {
+                    if let Some(a) = self.shapes.iter_mut().find(|a| a.id == id) {
+                        a.start_bound = after.0;
+                        a.end_bound = after.1;
+                    }
+                    self.record_undo(HistoryAction::SetBindings { id, before, after });
+                    self.set_toast("↪️", "Redo Re-anchor");
                 }
             }
             self.selection = None;
@@ -2131,9 +2147,25 @@ impl OverlayWindow {
             return;
         };
         let originals = sel.originals.clone();
+        // Captured while `sel` is still the pre-rebind selection: only an
+        // endpoint drag rebinds anything, and only ever the one shape being
+        // dragged (rebind_endpoint only ever acts on the sole selected id).
+        let rebind_id = if matches!(kind, DragKind::Endpoint(_)) {
+            sel.only()
+        } else {
+            None
+        };
+        let before_bound =
+            rebind_id.and_then(|id| self.annotation(id).map(|a| (a.start_bound, a.end_bound)));
         if let DragKind::Endpoint(is_start) = kind {
             self.rebind_endpoint(is_start);
         }
+        let rebind_change = rebind_id.zip(before_bound).and_then(|(id, before)| {
+            self.annotation(id)
+                .map(|a| (a.start_bound, a.end_bound))
+                .filter(|after| *after != before)
+                .map(|after| (id, before, after))
+        });
         let mut items: Vec<(ShapeId, Shape, Shape)> = Vec::new();
         for (id, before) in originals {
             if let Some(after) = self.annotation(id).map(|a| a.shape.clone())
@@ -2144,6 +2176,13 @@ impl OverlayWindow {
         }
         if !items.is_empty() {
             self.record_undo(HistoryAction::TransformShapes { items });
+            self.redo_history.clear();
+        }
+        // Pushed *after* the geometry entry above: undo/redo history is
+        // LIFO, and popping this one first is what makes the binding revert
+        // before the paired geometry revert - see SetBindings' doc comment.
+        if let Some((id, before, after)) = rebind_change {
+            self.record_undo(HistoryAction::SetBindings { id, before, after });
             self.redo_history.clear();
         }
         // Shrinking a box below its label would clip words, so it grows back.

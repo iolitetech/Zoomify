@@ -1044,6 +1044,21 @@ pub enum HistoryAction {
     TransformShapes {
         items: Vec<(ShapeId, Shape, Shape)>,
     },
+    /// An arrow/line endpoint re-anchored to a different shape, or detached
+    /// (`rebind_endpoint`) - the binding itself, not the geometry. Always
+    /// pushed right after the `TransformShapes` entry for the geometry
+    /// change that binding produced (via `settle_bindings`' snap), so
+    /// popping this one first (undo/redo history is LIFO) reverts the
+    /// binding *before* the paired geometry revert runs. Reverting geometry
+    /// first would have the very `settle_bindings()` call every undo/redo
+    /// already makes immediately re-snap it right back onto the still-new
+    /// binding - which is what made re-anchoring invisible to undo before
+    /// this existed.
+    SetBindings {
+        id: ShapeId,
+        before: (Option<ShapeId>, Option<ShapeId>),
+        after: (Option<ShapeId>, Option<ShapeId>),
+    },
 }
 
 /// One page of annotations that can be tabbed to independently of the
