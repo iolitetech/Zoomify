@@ -547,6 +547,9 @@ fn main() -> Result<()> {
                 w!("Zoomify Running"),
                 MB_OK | MB_ICONINFORMATION | MB_SYSTEMMODAL,
             );
+            if let Ok(h) = mutex_handle {
+                let _ = windows::Win32::Foundation::CloseHandle(h);
+            }
             return Ok(());
         }
 
@@ -640,6 +643,19 @@ Choose different combos in Settings (Ctrl+,).",
         app_ctx.hotkeys.unregister_all();
         app_ctx.overlay.borrow_mut().exit_overlay();
         app_ctx.settings_window.borrow_mut().hide();
+
+        // Nothing ever called DestroyWindow on either window before this, so
+        // their renderers, the Live Zoom engine and every device resource
+        // they own lived until the process itself exited rather than being
+        // torn down. Each borrow ends before DestroyWindow runs, since it
+        // synchronously drives WM_DESTROY/WM_NCDESTROY straight into that
+        // window's own wndproc, which reclaims and drops the Rc<RefCell<_>>
+        // this same Box still holds a clone of.
+        let overlay_hwnd = app_ctx.overlay.borrow().hwnd;
+        let settings_hwnd = app_ctx.settings_window.borrow().hwnd;
+        let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(overlay_hwnd);
+        let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(settings_hwnd);
+        drop(app_ctx);
 
         windows::Win32::System::Ole::OleUninitialize();
         if let Ok(h) = mutex_handle {
