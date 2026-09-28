@@ -1383,6 +1383,13 @@ impl OverlayWindow {
     }
 
     pub fn undo(&mut self) {
+        // A text edit in progress has no representation in undo_history yet
+        // (see commit_text_editor's doc comment) - popping some unrelated
+        // earlier action out from under it used to leave the editor holding
+        // a copy that would still commit on top of whatever undo just
+        // restored, which was the toolbar-Undo-duplicates-text bug. Commit
+        // it first, so Undo always acts on committed state.
+        self.commit_text_editor();
         if let Some(action) = self.undo_history.pop() {
             match action {
                 HistoryAction::AddShape(_) => {
@@ -1464,6 +1471,8 @@ impl OverlayWindow {
     }
 
     pub fn redo(&mut self) {
+        // See the matching comment in undo().
+        self.commit_text_editor();
         if let Some(action) = self.redo_history.pop() {
             match action {
                 HistoryAction::AddShape(shape) => {
