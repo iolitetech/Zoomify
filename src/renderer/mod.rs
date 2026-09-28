@@ -900,7 +900,7 @@ impl D2DRenderer {
                     b: 0.05,
                     a: dim_val,
                 };
-                if let Ok(dim_brush) = rt.CreateSolidColorBrush(&dim_col, None) {
+                if let Some(dim_brush) = self.solid_brush(rt, &dim_col) {
                     let full_rect = D2D_RECT_F {
                         left: 0.0,
                         top: 0.0,
