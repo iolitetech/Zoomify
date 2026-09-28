@@ -45,6 +45,7 @@ return in an annotation tool. F is an architecture change to the overlay.
 | PDF export (`Ctrl+P`) — single-page, no external crate | `6ac9654` |
 | Multiple boards to tab between (`Ctrl+T`/`Ctrl+W`, `Ctrl+Shift+[`/`]`) | `1021bde` |
 | Infinite canvas — pan a Whiteboard/Blackboard past the screen edge | `48b3ed9` |
+| Eyedropper — pick a colour off the screen (`Ctrl+I`) | `PENDING` |
 
 ### Design decisions worth not re-litigating
 
@@ -169,7 +170,7 @@ and what a real fix would actually require.
 |---|---|
 | Multiple boards / pages to tab between | **shipped**, see above |
 | Infinite canvas past screen bounds | **shipped**, see above |
-| Eyedropper — pick a colour off the screen | **S** |
+| Eyedropper — pick a colour off the screen | **shipped**, see above |
 | First-run onboarding | **S** |
 | Toolbar customisation (which tools show) | **M** — see the crowding constraint |
 | Command palette (`Ctrl+K`) | **M** |
@@ -195,6 +196,16 @@ process: the animation timer's smooth-pan tick called the screen-bound
 clamp unconditionally, silently snapping any native-zoom pan back to the
 origin one frame after it was set — `tick_smooth_pan` now takes an
 `infinite` flag so it agrees with whichever clamp the gesture itself used.
+
+Eyedropper (`Ctrl+I`) is the first tool that reverts itself: it saves
+whatever tool was active, samples one pixel on click, then restores that
+tool — every other `DrawTool` stays armed after use. It reads the frozen
+`background_capture` (through the same `zoom.screen_to_canvas` mapping the
+renderer uses to draw it), so it tracks Static Zoom's pan/zoom correctly,
+but on a Whiteboard/Blackboard slate it samples the real screen underneath
+rather than the visible slate colour — sampling a slate isn't a real use
+case, so this was left rather than adding a guard for it. Esc or right-click
+cancels without changing the colour.
 
 ## F. Multi-monitor
 

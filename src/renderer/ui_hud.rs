@@ -515,6 +515,7 @@ impl D2DRenderer {
                 ("Shift+P", "Pink / Purple"),
                 ("C / I", "Cyan"),
                 ("Shift+W / Shift+B", "White Pen / Black Pen"),
+                ("Ctrl+I", "Eyedropper — click to pick a colour off the screen"),
                 ("", ""),
                 ("CANVAS MODES", ""),
                 ("W", "Whiteboard slate"),

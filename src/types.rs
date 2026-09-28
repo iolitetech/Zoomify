@@ -35,6 +35,9 @@ pub enum DrawTool {
     Text,
     StepBadge,
     Blur,
+    /// Transient: samples a colour off the (frozen) screen on click, then
+    /// restores whatever tool was active before it was armed.
+    Eyedropper,
 }
 
 impl DrawTool {
@@ -54,6 +57,7 @@ impl DrawTool {
             Self::Text => "Text",
             Self::StepBadge => "Step Badge",
             Self::Blur => "Redact (Blur)",
+            Self::Eyedropper => "Eyedropper",
         }
     }
 }
