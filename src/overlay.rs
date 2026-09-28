@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
@@ -107,6 +107,18 @@ const TIMER_ID_ANIMATION: usize = 1001;
 /// Upper bound on laser trail points held at once.
 const MAX_LASER_TRAIL_POINTS: usize = 160;
 
+/// Upper bound on undo_history/redo_history entries. Some history actions
+/// (TransformShapes, AddShape, Clear) store whole Shape clones, so without a
+/// cap a long editing session - especially one involving pasted images -
+/// would grow these indefinitely. See `OverlayWindow::record_undo`.
+const MAX_HISTORY_ENTRIES: usize = 200;
+
+/// How long a run of arrow-key nudges of the same selection may be apart and
+/// still count as one held-key burst, merged into a single undo entry. Key
+/// repeat is much faster than this in practice; the point is just to not
+/// merge two separate, deliberate taps of the arrow key days apart.
+const NUDGE_MERGE_WINDOW: Duration = Duration::from_millis(750);
+
 /// Posted to the tray host window whenever a Live Zoom session starts (wparam 1)
 /// or stops (wparam 0), so the host can claim / release the Ctrl+Up/Down/+/- keys.
 pub const WM_LIVE_ZOOM_STATE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 400;
@@ -139,6 +151,11 @@ pub struct OverlayWindow {
     pub shapes: Vec<Annotation>,
     pub undo_history: Vec<HistoryAction>,
     pub redo_history: Vec<HistoryAction>,
+    /// When the most recent arrow-key nudge landed and which shapes it moved,
+    /// so a run of key-repeat nudges of the same selection merges into the
+    /// burst's single history entry instead of pushing one per tick. See
+    /// `nudge_selection` and `NUDGE_MERGE_WINDOW`.
+    last_nudge: Option<(Instant, Vec<ShapeId>)>,
     /// Every board, including the active one — always at least one. The
     /// active board's slot (`boards[active_board]`) is stale while it's
     /// loaded: its live content is on `shapes`/`undo_history`/`redo_history`
@@ -346,6 +363,7 @@ impl OverlayWindow {
                 shapes: Vec::new(),
                 undo_history: Vec::new(),
                 redo_history: Vec::new(),
+                last_nudge: None,
                 boards: vec![Board::default()],
                 active_board: 0,
                 active_shape: None,
@@ -994,6 +1012,7 @@ impl OverlayWindow {
         self.shapes.clear();
         self.undo_history.clear();
         self.redo_history.clear();
+        self.last_nudge = None;
         self.boards = vec![Board::default()];
         self.active_board = 0;
         // The shapes that filled it are gone for good (not parked in undo
@@ -1317,6 +1336,31 @@ impl OverlayWindow {
         self.request_repaint();
     }
 
+    /// Push onto `undo_history`, dropping the oldest entry once it grows
+    /// past `MAX_HISTORY_ENTRIES`. Unbounded history is not just a slow leak:
+    /// `HistoryAction::TransformShapes`/`AddShape` store whole `Shape`
+    /// clones, so a pasted image held under a repeating arrow key (one
+    /// nudge, one history entry, per key-repeat tick) could otherwise grow
+    /// this by hundreds of megabytes a second for as long as the key stayed
+    /// down. Every `self.undo_history.push(...)` call site goes through this
+    /// instead of pushing directly.
+    fn record_undo(&mut self, action: HistoryAction) {
+        self.undo_history.push(action);
+        if self.undo_history.len() > MAX_HISTORY_ENTRIES {
+            self.undo_history.remove(0);
+        }
+    }
+
+    /// Same cap as `record_undo`, for symmetry - `redo_history` can only grow
+    /// by undoing, so it is already bounded by `undo_history`'s own cap, but
+    /// there is no reason to let it hold anything this cap would not.
+    fn record_redo(&mut self, action: HistoryAction) {
+        self.redo_history.push(action);
+        if self.redo_history.len() > MAX_HISTORY_ENTRIES {
+            self.redo_history.remove(0);
+        }
+    }
+
     pub fn push_shape(&mut self, shape: Shape) -> ShapeId {
         self.selection = None;
         let annotation = Annotation::new(shape);
@@ -1333,7 +1377,7 @@ impl OverlayWindow {
             },
             None => HistoryAction::AddShape(annotation),
         };
-        self.undo_history.push(action);
+        self.record_undo(action);
         self.redo_history.clear();
         id
     }
@@ -1343,13 +1387,13 @@ impl OverlayWindow {
             match action {
                 HistoryAction::AddShape(_) => {
                     if let Some(shape) = self.shapes.pop() {
-                        self.redo_history.push(HistoryAction::AddShape(shape));
+                        self.record_redo(HistoryAction::AddShape(shape));
                         self.set_toast("↩️", "Undo Shape");
                     }
                 }
                 HistoryAction::AddStepBadge { prev_counter, .. } => {
                     if let Some(shape) = self.shapes.pop() {
-                        self.redo_history.push(HistoryAction::AddStepBadge {
+                        self.record_redo(HistoryAction::AddStepBadge {
                             shape,
                             prev_counter,
                         });
@@ -1360,8 +1404,7 @@ impl OverlayWindow {
                 HistoryAction::DeleteShape { index, shape } => {
                     let insert_idx = index.min(self.shapes.len());
                     self.shapes.insert(insert_idx, shape.clone());
-                    self.redo_history
-                        .push(HistoryAction::DeleteShape { index, shape });
+                    self.record_redo(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↩️", "Restored Erased Shape");
                 }
                 HistoryAction::SetGroup { items } => {
@@ -1370,7 +1413,7 @@ impl OverlayWindow {
                             a.group = *before;
                         }
                     }
-                    self.redo_history.push(HistoryAction::SetGroup { items });
+                    self.record_redo(HistoryAction::SetGroup { items });
                     self.set_toast("↩️", "Undo Grouping");
                 }
                 HistoryAction::SetOpacity { items } => {
@@ -1379,15 +1422,14 @@ impl OverlayWindow {
                             a.opacity = *before;
                         }
                     }
-                    self.redo_history.push(HistoryAction::SetOpacity { items });
+                    self.record_redo(HistoryAction::SetOpacity { items });
                     self.set_toast("↩️", "Undo Opacity");
                 }
                 HistoryAction::Reorder { id, from, to } => {
                     if let Some(now) = self.shapes.iter().position(|a| a.id == id) {
                         let a = self.shapes.remove(now);
                         self.shapes.insert(from.min(self.shapes.len()), a);
-                        self.redo_history
-                            .push(HistoryAction::Reorder { id, from, to });
+                        self.record_redo(HistoryAction::Reorder { id, from, to });
                         self.set_toast("↩️", "Undo Reorder");
                     }
                 }
@@ -1397,13 +1439,12 @@ impl OverlayWindow {
                         let at = (*index).min(self.shapes.len());
                         self.shapes.insert(at, shape.clone());
                     }
-                    self.redo_history
-                        .push(HistoryAction::DeleteShapes { items });
+                    self.record_redo(HistoryAction::DeleteShapes { items });
                     self.set_toast("↩️", "Restored Deleted Annotation");
                 }
                 HistoryAction::Clear(prev_shapes) => {
                     let current_shapes = std::mem::replace(&mut self.shapes, prev_shapes);
-                    self.redo_history.push(HistoryAction::Clear(current_shapes));
+                    self.record_redo(HistoryAction::Clear(current_shapes));
                     self.set_toast("↩️", "Restored Cleared Canvas");
                 }
                 HistoryAction::TransformShapes { items } => {
@@ -1412,8 +1453,7 @@ impl OverlayWindow {
                             a.shape = before.clone();
                         }
                     }
-                    self.redo_history
-                        .push(HistoryAction::TransformShapes { items });
+                    self.record_redo(HistoryAction::TransformShapes { items });
                     self.set_toast("↩️", "Undo Edit");
                 }
             }
@@ -1428,7 +1468,7 @@ impl OverlayWindow {
             match action {
                 HistoryAction::AddShape(shape) => {
                     self.shapes.push(shape.clone());
-                    self.undo_history.push(HistoryAction::AddShape(shape));
+                    self.record_undo(HistoryAction::AddShape(shape));
                     self.set_toast("↪️", "Redo Shape");
                 }
                 HistoryAction::AddStepBadge {
@@ -1437,7 +1477,7 @@ impl OverlayWindow {
                 } => {
                     self.shapes.push(shape.clone());
                     self.step_counter = prev_counter + 1;
-                    self.undo_history.push(HistoryAction::AddStepBadge {
+                    self.record_undo(HistoryAction::AddStepBadge {
                         shape,
                         prev_counter,
                     });
@@ -1449,8 +1489,7 @@ impl OverlayWindow {
                     } else if !self.shapes.is_empty() {
                         self.shapes.pop();
                     }
-                    self.undo_history
-                        .push(HistoryAction::DeleteShape { index, shape });
+                    self.record_undo(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↪️", "Re-erased Shape");
                 }
                 HistoryAction::SetGroup { items } => {
@@ -1459,7 +1498,7 @@ impl OverlayWindow {
                             a.group = *after;
                         }
                     }
-                    self.undo_history.push(HistoryAction::SetGroup { items });
+                    self.record_undo(HistoryAction::SetGroup { items });
                     self.set_toast("↪️", "Redo Grouping");
                 }
                 HistoryAction::SetOpacity { items } => {
@@ -1468,15 +1507,14 @@ impl OverlayWindow {
                             a.opacity = *after;
                         }
                     }
-                    self.undo_history.push(HistoryAction::SetOpacity { items });
+                    self.record_undo(HistoryAction::SetOpacity { items });
                     self.set_toast("↪️", "Redo Opacity");
                 }
                 HistoryAction::Reorder { id, from, to } => {
                     if let Some(now) = self.shapes.iter().position(|a| a.id == id) {
                         let a = self.shapes.remove(now);
                         self.shapes.insert(to.min(self.shapes.len()), a);
-                        self.undo_history
-                            .push(HistoryAction::Reorder { id, from, to });
+                        self.record_undo(HistoryAction::Reorder { id, from, to });
                         self.set_toast("↪️", "Redo Reorder");
                     }
                 }
@@ -1487,13 +1525,12 @@ impl OverlayWindow {
                             self.shapes.remove(*index);
                         }
                     }
-                    self.undo_history
-                        .push(HistoryAction::DeleteShapes { items });
+                    self.record_undo(HistoryAction::DeleteShapes { items });
                     self.set_toast("↪️", "Re-deleted Annotation");
                 }
                 HistoryAction::Clear(_prev_shapes) => {
                     let current_shapes = std::mem::take(&mut self.shapes);
-                    self.undo_history.push(HistoryAction::Clear(current_shapes));
+                    self.record_undo(HistoryAction::Clear(current_shapes));
                     self.set_toast("↪️", "Re-cleared Canvas");
                 }
                 HistoryAction::TransformShapes { items } => {
@@ -1502,8 +1539,7 @@ impl OverlayWindow {
                             a.shape = after.clone();
                         }
                     }
-                    self.undo_history
-                        .push(HistoryAction::TransformShapes { items });
+                    self.record_undo(HistoryAction::TransformShapes { items });
                     self.set_toast("↪️", "Redo Edit");
                 }
             }
@@ -1516,7 +1552,7 @@ impl OverlayWindow {
     pub fn clear_all(&mut self) {
         if !self.shapes.is_empty() {
             let old = std::mem::take(&mut self.shapes);
-            self.undo_history.push(HistoryAction::Clear(old));
+            self.record_undo(HistoryAction::Clear(old));
             self.redo_history.clear();
             self.selection = None;
             self.set_toast("🧹", "Canvas Cleared (Ctrl+Z to Undo)");
@@ -1555,6 +1591,9 @@ impl OverlayWindow {
         self.active_shape = None;
         self.is_drawing = false;
         self.snap_guides.clear();
+        // A different board's undo_history is now live; a merge check against
+        // the previous board's last entry would be meaningless at best.
+        self.last_nudge = None;
 
         self.set_toast(
             "📑",
@@ -1581,6 +1620,7 @@ impl OverlayWindow {
         self.active_shape = None;
         self.is_drawing = false;
         self.snap_guides.clear();
+        self.last_nudge = None;
 
         self.set_toast(
             "📑",
@@ -1617,6 +1657,7 @@ impl OverlayWindow {
         self.active_shape = None;
         self.is_drawing = false;
         self.snap_guides.clear();
+        self.last_nudge = None;
 
         self.set_toast(
             "📑",
@@ -2093,8 +2134,7 @@ impl OverlayWindow {
             }
         }
         if !items.is_empty() {
-            self.undo_history
-                .push(HistoryAction::TransformShapes { items });
+            self.record_undo(HistoryAction::TransformShapes { items });
             self.redo_history.clear();
         }
         // Shrinking a box below its label would clip words, so it grows back.
@@ -2159,8 +2199,7 @@ impl OverlayWindow {
             return false;
         }
         items.reverse();
-        self.undo_history
-            .push(HistoryAction::DeleteShapes { items });
+        self.record_undo(HistoryAction::DeleteShapes { items });
         self.redo_history.clear();
         self.settle_bindings();
         true
@@ -2173,7 +2212,7 @@ impl OverlayWindow {
             return;
         }
         let mut items: Vec<(ShapeId, Shape, Shape)> = Vec::new();
-        for id in ids {
+        for &id in &ids {
             let Some(index) = self.annotation_index(id) else {
                 continue;
             };
@@ -2186,9 +2225,36 @@ impl OverlayWindow {
         if items.is_empty() {
             return;
         }
-        self.undo_history
-            .push(HistoryAction::TransformShapes { items });
-        self.redo_history.clear();
+
+        // An arrow key held down fires this once per key-repeat tick. Treat a
+        // fast-enough run of nudges of the same selection as one gesture:
+        // fold this tick's result into the burst's existing history entry
+        // instead of pushing (and cloning every selected Shape into) a new
+        // one, so holding the key for a second costs one undo step and one
+        // set of Shape clones, not dozens.
+        let now = Instant::now();
+        let same_burst = self.last_nudge.as_ref().is_some_and(|(t, prev_ids)| {
+            now.duration_since(*t) < NUDGE_MERGE_WINDOW && *prev_ids == ids
+        });
+        let merged = same_burst
+            && if let Some(HistoryAction::TransformShapes { items: last_items }) =
+                self.undo_history.last_mut()
+            {
+                for (id, _before, after) in &items {
+                    if let Some(slot) = last_items.iter_mut().find(|(lid, _, _)| lid == id) {
+                        slot.2 = after.clone();
+                    }
+                }
+                true
+            } else {
+                false
+            };
+        if !merged {
+            self.record_undo(HistoryAction::TransformShapes { items });
+            self.redo_history.clear();
+        }
+        self.last_nudge = Some((now, ids));
+
         self.settle_bindings();
         self.request_repaint();
     }
@@ -2219,7 +2285,7 @@ impl OverlayWindow {
         else {
             return false;
         };
-        self.undo_history.push(HistoryAction::DeleteShape {
+        self.record_undo(HistoryAction::DeleteShape {
             index,
             shape: annotation,
         });
@@ -2351,8 +2417,7 @@ impl OverlayWindow {
         if items.is_empty() {
             return;
         }
-        self.undo_history
-            .push(HistoryAction::TransformShapes { items });
+        self.record_undo(HistoryAction::TransformShapes { items });
         self.redo_history.clear();
         self.settle_bindings();
         self.set_toast("↔", label);
@@ -2387,7 +2452,7 @@ impl OverlayWindow {
             return;
         }
         let shown = items[0].2;
-        self.undo_history.push(HistoryAction::SetOpacity { items });
+        self.record_undo(HistoryAction::SetOpacity { items });
         self.redo_history.clear();
         self.set_toast("◑", format!("Opacity {:.0}%", shown * 100.0));
         self.request_repaint();
@@ -2454,8 +2519,7 @@ impl OverlayWindow {
             return 0;
         }
         let n = items.len();
-        self.undo_history
-            .push(HistoryAction::TransformShapes { items });
+        self.record_undo(HistoryAction::TransformShapes { items });
         self.redo_history.clear();
         // A label's box may need to grow if its text just got bigger.
         for id in self.selected_ids() {
@@ -2488,8 +2552,7 @@ impl OverlayWindow {
         if items.is_empty() {
             return;
         }
-        self.undo_history
-            .push(HistoryAction::TransformShapes { items });
+        self.record_undo(HistoryAction::TransformShapes { items });
         self.redo_history.clear();
         self.request_repaint();
     }
@@ -2530,8 +2593,7 @@ impl OverlayWindow {
             self.set_toast("◑", "Select an arrow first");
             return;
         }
-        self.undo_history
-            .push(HistoryAction::TransformShapes { items });
+        self.record_undo(HistoryAction::TransformShapes { items });
         self.redo_history.clear();
         if let Some(h) = shown {
             self.set_toast("➤", format!("Arrowhead: {}", h.name()));
@@ -2592,7 +2654,7 @@ impl OverlayWindow {
             return;
         }
         let n = items.len();
-        self.undo_history.push(HistoryAction::SetGroup { items });
+        self.record_undo(HistoryAction::SetGroup { items });
         self.redo_history.clear();
         self.set_toast(
             "🔗",
@@ -2625,8 +2687,7 @@ impl OverlayWindow {
         }
         let a = self.shapes.remove(from);
         self.shapes.insert(to, a);
-        self.undo_history
-            .push(HistoryAction::Reorder { id, from, to });
+        self.record_undo(HistoryAction::Reorder { id, from, to });
         self.redo_history.clear();
         let (icon, label) = if to_front {
             ("⬆", "Brought to Front")
@@ -2664,10 +2725,10 @@ impl OverlayWindow {
         });
 
         self.shapes.push(copy.clone());
-        self.undo_history.push(HistoryAction::AddShape(copy));
+        self.record_undo(HistoryAction::AddShape(copy));
         if let Some(l) = label_copy {
             self.shapes.push(l.clone());
-            self.undo_history.push(HistoryAction::AddShape(l));
+            self.record_undo(HistoryAction::AddShape(l));
         }
         self.redo_history.clear();
 
@@ -2941,7 +3002,7 @@ impl OverlayWindow {
             pixels: ImagePixels {
                 width: img_w,
                 height: img_h,
-                bgra,
+                bgra: bgra.into(),
             },
         })
     }
@@ -2995,7 +3056,7 @@ impl OverlayWindow {
             )) => {
                 if let Some(index) = self.annotation_index(id) {
                     let removed = self.shapes.remove(index);
-                    self.undo_history.push(HistoryAction::DeleteShape {
+                    self.record_undo(HistoryAction::DeleteShape {
                         index,
                         shape: removed,
                     });
@@ -3196,7 +3257,7 @@ impl OverlayWindow {
                 let count = sess.shapes.len();
                 let background = sess.background_enum();
                 let previous = std::mem::replace(&mut self.shapes, sess.shapes);
-                self.undo_history.push(HistoryAction::Clear(previous));
+                self.record_undo(HistoryAction::Clear(previous));
                 self.redo_history.clear();
                 self.selection = None;
                 self.active_shape = None;

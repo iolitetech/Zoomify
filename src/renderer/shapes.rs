@@ -15,8 +15,8 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-    D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1Brush, ID2D1Factory, ID2D1PathGeometry,
-    ID2D1RenderTarget, ID2D1StrokeStyle,
+    D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1Brush, ID2D1Factory, ID2D1PathGeometry, ID2D1RenderTarget,
+    ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
@@ -180,7 +180,8 @@ impl D2DRenderer {
                                 let stroke_style = self.get_stroke_style(*pattern);
                                 rt.DrawGeometry(&path, &brush, actual_width, Some(stroke_style));
                             }
-                        } else if let Some(path) = Self::build_stroke_geometry(&self.factory, points)
+                        } else if let Some(path) =
+                            Self::build_stroke_geometry(&self.factory, points)
                         {
                             let stroke_style = self.get_stroke_style(*pattern);
                             rt.DrawGeometry(&path, &brush, actual_width, Some(stroke_style));

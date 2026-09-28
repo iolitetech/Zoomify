@@ -911,8 +911,7 @@ impl D2DRenderer {
                 && zoom_state.level > 1.05
                 && (mode == AppMode::StaticZoom || mode == AppMode::Draw)
             {
-                let infinite =
-                    mode == AppMode::Draw && bg_type != CanvasBackground::Transparent;
+                let infinite = mode == AppMode::Draw && bg_type != CanvasBackground::Transparent;
                 self.render_minimap(rt, width, height, bg_bitmap, zoom_state, minimap, infinite);
             }
 

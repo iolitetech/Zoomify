@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -606,7 +607,13 @@ pub enum Shape {
 pub struct ImagePixels {
     pub width: u32,
     pub height: u32,
-    pub bgra: Vec<u8>,
+    /// `Arc` rather than `Vec`: an `Annotation::clone()` (drag preview, undo
+    /// snapshot, duplicate) is otherwise a full pixel-buffer memcpy — tens of
+    /// megabytes for one paste, done twice per mouse move while dragging a
+    /// pasted image and again for every undo entry. Cloning the `Arc` is O(1)
+    /// and shares the same buffer until something actually needs to write to
+    /// it (nothing does today; pixels are set once, at paste/load time).
+    pub bgra: Arc<[u8]>,
 }
 
 impl ImagePixels {
@@ -751,7 +758,7 @@ impl<'de> Deserialize<'de> for ImagePixels {
         Ok(Self {
             width: raw.width,
             height: raw.height,
-            bgra,
+            bgra: bgra.into(),
         })
     }
 }
@@ -2552,7 +2559,7 @@ mod tests {
         let img = ImagePixels {
             width: 3,
             height: 2,
-            bgra,
+            bgra: bgra.into(),
         };
         let json = serde_json::to_string(&img).unwrap();
         // The wire format is base64, not a huge JSON array of numbers.
@@ -2576,15 +2583,20 @@ mod tests {
         let a = ImagePixels {
             width: 4,
             height: 4,
-            bgra: vec![10u8; 4 * 4 * 4],
+            bgra: vec![10u8; 4 * 4 * 4].into(),
         };
         let b = ImagePixels {
             width: 4,
             height: 4,
-            bgra: vec![10u8; 4 * 4 * 4],
+            bgra: vec![10u8; 4 * 4 * 4].into(),
         };
-        let mut c = b.clone();
-        c.bgra[0] = 200;
+        let mut raw = b.bgra.to_vec();
+        raw[0] = 200;
+        let c = ImagePixels {
+            width: b.width,
+            height: b.height,
+            bgra: raw.into(),
+        };
 
         assert_eq!(
             a.cache_key(),
