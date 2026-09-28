@@ -798,6 +798,14 @@ pub struct TextEditorState {
     pub is_italic: bool,
     pub card_style: TextCardStyle,
     pub font_family: TextFontFamily,
+    /// The annotation this editor is re-editing, if any - lifted out of
+    /// `shapes` (by `reopen_selected_text`/`edit_container_label`) to start
+    /// the edit, and put back on commit or cancel rather than being
+    /// discarded. `None` for a brand-new text with nothing to go back to.
+    /// Carrying the *whole* original (not just its text) is what lets commit
+    /// restore the same id, group, opacity and any arrow bound to it instead
+    /// of minting a fresh annotation that nothing else recognises any more.
+    pub original: Option<Annotation>,
 }
 
 impl TextEditorState {
@@ -823,6 +831,7 @@ impl TextEditorState {
             is_italic,
             card_style,
             font_family,
+            original: None,
         }
     }
 

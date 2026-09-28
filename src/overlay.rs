@@ -988,6 +988,13 @@ impl OverlayWindow {
     }
 
     pub fn exit_overlay(&mut self) {
+        // An edit still open when the overlay closes (global hotkey toggling
+        // the mode off, the toolbar's Close button, the Timer's close
+        // button) used to be dropped here with a bare `text_editor = None`,
+        // silently losing whatever was typed - and for a re-opened text,
+        // losing the original too, recoverable only via Ctrl+Z. Committing
+        // it also means autosave (right below) actually captures it.
+        self.commit_text_editor();
         self.save_config();
         // Capture the canvas before teardown clears it.
         if crate::config::AppConfig::load().autosave_sessions {
@@ -1004,7 +1011,6 @@ impl OverlayWindow {
         self.is_drawing = false;
         self.active_shape = None;
         self.selection = None;
-        self.text_editor = None;
         self.show_cheat_sheet = false;
         self.background_bitmap = None;
         self.background_capture = None;
@@ -2286,11 +2292,14 @@ impl OverlayWindow {
         else {
             return false;
         };
-        self.record_undo(HistoryAction::DeleteShape {
-            index,
-            shape: annotation,
-        });
-        self.redo_history.clear();
+        // No history entry yet: commit_text_editor()/cancel_text_editor()
+        // decide what actually happened (edited, cleared to nothing, or
+        // cancelled) and record exactly one entry for it, using `original`
+        // below to put things back either way. Recording a delete here too,
+        // as this used to, meant an edit that was committed cost two
+        // separate undo steps instead of one, and an edit that was
+        // interrupted by exit/load (which used to skip commit entirely) lost
+        // the original with no history entry at all.
         self.selection = None;
 
         let mut editor = TextEditorState::new(
@@ -2304,26 +2313,45 @@ impl OverlayWindow {
         );
         editor.cursor = text.len();
         editor.text = text;
+        editor.original = Some(annotation);
         self.text_editor = Some(editor);
         self.set_toast("✏️", "Editing Text (Esc to finish)");
         self.request_repaint();
         true
     }
 
+    /// Finish whatever text edit is in progress: a brand-new text/label goes
+    /// in as a fresh annotation exactly as before; re-committing an existing
+    /// one (`editor.original` is `Some`) keeps its id, group, opacity and any
+    /// binding to it, and is recorded as one `TransformShapes` undo step
+    /// instead of the delete-then-add pair this used to be two of. Called
+    /// from every mode-entry/board-switch point and, since the P3-2 fix,
+    /// from `exit_overlay`/`load_session_from` too - so an edit in progress
+    /// when the overlay closes or a session loads is committed rather than
+    /// silently discarded.
     pub fn commit_text_editor(&mut self) {
-        if let Some(editor) = self.text_editor.take() {
-            if !editor.text.trim().is_empty() {
+        let Some(editor) = self.text_editor.take() else {
+            return;
+        };
+        let is_empty = editor.text.trim().is_empty();
+        let new_shape = Shape::Text {
+            origin: editor.origin,
+            text: editor.text,
+            font_size: editor.font_size,
+            color: editor.color,
+            is_bold: editor.is_bold,
+            is_italic: editor.is_italic,
+            card_style: editor.card_style,
+            font_family: editor.font_family,
+        };
+
+        match (editor.original, is_empty) {
+            (None, true) => {
+                // Nothing was ever there, and nothing was typed.
+            }
+            (None, false) => {
                 let container = editor.container;
-                let id = self.push_shape(Shape::Text {
-                    origin: editor.origin,
-                    text: editor.text,
-                    font_size: editor.font_size,
-                    color: editor.color,
-                    is_bold: editor.is_bold,
-                    is_italic: editor.is_italic,
-                    card_style: editor.card_style,
-                    font_family: editor.font_family,
-                });
+                let id = self.push_shape(new_shape);
                 if let Some(cid) = container {
                     if self.annotation(cid).is_some() {
                         if let Some(a) = self.shapes.iter_mut().find(|a| a.id == id) {
@@ -2339,8 +2367,49 @@ impl OverlayWindow {
                     }
                 }
             }
-            self.request_repaint();
+            (Some(orig), true) => {
+                // Cleared to nothing and confirmed: treated as an explicit
+                // delete of the original, in one undo step.
+                self.record_undo(HistoryAction::DeleteShape {
+                    index: self.shapes.len(),
+                    shape: orig,
+                });
+                self.redo_history.clear();
+            }
+            (Some(mut orig), false) => {
+                let before_shape = orig.shape.clone();
+                let id = orig.id;
+                let container_alive = editor
+                    .container
+                    .is_some_and(|cid| self.annotation(cid).is_some());
+                orig.container = editor.container.filter(|_| container_alive);
+                orig.shape = new_shape.clone();
+                self.shapes.push(orig);
+                if let Some(cid) = editor.container.filter(|_| container_alive) {
+                    self.grow_container_to_fit(cid);
+                }
+                self.record_undo(HistoryAction::TransformShapes {
+                    items: vec![(id, before_shape, new_shape)],
+                });
+                self.redo_history.clear();
+            }
         }
+        self.settle_bindings();
+        self.request_repaint();
+    }
+
+    /// Cancel an in-progress text edit (right-click), putting back exactly
+    /// what `reopen_selected_text`/`edit_container_label` removed rather than
+    /// committing whatever was typed. A brand-new text has nothing to put
+    /// back, so this is a no-op beyond closing the editor for it.
+    fn cancel_text_editor(&mut self) {
+        if let Some(editor) = self.text_editor.take()
+            && let Some(orig) = editor.original
+        {
+            self.shapes.push(orig);
+            self.settle_bindings();
+        }
+        self.request_repaint();
     }
 
     /// Line the selection up, or spread it evenly.
@@ -3034,51 +3103,56 @@ impl OverlayWindow {
         let owner_shape = owner.shape.clone();
         let bounds = shape_bounds(&owner_shape);
 
-        // An existing label is lifted out and put back on commit, so editing
-        // and creating follow exactly the same path.
-        let existing = self.label_of(container).map(|a| (a.id, a.shape.clone()));
-        let (text, font_size, color, is_bold, is_italic, card_style, font_family) = match existing {
-            Some((
-                id,
-                Shape::Text {
-                    text,
-                    font_size,
-                    color,
-                    is_bold,
-                    is_italic,
-                    card_style,
-                    font_family,
-                    ..
-                },
-            )) => {
-                if let Some(index) = self.annotation_index(id) {
-                    let removed = self.shapes.remove(index);
-                    self.record_undo(HistoryAction::DeleteShape {
-                        index,
-                        shape: removed,
-                    });
-                    self.redo_history.clear();
+        // An existing label is lifted out and put back on commit or cancel,
+        // so editing and creating follow exactly the same path. No history
+        // entry yet - commit_text_editor()/cancel_text_editor() record
+        // exactly one, using `original` below, the same as re-editing a
+        // free-floating text.
+        let existing_label_id = self.label_of(container).map(|a| a.id);
+        let removed = existing_label_id
+            .and_then(|id| self.annotation_index(id).map(|idx| self.shapes.remove(idx)));
+        let (text, font_size, color, is_bold, is_italic, card_style, font_family, original) =
+            match removed {
+                Some(annotation) => {
+                    let Shape::Text {
+                        text,
+                        font_size,
+                        color,
+                        is_bold,
+                        is_italic,
+                        card_style,
+                        font_family,
+                        ..
+                    } = annotation.shape.clone()
+                    else {
+                        // label_of only ever returns Shape::Text, so this
+                        // should not happen - but if it somehow did, don't
+                        // just drop what was removed.
+                        self.shapes.push(annotation);
+                        return false;
+                    };
+                    (
+                        text,
+                        font_size,
+                        color,
+                        is_bold,
+                        is_italic,
+                        card_style,
+                        font_family,
+                        Some(annotation),
+                    )
                 }
-                (
-                    text,
-                    font_size,
-                    color,
-                    is_bold,
-                    is_italic,
-                    card_style,
-                    font_family,
-                )
-            }
-            _ => (
-                String::new(),
-                self.font_size,
-                self.current_color,
-                self.text_is_bold,
-                self.text_is_italic,
-                self.text_card_style,
-                self.text_font_family,
-            ),
-        };
+                None => (
+                    String::new(),
+                    self.font_size,
+                    self.current_color,
+                    self.text_is_bold,
+                    self.text_is_italic,
+                    self.text_card_style,
+                    self.text_font_family,
+                    None,
+                ),
+            };
 
         let mut editor = TextEditorState::new(
             Point2D::new(bounds.0, bounds.1),
@@ -3094,6 +3168,7 @@ impl OverlayWindow {
         editor.container = Some(container);
         editor.container_bounds = Some(bounds);
         editor.container_wraps = !label_rides_on_shape(&owner_shape);
+        editor.original = original;
         self.text_editor = Some(editor);
         self.selection = None;
         self.set_toast("✏️", "Label (Esc to finish)");
@@ -3287,6 +3362,12 @@ impl OverlayWindow {
 
     /// Replace the canvas with a saved session. Undoable in one step.
     pub fn load_session_from(&mut self, path: &std::path::Path) {
+        // An edit still open when a session loads used to be dropped with a
+        // bare `text_editor = None` after the swap below had already
+        // replaced self.shapes - so even a successful commit would have
+        // landed on the *new* board instead of the one being replaced.
+        // Commit first, while it still belongs to whatever was showing.
+        self.commit_text_editor();
         match crate::session::load(path) {
             Ok(sess) => {
                 let mut boards_shapes = sess.boards_or_single();
@@ -3319,7 +3400,6 @@ impl OverlayWindow {
 
                 self.selection = None;
                 self.active_shape = None;
-                self.text_editor = None;
                 self.is_drawing = false;
                 self.background_type = background;
                 self.step_counter = sess.step_counter;
@@ -5138,8 +5218,7 @@ impl OverlayWindow {
                 WM_RBUTTONDOWN => {
                     // If text editor is active, right click cancels text editor
                     if this.text_editor.is_some() {
-                        this.text_editor = None;
-                        this.request_repaint();
+                        this.cancel_text_editor();
                         return LRESULT(0);
                     }
                     // If drawing in progress, right click cancels active drawing
@@ -5395,7 +5474,8 @@ impl OverlayWindow {
                     // ── Text editor intercepts all keys first ──
                     if this.text_editor.is_some() {
                         if key == VK_ESCAPE.0 as i32 {
-                            // Esc keeps what was typed; right-click discards.
+                            // Esc commits what was typed; right-click
+                            // (cancel_text_editor) discards it instead.
                             this.commit_text_editor();
                             return LRESULT(0);
                         } else if key == VK_RETURN.0 as i32 {
