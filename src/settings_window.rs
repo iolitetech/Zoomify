@@ -33,10 +33,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
     GetClientRect, GetWindowLongPtrW, IDC_ARROW, IDC_HAND, LoadCursorW, PostMessageW,
-    RegisterClassExW, SW_HIDE, SW_SHOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
-    ShowWindow, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY,
-    WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION, WS_EX_APPWINDOW,
-    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    RegisterClassExW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR,
+    WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_OVERLAPPED,
+    WS_SYSMENU,
 };
 use windows::core::{PCWSTR, Result, w};
 use windows_numerics::Vector2;
@@ -387,6 +388,14 @@ impl SettingsWindow {
         }
     }
 
+    /// Physical pixels per DIP for this window right now (1.0 at 100%
+    /// scaling). Every layout constant this window hit-tests and draws
+    /// against is in DIPs; window messages hand back physical pixels.
+    fn dpi_scale(&self) -> f32 {
+        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd) };
+        if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
+    }
+
     unsafe extern "system" fn wnd_proc(
         hwnd: HWND,
         msg: u32,
@@ -425,8 +434,17 @@ impl SettingsWindow {
                 }
 
                 WM_MOUSEMOVE => {
-                    let x = (lparam.0 & 0xFFFF) as i16 as f32;
-                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+                    // lParam is physical pixels; every layout constant this
+                    // window hit-tests against (CLIENT_WIDTH, BTN_Y, ...) is
+                    // in DIPs, which the render target's SetDpi already
+                    // scales up to draw. Above 100% scaling, skipping this
+                    // conversion hit-tested against the wrong control
+                    // entirely - clicking a visible button could land on
+                    // whatever DIP-space control happened to sit at that
+                    // larger physical coordinate.
+                    let s = this.dpi_scale();
+                    let x = (lparam.0 & 0xFFFF) as i16 as f32 / s;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32 / s;
                     let prev_hover = this.hover_item.clone();
                     this.update_hover(x, y);
                     if this.hover_item != prev_hover {
@@ -436,8 +454,9 @@ impl SettingsWindow {
                 }
 
                 WM_LBUTTONDOWN => {
-                    let x = (lparam.0 & 0xFFFF) as i16 as f32;
-                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+                    let s = this.dpi_scale();
+                    let x = (lparam.0 & 0xFFFF) as i16 as f32 / s;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32 / s;
                     this.handle_click(x, y);
                     LRESULT(0)
                 }
@@ -489,6 +508,28 @@ impl SettingsWindow {
                             return LRESULT(0);
                         }
                     }
+                    LRESULT(0)
+                }
+
+                WM_DPICHANGED => {
+                    // The suggested rect already accounts for the new
+                    // monitor's DPI, keeping the window in place on whatever
+                    // monitor it was just dragged to. Resize to it, then
+                    // rebuild the render target so SetDpi and the pixel
+                    // size both match; the DIP-space layout constants
+                    // everything else hit-tests against need no change.
+                    let suggested = &*(lparam.0 as *const RECT);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                    let _ = this.init_render_target();
+                    this.request_repaint();
                     LRESULT(0)
                 }
 
