@@ -1311,12 +1311,19 @@ impl ZoomState {
         self.view_y = self.target_view_y;
     }
 
+    /// `infinite` picks the same clamp `tick_smooth_pan` does: pass true only
+    /// for Draw mode on a Whiteboard/Blackboard background (the same
+    /// condition used everywhere else an infinite-canvas pan applies).
+    /// Getting this wrong for a gesture that changed the view is exactly what
+    /// silently snaps an infinite-canvas pan back onto the screen — see that
+    /// method's doc comment.
     pub fn set_zoom_centered(
         &mut self,
         new_level: f32,
         center_screen: Point2D,
         screen_w: f32,
         screen_h: f32,
+        infinite: bool,
     ) {
         let old_z = self.level.max(1.0);
         let new_z = new_level.clamp(1.0, 10.0);
@@ -1329,24 +1336,34 @@ impl ZoomState {
         self.level = new_z;
 
         // New viewport top-left so that canvas_cx remains under center_screen
-        let new_view_w = screen_w / new_z;
-        let new_view_h = screen_h / new_z;
-        let max_x = (screen_w - new_view_w).max(0.0);
-        let max_y = (screen_h - new_view_h).max(0.0);
-
-        self.view_x = (canvas_cx - center_screen.x / new_z).clamp(0.0, max_x);
-        self.view_y = (canvas_cy - center_screen.y / new_z).clamp(0.0, max_y);
+        self.view_x = canvas_cx - center_screen.x / new_z;
+        self.view_y = canvas_cy - center_screen.y / new_z;
         self.target_view_x = self.view_x;
         self.target_view_y = self.view_y;
+        if infinite {
+            self.clamp_viewport_infinite(screen_w, screen_h);
+        } else {
+            self.clamp_viewport(screen_w, screen_h);
+        }
     }
 
-    pub fn center_on_canvas_point(&mut self, canvas_pt: Point2D, screen_w: f32, screen_h: f32) {
+    pub fn center_on_canvas_point(
+        &mut self,
+        canvas_pt: Point2D,
+        screen_w: f32,
+        screen_h: f32,
+        infinite: bool,
+    ) {
         let z = self.level.max(1.0);
         let view_w = screen_w / z;
         let view_h = screen_h / z;
         self.target_view_x = canvas_pt.x - (view_w / 2.0);
         self.target_view_y = canvas_pt.y - (view_h / 2.0);
-        self.clamp_viewport(screen_w, screen_h);
+        if infinite {
+            self.clamp_viewport_infinite(screen_w, screen_h);
+        } else {
+            self.clamp_viewport(screen_w, screen_h);
+        }
         self.view_x = self.target_view_x;
         self.view_y = self.target_view_y;
     }
@@ -1620,11 +1637,18 @@ impl MinimapState {
     }
 
     /// Returns the viewport indicator rect on the minimap: (left, top, right, bottom).
+    /// `infinite`: pass true when the viewport being shown is Draw mode's
+    /// infinite-canvas pan (Whiteboard/Blackboard). A pan past the screen
+    /// edge then produces `norm_x`/`norm_y` outside `[0, 1]` rather than being
+    /// clamped into it — clamping here used to hide the out-of-bounds state
+    /// entirely by pinning the indicator to the preview's edge, drawing it as
+    /// if the view were still on-screen when it was not.
     pub fn get_viewport_rect(
         &self,
         screen_w: f32,
         screen_h: f32,
         zoom: &ZoomState,
+        infinite: bool,
     ) -> (f32, f32, f32, f32) {
         let (il, it, ir, ib) = self.get_inner_preview_rect(screen_w, screen_h);
         let iw = (ir - il).max(1.0);
@@ -1632,12 +1656,14 @@ impl MinimapState {
 
         let z = zoom.level.max(1.0);
         let norm_x = if screen_w > 0.0 {
-            (zoom.view_x / screen_w).clamp(0.0, 1.0)
+            let n = zoom.view_x / screen_w;
+            if infinite { n } else { n.clamp(0.0, 1.0) }
         } else {
             0.0
         };
         let norm_y = if screen_h > 0.0 {
-            (zoom.view_y / screen_h).clamp(0.0, 1.0)
+            let n = zoom.view_y / screen_h;
+            if infinite { n } else { n.clamp(0.0, 1.0) }
         } else {
             0.0
         };
@@ -1646,8 +1672,16 @@ impl MinimapState {
 
         let vp_l = il + norm_x * iw;
         let vp_t = it + norm_y * ih;
-        let vp_r = (vp_l + norm_w * iw).min(ir);
-        let vp_b = (vp_t + norm_h * ih).min(ib);
+        let vp_r = if infinite {
+            vp_l + norm_w * iw
+        } else {
+            (vp_l + norm_w * iw).min(ir)
+        };
+        let vp_b = if infinite {
+            vp_t + norm_h * ih
+        } else {
+            (vp_t + norm_h * ih).min(ib)
+        };
         (vp_l, vp_t, vp_r, vp_b)
     }
 
@@ -2845,7 +2879,7 @@ mod tests {
         let screen_h = 1080.0;
         let center = Point2D::new(960.0, 540.0);
 
-        zoom.set_zoom_centered(2.0, center, screen_w, screen_h);
+        zoom.set_zoom_centered(2.0, center, screen_w, screen_h, false);
         assert_eq!(zoom.level, 2.0);
         assert_eq!(zoom.view_x, 480.0); // 960 - 960/2
         assert_eq!(zoom.view_y, 270.0); // 540 - 540/2
@@ -3633,7 +3667,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (vl, vt, vr, vb) = minimap.get_viewport_rect(sw, sh, &zoom);
+        let (vl, vt, vr, vb) = minimap.get_viewport_rect(sw, sh, &zoom, false);
         let (il, it, ir, ib) = minimap.get_inner_preview_rect(sw, sh);
         let iw = ir - il;
         let ih = ib - it;
@@ -3652,7 +3686,7 @@ mod tests {
         assert!((click_pt.y - 540.0).abs() < 1.0);
 
         // Center on canvas point test
-        zoom.center_on_canvas_point(click_pt, sw, sh);
+        zoom.center_on_canvas_point(click_pt, sw, sh, false);
         assert!((zoom.view_x - 480.0).abs() < 1.0);
         assert!((zoom.view_y - 270.0).abs() < 1.0);
     }

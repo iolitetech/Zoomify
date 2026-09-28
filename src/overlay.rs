@@ -611,6 +611,7 @@ impl OverlayWindow {
             cursor_screen,
             self.logical_w(),
             self.logical_h(),
+            false, // entering StaticZoom, which never uses the infinite-canvas clamp
         );
         self.mode = AppMode::StaticZoom;
         self.loupe.active = false;
@@ -4267,7 +4268,10 @@ impl OverlayWindow {
                     {
                         if this.minimap.is_dragging {
                             let target_canvas = this.minimap.minimap_pt_to_canvas_pt(sw, sh, x, y);
-                            this.zoom.center_on_canvas_point(target_canvas, sw, sh);
+                            let infinite = this.mode == AppMode::Draw
+                                && this.background_type != CanvasBackground::Transparent;
+                            this.zoom
+                                .center_on_canvas_point(target_canvas, sw, sh, infinite);
                             this.request_repaint();
                             return LRESULT(0);
                         }
@@ -4399,10 +4403,17 @@ impl OverlayWindow {
                     }
 
                     if (this.mode == AppMode::StaticZoom
-                        || (this.mode == AppMode::Draw && this.zoom.level > 1.001))
+                        || (this.mode == AppMode::Draw
+                            && this.zoom.level > 1.001
+                            && this.background_type == CanvasBackground::Transparent))
                         && !this.is_drawing
                         && !this.zoom.is_dragging
                     {
+                        // update_target_from_cursor() always recenters the view on the
+                        // screen-bound range - correct for a live screen capture, but on
+                        // a Whiteboard/Blackboard (infinite canvas) it overwrites a
+                        // middle-mouse pan that deliberately sits past the screen edge,
+                        // snapping it back the instant the mouse moves.
                         this.zoom.update_target_from_cursor(x, y, sw, sh);
                         this.request_repaint();
                         return LRESULT(0);
@@ -4563,7 +4574,10 @@ impl OverlayWindow {
                         && this.minimap.hit_test(sw, sh, x, y)
                     {
                         let target_canvas = this.minimap.minimap_pt_to_canvas_pt(sw, sh, x, y);
-                        this.zoom.center_on_canvas_point(target_canvas, sw, sh);
+                        let infinite = this.mode == AppMode::Draw
+                            && this.background_type != CanvasBackground::Transparent;
+                        this.zoom
+                            .center_on_canvas_point(target_canvas, sw, sh, infinite);
                         this.minimap.is_dragging = true;
                         let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(this.hwnd);
                         this.request_repaint();
@@ -5150,11 +5164,14 @@ impl OverlayWindow {
                         return LRESULT(0);
                     }
 
-                    // 3. Normal Wheel: ALWAYS ZOOMS in Freeze modes (StaticZoom, Draw, Spotlight)!
-                    if this.mode == AppMode::StaticZoom
-                        || this.mode == AppMode::Draw
-                        || this.mode == AppMode::Spotlight
-                    {
+                    // 3. Normal Wheel: ALWAYS ZOOMS in Freeze modes (StaticZoom, Draw)!
+                    // Spotlight is deliberately excluded: render_frame forces z = 1.0
+                    // for AppMode::Spotlight (nothing on screen would show the zoom),
+                    // but render_to_capture ignores mode and always honours
+                    // zoom_state - so letting the wheel move it here used to produce
+                    // a Copy/Save/PDF export that was silently zoomed/panned relative
+                    // to what Spotlight actually displayed.
+                    if this.mode == AppMode::StaticZoom || this.mode == AppMode::Draw {
                         let mut pt = POINT::default();
                         let sx = this.screen_x;
                         let sy = this.screen_y;
@@ -5169,11 +5186,14 @@ impl OverlayWindow {
                             (sw / 2.0, sh / 2.0)
                         };
                         let new_lvl = (this.zoom.level + delta * 0.25).clamp(1.0, 10.0);
+                        let infinite = this.mode == AppMode::Draw
+                            && this.background_type != CanvasBackground::Transparent;
                         this.zoom.set_zoom_centered(
                             new_lvl,
                             Point2D::new(cursor_x, cursor_y),
                             sw,
                             sh,
+                            infinite,
                         );
                         this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                         this.request_repaint();
@@ -6209,6 +6229,7 @@ impl OverlayWindow {
                                     Point2D::new(cursor_x, cursor_y),
                                     sw,
                                     sh,
+                                    false, // this branch only runs in StaticZoom
                                 );
                                 this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                             } else {
@@ -6248,6 +6269,7 @@ impl OverlayWindow {
                                     Point2D::new(cursor_x, cursor_y),
                                     sw,
                                     sh,
+                                    false, // this branch only runs in StaticZoom
                                 );
                                 this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                             } else {
