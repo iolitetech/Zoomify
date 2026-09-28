@@ -3142,7 +3142,12 @@ impl OverlayWindow {
         };
         // Previously a failed copy was silent, so the user had no idea the
         // clipboard still held whatever was there before.
-        if copy_bgra_to_clipboard(composite.width, composite.height, &composite.pixels) {
+        if copy_bgra_to_clipboard(
+            self.hwnd,
+            composite.width,
+            composite.height,
+            &composite.pixels,
+        ) {
             if self.export_scale > 1 {
                 self.set_toast(
                     "📋",
