@@ -49,12 +49,40 @@ thread_local! {
 struct Rig {
     item: GraphicsCaptureItem,
     pool: Direct3D11CaptureFramePool,
+    /// Token from `pool.FrameArrived`, so `Drop` can unregister the callback.
+    frame_token: i64,
     signal: CaptureSignal,
     size: SizeInt32,
 }
 
+impl Drop for Rig {
+    fn drop(&mut self) {
+        // `pool` is a free-threaded frame pool: its FrameArrived callback can
+        // run on a thread-pool thread at any time, including concurrently
+        // with this drop. Unregister it and close the pool *before* `signal`
+        // (the next field, dropped right after this method returns) closes
+        // its event handle - otherwise a callback invocation already in
+        // flight could call SetEvent on a handle that has just been closed,
+        // or reused by something else in the process by the time it runs.
+        let _ = self.pool.RemoveFrameArrived(self.frame_token);
+        let _ = self.pool.Close();
+    }
+}
+
 thread_local! {
     static RIGS: RefCell<HashMap<isize, Rig>> = RefCell::new(HashMap::new());
+}
+
+/// Drop every cached per-monitor capture rig (frame pool, capture item, its
+/// GPU-backed buffer). `HMONITOR` values can be reissued after a display is
+/// unplugged, docked/undocked, or has its resolution changed outside of a
+/// simple "this one monitor resized" case (the only kind `capture_monitor`
+/// already detects and evicts on its own) - without this, a rig for a
+/// monitor that no longer exists would sit in the map, its frame pool's GPU
+/// memory alive, for the rest of the process. The D3D11 device itself is
+/// left alone; it does not belong to any one monitor.
+pub fn reset() {
+    RIGS.with(|cell| cell.borrow_mut().clear());
 }
 
 struct Devices {
@@ -186,7 +214,7 @@ fn capture_monitor(devices: &Devices, monitor: HMONITOR) -> Result<(u32, u32, Ve
                 // and event are registered once, with the pool.
                 let signal = CaptureSignal::new()?;
                 let waiter = signal.clone_handle();
-                pool.FrameArrived(&TypedEventHandler::<
+                let frame_token = pool.FrameArrived(&TypedEventHandler::<
                     Direct3D11CaptureFramePool,
                     windows::core::IInspectable,
                 >::new(move |_, _| {
@@ -197,6 +225,7 @@ fn capture_monitor(devices: &Devices, monitor: HMONITOR) -> Result<(u32, u32, Ve
                 e.insert(Rig {
                     item,
                     pool,
+                    frame_token,
                     signal,
                     size,
                 });

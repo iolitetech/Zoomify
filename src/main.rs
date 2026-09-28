@@ -257,6 +257,13 @@ unsafe extern "system" fn tray_wnd_proc(
             }
 
             WM_DISPLAYCHANGE => {
+                // HMONITOR values can be reissued across a display change
+                // (unplug/replug, dock/undock, resolution change), so any
+                // cached WGC capture rig keyed on the old value would
+                // otherwise sit there - GPU memory and all - for the rest of
+                // the process, keyed to a monitor handle that may no longer
+                // mean anything.
+                capture_wgc::reset();
                 let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                 overlay.refresh_monitors();
                 let count = overlay.available_monitors.len();
