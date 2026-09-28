@@ -347,6 +347,40 @@ impl SettingsWindow {
         }
     }
 
+    /// Copy onto `target` only the fields this dialog's own UI can change,
+    /// leaving everything else - most importantly the handful of fields the
+    /// overlay owns (toolbar position/collapsed, recent custom colours,
+    /// export scale, timer minutes) - as `target` already has it. Save goes
+    /// through this instead of writing `self.config` out wholesale, which is
+    /// what let this dialog's stale open-time snapshot revert a config
+    /// change the overlay made while it was open. The field list here must
+    /// track every `self.config.<field> = ` assignment elsewhere in this
+    /// file - grep for that pattern if a new control is added.
+    fn apply_dialog_fields(&self, target: &mut AppConfig) {
+        let c = &self.config;
+        target.hotkey_static_zoom = c.hotkey_static_zoom.clone();
+        target.hotkey_draw = c.hotkey_draw.clone();
+        target.hotkey_spotlight = c.hotkey_spotlight.clone();
+        target.hotkey_live_zoom = c.hotkey_live_zoom.clone();
+        target.hotkey_timer = c.hotkey_timer.clone();
+        target.hotkey_loupe = c.hotkey_loupe.clone();
+        target.allow_monitor_cycling = c.allow_monitor_cycling;
+        target.autosave_sessions = c.autosave_sessions;
+        target.default_color = c.default_color.clone();
+        target.default_stroke_width = c.default_stroke_width;
+        target.default_zoom_level = c.default_zoom_level;
+        target.session_export_png = c.session_export_png;
+        target.session_folder = c.session_folder.clone();
+        target.session_keep_last = c.session_keep_last;
+        target.show_minimap = c.show_minimap;
+        target.spotlight_radius = c.spotlight_radius;
+        target.start_with_windows = c.start_with_windows;
+        target.timer_duration_mins = c.timer_duration_mins;
+        target.timer_sound_enabled = c.timer_sound_enabled;
+        target.toolbar_collapsed = c.toolbar_collapsed;
+        target.use_graphics_capture = c.use_graphics_capture;
+    }
+
     fn request_repaint(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
@@ -753,8 +787,15 @@ impl SettingsWindow {
                 self.hide();
                 return;
             } else if x >= 585.0 && x <= 700.0 {
-                // Save & Apply
-                self.config.save();
+                // Save & Apply. Merge onto the config as it is *now* on disk,
+                // not this dialog's snapshot from when it was opened - the
+                // overlay may have written its own fields (toolbar position,
+                // recent colours, export scale, ...) in the meantime, and
+                // saving the stale snapshot outright used to revert them.
+                let mut fresh = AppConfig::load();
+                self.apply_dialog_fields(&mut fresh);
+                fresh.save();
+                self.config = fresh;
                 unsafe {
                     let _ = PostMessageW(
                         Some(self.notify_hwnd),

@@ -955,34 +955,27 @@ impl OverlayWindow {
         (self.timer_seconds as f32 / 60.0).round().max(1.0) as u32
     }
 
+    /// Only ever writes the handful of fields the overlay actually owns:
+    /// toolbar position/collapsed state, recently-picked custom colours,
+    /// export scale, and the timer's last-set duration. Everything else
+    /// here used to be "whatever tool state happened to be live" (the
+    /// highlighter's width, the last colour a shape was drawn in, current
+    /// fill mode/stroke pattern/badge size, the spotlight radius, minimap
+    /// visibility) written into the *same* fields Settings' "Default ..."
+    /// controls edit - so exiting the overlay after using, say, the
+    /// highlighter at 14px silently overwrote a stroke width the user had
+    /// deliberately set in Settings to something else. Reloading fresh
+    /// (rather than starting from whatever was loaded at overlay startup)
+    /// means a Settings change made while this overlay session was running
+    /// also survives.
     pub fn save_config(&self) {
         let mut cfg = crate::config::AppConfig::load();
-        cfg.default_stroke_width = self.stroke_width;
-        cfg.spotlight_radius = self.spotlight.radius;
         cfg.timer_duration_mins = (self.timer_seconds / 60).max(1);
         cfg.toolbar_collapsed = self.toolbar.collapsed;
-        cfg.show_minimap = self.show_minimap;
         // Unconditional: a `Some`-only write means "Reset Toolbar Position"
         // never clears the stale position from config.json.
         cfg.toolbar_custom_position = self.toolbar.custom_position.map(|p| (p.x, p.y));
-        cfg.default_color = self.current_color.name();
         cfg.recent_custom_colors = self.color_picker.recent.iter().map(|c| c.name()).collect();
-        cfg.default_fill_mode = match self.fill_mode {
-            FillMode::None => "None".to_string(),
-            FillMode::Tinted => "Tinted".to_string(),
-            FillMode::Solid => "Solid".to_string(),
-        };
-        cfg.default_stroke_pattern = match self.stroke_pattern {
-            StrokePattern::Dashed => "Dashed".to_string(),
-            StrokePattern::Dotted => "Dotted".to_string(),
-            StrokePattern::Solid => "Solid".to_string(),
-        };
-        cfg.default_badge_size = match self.badge_size {
-            BadgeSize::Small => "Small".to_string(),
-            BadgeSize::Large => "Large".to_string(),
-            BadgeSize::ExtraLarge => "ExtraLarge".to_string(),
-            BadgeSize::Medium => "Medium".to_string(),
-        };
         cfg.export_scale = self.export_scale;
         cfg.save();
     }
