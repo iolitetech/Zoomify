@@ -46,3 +46,13 @@ serde_json = "1.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 windows-numerics = "0.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+# The geometry/pixel-copy loops throughout the renderer and capture paths
+# are painfully slow at the default opt-level 0 - a debug build otherwise
+# stutters doing the same per-frame work release handles instantly.
+opt-level = 1
