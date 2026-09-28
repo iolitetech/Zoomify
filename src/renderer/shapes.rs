@@ -15,14 +15,57 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-    D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1Brush, ID2D1RenderTarget, ID2D1StrokeStyle,
+    D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1Brush, ID2D1Factory, ID2D1PathGeometry,
+    ID2D1RenderTarget, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
 };
 use windows_core::Interface;
 
+/// Once the geometry cache holds more entries than this, a new insert clears
+/// it outright rather than growing further. There is no per-entry eviction,
+/// so without a cap a long freehand stroke (one new cache entry per point
+/// while it is still being drawn) or a long drag (one entry per unique
+/// position) would otherwise grow the cache for as long as the gesture lasts
+/// and never give any of it back.
+const GEOMETRY_CACHE_MAX_ENTRIES: usize = 512;
+
 impl D2DRenderer {
+    /// Build a stroke's outline as a hollow path geometry: a straight polyline
+    /// for two points, or the same Bezier smoothing `points_to_bezier_segments`
+    /// produces for three or more. Shared by the cached and uncached draw
+    /// paths in `render_single_shape` so there is exactly one place that
+    /// builds this geometry.
+    unsafe fn build_stroke_geometry(
+        factory: &ID2D1Factory,
+        points: &[Point2D],
+    ) -> Option<ID2D1PathGeometry> {
+        unsafe {
+            let path = factory.CreatePathGeometry().ok()?;
+            let sink = path.Open().ok()?;
+            sink.BeginFigure(v2(points[0].x, points[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
+            if points.len() >= 3 {
+                let segments = points_to_bezier_segments(points);
+                for (c1, c2, p) in segments {
+                    let bz = D2D1_BEZIER_SEGMENT {
+                        point1: v2(c1.x, c1.y),
+                        point2: v2(c2.x, c2.y),
+                        point3: v2(p.x, p.y),
+                    };
+                    sink.AddBezier(&bz);
+                }
+            } else {
+                for pt in &points[1..] {
+                    sink.AddLine(v2(pt.x, pt.y));
+                }
+            }
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            let _ = sink.Close();
+            Some(path)
+        }
+    }
+
     pub(super) unsafe fn render_single_shape(
         &self,
         rt: &ID2D1RenderTarget,
@@ -31,6 +74,14 @@ impl D2DRenderer {
         // Scales every colour's alpha. It lives on the Annotation because it
         // applies to all shapes equally and none of them care what it is.
         opacity: f32,
+        // Whether this shape's geometry is worth caching at all. False for
+        // the shape still being drawn or dragged: its points differ every
+        // frame, so every cache lookup for it would miss and every draw
+        // would insert a brand-new entry that is never reused - pure growth
+        // with none of the caching benefit. True for a committed annotation,
+        // whose geometry is stable from one frame to the next once the
+        // gesture that produced it ends.
+        cacheable: bool,
     ) {
         unsafe {
             match shape {
@@ -90,12 +141,20 @@ impl D2DRenderer {
                                     Some(stroke_style),
                                 );
                             }
-                        } else {
+                        } else if cacheable {
+                            // Keyed on the point *values*, not the Vec's address:
+                            // a moved/dragged/re-cloned Vec of identical points at
+                            // an identical width must hit the same cached
+                            // geometry, and a freed-then-reused allocation must
+                            // never be mistaken for a different stroke that
+                            // happens to share its old address and length.
                             let key = {
                                 use std::hash::{Hash, Hasher};
                                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                (points.as_ptr() as u64).hash(&mut hasher);
-                                points.len().hash(&mut hasher);
+                                for p in points.iter() {
+                                    p.x.to_bits().hash(&mut hasher);
+                                    p.y.to_bits().hash(&mut hasher);
+                                }
                                 actual_width.to_bits().hash(&mut hasher);
                                 hasher.finish()
                             };
@@ -106,36 +165,23 @@ impl D2DRenderer {
                                 cache.1.clear();
                             }
                             let path = if let Some(p) = cache.1.get(&key) {
-                                p.clone()
-                            } else if let Ok(path) = self.factory.CreatePathGeometry()
-                                && let Ok(sink) = path.Open()
-                            {
-                                sink.BeginFigure(
-                                    v2(points[0].x, points[0].y),
-                                    D2D1_FIGURE_BEGIN_HOLLOW,
-                                );
-                                if points.len() >= 3 {
-                                    let segments = points_to_bezier_segments(points);
-                                    for (c1, c2, p) in segments {
-                                        let bz = D2D1_BEZIER_SEGMENT {
-                                            point1: v2(c1.x, c1.y),
-                                            point2: v2(c2.x, c2.y),
-                                            point3: v2(p.x, p.y),
-                                        };
-                                        sink.AddBezier(&bz);
-                                    }
-                                } else {
-                                    for pt in &points[1..] {
-                                        sink.AddLine(v2(pt.x, pt.y));
-                                    }
-                                }
-                                sink.EndFigure(D2D1_FIGURE_END_OPEN);
-                                let _ = sink.Close();
-                                cache.1.insert(key, path.clone());
-                                path
+                                Some(p.clone())
                             } else {
-                                return;
+                                let built = Self::build_stroke_geometry(&self.factory, points);
+                                if let Some(p) = &built {
+                                    if cache.1.len() > GEOMETRY_CACHE_MAX_ENTRIES {
+                                        cache.1.clear();
+                                    }
+                                    cache.1.insert(key, p.clone());
+                                }
+                                built
                             };
+                            if let Some(path) = path {
+                                let stroke_style = self.get_stroke_style(*pattern);
+                                rt.DrawGeometry(&path, &brush, actual_width, Some(stroke_style));
+                            }
+                        } else if let Some(path) = Self::build_stroke_geometry(&self.factory, points)
+                        {
                             let stroke_style = self.get_stroke_style(*pattern);
                             rt.DrawGeometry(&path, &brush, actual_width, Some(stroke_style));
                         }
@@ -230,29 +276,16 @@ impl D2DRenderer {
                         let fill_head = |from: Point2D, to: Point2D| {
                             let (tip, left, right) =
                                 arrow_head_points(from, to, head_len, half_width);
-                            let filled = |pts: &[Point2D], head_type: ArrowHead| {
-                                let key = {
-                                    use std::hash::{Hash, Hasher};
-                                    let mut hasher =
-                                        std::collections::hash_map::DefaultHasher::new();
-                                    from.x.to_bits().hash(&mut hasher);
-                                    from.y.to_bits().hash(&mut hasher);
-                                    to.x.to_bits().hash(&mut hasher);
-                                    to.y.to_bits().hash(&mut hasher);
-                                    head_len.to_bits().hash(&mut hasher);
-                                    half_width.to_bits().hash(&mut hasher);
-                                    (head_type as u8).hash(&mut hasher);
-                                    hasher.finish()
-                                };
-                                let mut cache = self.geometry_cache.borrow_mut();
-                                let rt_id = rt.as_raw() as usize;
-                                if cache.0 != rt_id {
-                                    cache.0 = rt_id;
-                                    cache.1.clear();
-                                }
-                                let path = if let Some(p) = cache.1.get(&key) {
-                                    p.clone()
-                                } else if let Ok(path) = self.factory.CreatePathGeometry()
+                            // An arrow head is a 3-4 point path, cheap enough to
+                            // build fresh every frame - simpler and safer than
+                            // caching it by (from, to, head_len, half_width): a
+                            // dragged or bound-and-following arrow changes those
+                            // float coordinates on nearly every frame, so a
+                            // cache here only ever inserted new entries and
+                            // never evicted any, growing for as long as the
+                            // arrow existed.
+                            let filled = |pts: &[Point2D]| {
+                                if let Ok(path) = self.factory.CreatePathGeometry()
                                     && let Ok(sink) = path.Open()
                                 {
                                     sink.BeginFigure(
@@ -264,15 +297,11 @@ impl D2DRenderer {
                                     }
                                     sink.EndFigure(D2D1_FIGURE_END_CLOSED);
                                     let _ = sink.Close();
-                                    cache.1.insert(key, path.clone());
-                                    path
-                                } else {
-                                    return;
-                                };
-                                rt.FillGeometry(&path, &brush, None);
+                                    rt.FillGeometry(&path, &brush, None);
+                                }
                             };
                             match head {
-                                ArrowHead::Triangle => filled(&[tip, left, right], *head),
+                                ArrowHead::Triangle => filled(&[tip, left, right]),
                                 ArrowHead::Open => {
                                     // Two strokes to the tip, leaving it open.
                                     rt.DrawLine(
@@ -313,7 +342,7 @@ impl D2DRenderer {
                                         mid.x - (tip.x - mid.x),
                                         mid.y - (tip.y - mid.y),
                                     );
-                                    filled(&[tip, left, back, right], *head);
+                                    filled(&[tip, left, back, right]);
                                 }
                                 ArrowHead::Bar => {
                                     rt.DrawLine(

@@ -996,6 +996,10 @@ impl OverlayWindow {
         self.redo_history.clear();
         self.boards = vec![Board::default()];
         self.active_board = 0;
+        // The shapes that filled it are gone for good (not parked in undo
+        // history like clear_all()'s Ctrl+Z-able clear), so nothing will
+        // reuse these entries again this session.
+        self.renderer.clear_geometry_cache();
         self.background_type = CanvasBackground::Transparent;
         self.laser_trail.clear();
         self.laser_ripples.clear();

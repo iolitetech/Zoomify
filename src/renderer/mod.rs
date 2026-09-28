@@ -581,11 +581,7 @@ impl D2DRenderer {
             cache.1.clear();
         }
         self.blur_rt_cache.borrow_mut().take();
-        {
-            let mut cache = self.geometry_cache.borrow_mut();
-            cache.0 = 0;
-            cache.1.clear();
-        }
+        self.clear_geometry_cache();
 
         if self.target_hwnd.is_invalid() || self.target_width == 0 || self.target_height == 0 {
             self.device_lost.set(false);
@@ -594,6 +590,17 @@ impl D2DRenderer {
 
         let (hwnd, w, h) = (self.target_hwnd, self.target_width, self.target_height);
         self.init_hwnd(hwnd, w, h).is_ok()
+    }
+
+    /// Drop every cached stroke/arrow-head path geometry. The cache has no
+    /// per-entry eviction (it is bounded only by clearing itself outright
+    /// once it grows past a cap - see `render_single_shape`), so this is the
+    /// only way to reclaim it between overlay sessions rather than carrying
+    /// every distinct geometry ever drawn for the life of the process.
+    pub fn clear_geometry_cache(&self) {
+        let mut cache = self.geometry_cache.borrow_mut();
+        cache.0 = 0;
+        cache.1.clear();
     }
 
     /// Flag a lost device if this is the HRESULT Direct2D uses to report one.
@@ -767,7 +774,7 @@ impl D2DRenderer {
                     if a.container.is_some() {
                         continue;
                     }
-                    self.render_single_shape(rt, &a.shape, bg_bitmap, a.opacity);
+                    self.render_single_shape(rt, &a.shape, bg_bitmap, a.opacity, true);
                 }
                 for a in shapes {
                     if let Some(cid) = a.container
@@ -780,7 +787,11 @@ impl D2DRenderer {
                 }
 
                 if let Some(shape) = active_shape {
-                    self.render_single_shape(rt, shape, bg_bitmap, 1.0);
+                    // Not cacheable: this is the shape still being drawn (a pen
+                    // stroke gaining a point every mouse move, a drag preview),
+                    // so its geometry differs every frame - caching it would
+                    // only ever insert, never hit.
+                    self.render_single_shape(rt, shape, bg_bitmap, 1.0, false);
                     if snap_guides {
                         self.render_drawing_snap_guides(rt, shape);
                     }
@@ -1164,7 +1175,13 @@ impl D2DRenderer {
                             if a.container.is_some() {
                                 continue;
                             }
-                            self.render_single_shape(&dc_rt, &a.shape, bg_bmp.as_ref(), a.opacity);
+                            self.render_single_shape(
+                                &dc_rt,
+                                &a.shape,
+                                bg_bmp.as_ref(),
+                                a.opacity,
+                                true,
+                            );
                         }
                         for a in shapes {
                             if let Some(cid) = a.container
@@ -1179,7 +1196,7 @@ impl D2DRenderer {
                         }
 
                         if let Some(shape) = active_shape {
-                            self.render_single_shape(&dc_rt, shape, bg_bmp.as_ref(), 1.0);
+                            self.render_single_shape(&dc_rt, shape, bg_bmp.as_ref(), 1.0, false);
                         }
 
                         if let Some(editor) = text_input {
