@@ -11,8 +11,8 @@ use std::collections::HashMap;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED,
-    D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
@@ -79,7 +79,10 @@ pub struct D2DRenderer {
     /// the target changes (the offscreen target used for export is a different
     /// one) or the device is lost.
     solid_brush_cache: RefCell<(usize, HashMap<u32, ID2D1SolidColorBrush>)>,
-    pub blur_rt_cache: RefCell<Option<(usize, D2D_SIZE_F, ID2D1BitmapRenderTarget)>>,
+    /// Finished blur mosaics, keyed by content (background bitmap identity +
+    /// rect + block size) rather than shared by size the way this used to
+    /// be - see the doc comment at its use in shapes.rs.
+    pub blur_mosaic_cache: RefCell<(usize, HashMap<u64, ID2D1BitmapRenderTarget>)>,
     pub geometry_cache: RefCell<(usize, HashMap<u64, ID2D1PathGeometry>)>,
     /// Pasted images, keyed by content, alongside the render target they were
     /// uploaded to. Re-uploading a full-screen paste every frame would be the
@@ -309,7 +312,7 @@ impl D2DRenderer {
                 text_formats_cache: RefCell::new(HashMap::new()),
                 spotlight_geometry_cache: RefCell::new(None),
                 solid_brush_cache: RefCell::new((0, HashMap::new())),
-                blur_rt_cache: RefCell::new(None),
+                blur_mosaic_cache: RefCell::new((0, HashMap::new())),
                 geometry_cache: RefCell::new((0, HashMap::new())),
                 image_cache: RefCell::new((0, HashMap::new())),
                 target_hwnd: HWND::default(),
@@ -591,7 +594,11 @@ impl D2DRenderer {
             cache.0 = 0;
             cache.1.clear();
         }
-        self.blur_rt_cache.borrow_mut().take();
+        {
+            let mut cache = self.blur_mosaic_cache.borrow_mut();
+            cache.0 = 0;
+            cache.1.clear();
+        }
         self.clear_geometry_cache();
         self.clear_image_cache();
 

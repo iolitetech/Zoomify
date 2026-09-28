@@ -31,6 +31,11 @@ use windows_core::Interface;
 /// and never give any of it back.
 const GEOMETRY_CACHE_MAX_ENTRIES: usize = 512;
 
+/// Each entry is its own small render target (a real GPU resource), so this
+/// stays far smaller than the geometry cache's cap - a session redacting
+/// dozens of distinct regions is already an unusual amount of blur.
+const BLUR_MOSAIC_CACHE_MAX_ENTRIES: usize = 64;
+
 impl D2DRenderer {
     /// Build a stroke's outline as a hollow path geometry: a straight polyline
     /// for two points, or the same Bezier smoothing `points_to_bezier_segments`
@@ -820,9 +825,18 @@ impl D2DRenderer {
                     // texel per block (linear, so each texel averages its block),
                     // then blow it back up with nearest-neighbour.
                     //
-                    // This used to issue one DrawBitmap per block, so an 800x600
-                    // redaction at the minimum block size meant ~30,000 draw calls
-                    // *per frame*. It is now two.
+                    // The downsample pass itself only runs once per distinct
+                    // (background, rect, block size) - cached in
+                    // blur_mosaic_cache keyed by content, the same approach as
+                    // the stroke geometry cache - rather than every single
+                    // frame regardless of whether anything about this blur
+                    // changed. Each key gets its *own* dedicated render
+                    // target instead of sharing one scratch RT across every
+                    // blur on the canvas: ID2D1BitmapRenderTarget::GetBitmap()
+                    // returns a live view of that target's own backing
+                    // surface, so two blurs sharing one scratch RT could
+                    // otherwise show each other's content depending on draw
+                    // order.
                     let mosaic = bg_bitmap.and_then(|bmp| {
                         let cols = (w / b_size).ceil().max(1.0);
                         let rows = (h / b_size).ceil().max(1.0);
@@ -831,14 +845,27 @@ impl D2DRenderer {
                             height: rows,
                         };
 
+                        let key = {
+                            use std::hash::{Hash, Hasher};
+                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                            (bmp.as_raw() as usize).hash(&mut hasher);
+                            start.x.to_bits().hash(&mut hasher);
+                            start.y.to_bits().hash(&mut hasher);
+                            end.x.to_bits().hash(&mut hasher);
+                            end.y.to_bits().hash(&mut hasher);
+                            b_size.to_bits().hash(&mut hasher);
+                            hasher.finish()
+                        };
+
                         let rt_id = rt.as_raw() as usize;
-                        let mut cache = self.blur_rt_cache.borrow_mut();
-                        let tiny = if let Some((c_rt_id, c_size, ref c_rt)) = *cache
-                            && c_rt_id == rt_id
-                            && c_size.width == small.width
-                            && c_size.height == small.height
-                        {
-                            c_rt.clone()
+                        let mut cache = self.blur_mosaic_cache.borrow_mut();
+                        if cache.0 != rt_id {
+                            cache.0 = rt_id;
+                            cache.1.clear();
+                        }
+
+                        let tiny = if let Some(existing) = cache.1.get(&key) {
+                            existing.clone()
                         } else {
                             let new_rt = rt
                                 .CreateCompatibleRenderTarget(
@@ -848,32 +875,34 @@ impl D2DRenderer {
                                     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
                                 )
                                 .ok()?;
-                            *cache = Some((rt_id, small, new_rt.clone()));
+                            new_rt.BeginDraw();
+                            new_rt.Clear(None);
+                            new_rt.DrawBitmap(
+                                bmp,
+                                Some(&D2D_RECT_F {
+                                    left: 0.0,
+                                    top: 0.0,
+                                    right: cols,
+                                    bottom: rows,
+                                }),
+                                1.0,
+                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                                Some(&D2D_RECT_F {
+                                    left: l,
+                                    top: t,
+                                    right: r,
+                                    bottom: b,
+                                }),
+                            );
+                            if new_rt.EndDraw(None, None).is_err() {
+                                return None;
+                            }
+                            if cache.1.len() > BLUR_MOSAIC_CACHE_MAX_ENTRIES {
+                                cache.1.clear();
+                            }
+                            cache.1.insert(key, new_rt.clone());
                             new_rt
                         };
-
-                        tiny.BeginDraw();
-                        tiny.Clear(None);
-                        tiny.DrawBitmap(
-                            bmp,
-                            Some(&D2D_RECT_F {
-                                left: 0.0,
-                                top: 0.0,
-                                right: cols,
-                                bottom: rows,
-                            }),
-                            1.0,
-                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                            Some(&D2D_RECT_F {
-                                left: l,
-                                top: t,
-                                right: r,
-                                bottom: b,
-                            }),
-                        );
-                        if tiny.EndDraw(None, None).is_err() {
-                            return None;
-                        }
                         tiny.GetBitmap().ok().map(|bm| (bm, cols, rows))
                     });
 
