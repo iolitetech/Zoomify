@@ -219,6 +219,11 @@ pub struct OverlayWindow {
     /// half alone fails and used to just drop it as a bogus control
     /// character.
     pub pending_high_surrogate: Option<u16>,
+    /// The 500ms wall-clock phase (see render_text_editor's show_caret) as
+    /// of the last animation tick, so the tick can tell whether the caret's
+    /// visible/hidden state actually changed since then instead of
+    /// repainting the whole scene every 16ms regardless.
+    last_caret_phase: Option<u128>,
     pub font_size: f32,
     pub text_is_bold: bool,
     pub text_is_italic: bool,
@@ -252,6 +257,11 @@ pub struct OverlayWindow {
     pub timer_alarm_sounded: bool,
     pub timer_sound_enabled: bool,
     pub timer_last_tick: Instant,
+    /// (displayed whole seconds, countdown-ring arc segment, overtime flag)
+    /// as of the last animation tick that actually needed a repaint - the
+    /// countdown only visibly changes when one of these changes, not every
+    /// 16ms tick.
+    last_timer_paint_state: Option<(i64, i64, bool)>,
     pub timer_widget: TimerWidgetState,
     pub screen_x: i32,
     pub screen_y: i32,
@@ -455,6 +465,7 @@ impl OverlayWindow {
                 step_counter: 1,
                 text_editor: None,
                 pending_high_surrogate: None,
+                last_caret_phase: None,
                 font_size: 22.0,
                 text_is_bold: false,
                 text_is_italic: false,
@@ -489,6 +500,7 @@ impl OverlayWindow {
                 timer_alarm_sounded: false,
                 timer_sound_enabled: cfg.timer_sound_enabled,
                 timer_last_tick: Instant::now(),
+                last_timer_paint_state: None,
                 timer_widget: TimerWidgetState::default(),
                 screen_x,
                 screen_y,
@@ -4458,18 +4470,57 @@ impl OverlayWindow {
                                     let _ = MessageBeep(0);
                                 }
                             }
-                            needs_paint = true;
+                            // The visible digits change once a second and the
+                            // countdown ring advances in total/128 steps -
+                            // repainting on every 16ms tick regardless meant
+                            // redrawing the whole scene (a full background
+                            // bitmap, a dim fill, a rebuilt 128-segment arc
+                            // path) 60 times a second for output that was
+                            // pixel-identical between most of those frames.
+                            let total = this.timer_seconds.max(1) as f32;
+                            let abs_rem = this.timer_remaining.abs() as f32;
+                            let secs_bucket = abs_rem.floor() as i64;
+                            let is_overtime = this.timer_remaining < 0.0;
+                            let progress = if is_overtime {
+                                1.0
+                            } else {
+                                1.0 - (abs_rem / total).clamp(0.0, 1.0)
+                            };
+                            let arc_segment = (progress * 128.0) as i64;
+                            let timer_state = (secs_bucket, arc_segment, is_overtime);
+                            if this.last_timer_paint_state != Some(timer_state) {
+                                this.last_timer_paint_state = Some(timer_state);
+                                needs_paint = true;
+                            }
                         } else {
                             this.timer_last_tick = Instant::now();
                         }
 
+                        // Opacity only actually changes during the fade-in
+                        // (first 0.15s) and fade-out (last 0.35s) - forcing a
+                        // repaint for the whole 1.8s lifetime (a toast fires
+                        // on nearly every action) used to spend roughly 78
+                        // full-scene frames drawing pixel-identical output.
                         if let Some(t) = &this.toast
                             && !t.is_expired()
+                            && t.is_fading()
                         {
                             needs_paint = true;
                         }
 
-                        if this.text_editor.is_some() {
+                        // The caret only actually toggles every 500ms (same
+                        // wall-clock phase render_text_editor's show_caret
+                        // uses) - repainting on every tick regardless meant
+                        // 60 full-scene frames a second for a caret that
+                        // visibly changes twice.
+                        let caret_phase = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            / 500;
+                        let caret_toggled = this.last_caret_phase != Some(caret_phase);
+                        this.last_caret_phase = Some(caret_phase);
+                        if this.text_editor.is_some() && caret_toggled {
                             needs_paint = true;
                         }
 

@@ -2079,6 +2079,15 @@ impl ToastNotification {
             1.0
         }
     }
+
+    /// True during the fade-in (first 0.15s) or fade-out (last 0.35s) - the
+    /// only parts of a toast's lifetime where `opacity()` actually changes
+    /// from one moment to the next. The steady middle (a toast is alive for
+    /// 1.8s total) needs no repaint on its account at all.
+    pub fn is_fading(&self) -> bool {
+        let elapsed = self.created_at.elapsed().as_secs_f32();
+        elapsed < 0.15 || elapsed > (self.duration_secs - 0.35)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
