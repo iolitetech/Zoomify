@@ -18,6 +18,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1Brush, ID2D1Factory, ID2D1PathGeometry, ID2D1RenderTarget,
     ID2D1StrokeStyle,
 };
+use windows::Win32::Graphics::DirectWrite::DWRITE_HIT_TEST_METRICS;
 use windows_core::Interface;
 
 /// Once the geometry cache holds more entries than this, a new insert clears
@@ -513,18 +514,18 @@ impl D2DRenderer {
                     font_family,
                 } => {
                     let col = color.to_d2d_color((1.0) * opacity);
-                    let text_utf16: Vec<u16> = text.encode_utf16().collect();
-                    if let Ok(custom_format) =
-                        self.get_custom_text_format(*font_size, *is_bold, *is_italic, *font_family)
-                    {
-                        let (block_w, block_h) = self.measure_text_block(
-                            text,
-                            *font_size,
-                            *is_bold,
-                            *is_italic,
-                            *font_family,
-                            f32::MAX,
-                        );
+                    // One cached IDWriteTextLayout serves both the box math
+                    // below and the two DrawTextLayout calls further down -
+                    // previously this measured with one layout and then
+                    // DrawText built a second, internal one on every draw.
+                    if let Some((text_layout, block_w, block_h)) = self.get_or_build_text_layout(
+                        text,
+                        *font_size,
+                        *is_bold,
+                        *is_italic,
+                        *font_family,
+                        f32::MAX,
+                    ) {
                         let layout_w = block_w.max(30.0) + 16.0;
                         let layout_h = block_h + 8.0;
 
@@ -597,32 +598,22 @@ impl D2DRenderer {
                                         a: 0.70,
                                     },
                                 ) {
-                                    let sh_rect = D2D_RECT_F {
-                                        left: text_rect.left + 1.2,
-                                        top: text_rect.top + 1.5,
-                                        right: text_rect.right + 1.2,
-                                        bottom: text_rect.bottom + 1.5,
-                                    };
-                                    rt.DrawText(
-                                        &text_utf16,
-                                        &custom_format,
-                                        &sh_rect,
+                                    rt.DrawTextLayout(
+                                        v2(text_rect.left + 1.2, text_rect.top + 1.5),
+                                        &text_layout,
                                         &sh_brush,
                                         D2D1_DRAW_TEXT_OPTIONS_NONE,
-                                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                                     );
                                 }
                             }
                         }
 
                         if let Some(brush) = self.solid_brush(rt, &col) {
-                            rt.DrawText(
-                                &text_utf16,
-                                &custom_format,
-                                &text_rect,
+                            rt.DrawTextLayout(
+                                v2(text_rect.left, text_rect.top),
+                                &text_layout,
                                 &brush,
                                 D2D1_DRAW_TEXT_OPTIONS_NONE,
-                                windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                             );
                         }
                     }
@@ -1051,8 +1042,16 @@ impl D2DRenderer {
             } else {
                 ((container.2 - container.0) - pad * 2.0).max(24.0)
             };
-            let (w, h) =
-                self.measure_text_block(text, *font_size, *is_bold, *is_italic, *font_family, wrap);
+            let Some((text_layout, w, h)) = self.get_or_build_text_layout(
+                text,
+                *font_size,
+                *is_bold,
+                *is_italic,
+                *font_family,
+                wrap,
+            ) else {
+                return;
+            };
             let origin = contained_text_origin(container, w, h);
 
             if rides_on
@@ -1079,28 +1078,14 @@ impl D2DRenderer {
                 rt.FillRoundedRectangle(&chip_rect, &chip);
             }
 
-            let Ok(format) =
-                self.get_custom_text_format(*font_size, *is_bold, *is_italic, *font_family)
-            else {
-                return;
-            };
             let Some(brush) = self.solid_brush(rt, &color.to_d2d_color((1.0) * opacity)) else {
                 return;
             };
-            let utf16: Vec<u16> = text.encode_utf16().collect();
-            let rect = D2D_RECT_F {
-                left: origin.x,
-                top: origin.y,
-                right: origin.x + w.max(wrap),
-                bottom: origin.y + h,
-            };
-            rt.DrawText(
-                &utf16,
-                &format,
-                &rect,
+            rt.DrawTextLayout(
+                v2(origin.x, origin.y),
+                &text_layout,
                 &brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
-                windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
             );
         }
     }
@@ -1582,37 +1567,49 @@ impl D2DRenderer {
                 }
             }
 
-            if let Some(brush) = self.solid_brush(rt, &col) {
-                let display_text = if show_caret {
-                    let mut s = text.to_string();
-                    let safe_idx = cursor.min(s.len());
-                    s.insert(safe_idx, '|');
-                    s
-                } else {
-                    text.to_string()
-                };
-                let utf16: Vec<u16> = display_text.encode_utf16().collect();
-                let layout_rect = D2D_RECT_F {
-                    left: origin.x,
-                    top: origin.y,
-                    right: origin.x + estimated_w,
-                    bottom: origin.y + estimated_h,
-                };
-
-                if let Ok(format) = self.get_custom_text_format(
+            // One cached layout for the real text (no synthetic caret
+            // character spliced in) - drawn as-is, with the blinking caret
+            // itself drawn separately as a line from HitTestTextPosition.
+            // The previous approach rebuilt a whole new layout from a freshly
+            // copied-and-mutated string on every blink tick, for a card that
+            // is open and blinking far more of the time than its text is
+            // actually being edited.
+            if let Some(brush) = self.solid_brush(rt, &col)
+                && let Some((text_layout, _, _)) = self.get_or_build_text_layout(
+                    text,
                     font_size,
                     editor.is_bold,
                     editor.is_italic,
                     editor.font_family,
-                ) {
-                    rt.DrawText(
-                        &utf16,
-                        &format,
-                        &layout_rect,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
+                    editor.wrap_width(),
+                )
+            {
+                rt.DrawTextLayout(
+                    v2(origin.x, origin.y),
+                    &text_layout,
+                    &brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+
+                if show_caret {
+                    let safe_idx = cursor.min(text.len());
+                    let utf16_pos = text[..safe_idx].encode_utf16().count() as u32;
+                    let mut px = 0.0f32;
+                    let mut py = 0.0f32;
+                    let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+                    if text_layout
+                        .HitTestTextPosition(utf16_pos, false, &mut px, &mut py, &mut metrics)
+                        .is_ok()
+                    {
+                        let caret_h = metrics.height.max(font_size);
+                        rt.DrawLine(
+                            v2(origin.x + px, origin.y + py),
+                            v2(origin.x + px, origin.y + py + caret_h),
+                            &brush,
+                            1.6,
+                            None,
+                        );
+                    }
                 }
             }
         }

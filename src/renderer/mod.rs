@@ -29,7 +29,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory,
-    IDWriteTextFormat,
+    IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -51,6 +51,11 @@ use crate::types::{
 pub(crate) fn v2(x: f32, y: f32) -> Vector2 {
     Vector2 { X: x, Y: y }
 }
+
+/// Same reasoning as `shapes::GEOMETRY_CACHE_MAX_ENTRIES`: unbounded growth
+/// during a long text edit (a new entry per keystroke while content is still
+/// changing) would otherwise never give anything back.
+const TEXT_LAYOUT_CACHE_MAX_ENTRIES: usize = 256;
 
 /// Every input the HUD status line's text depends on, discretized to exact
 /// (`Eq`-able) values matching what actually reaches the displayed string -
@@ -127,6 +132,15 @@ pub struct D2DRenderer {
     /// just updates its transform, which is the only part that actually
     /// varies as the loupe follows the cursor.
     loupe_brush_cache: RefCell<(usize, usize, Option<ID2D1BitmapBrush>)>,
+    /// `IDWriteTextLayout`s (plus their measured (width, height)), keyed by
+    /// content - not by render target: unlike a D2D brush/geometry, a
+    /// DirectWrite layout is a CPU-side object with no device dependency, so
+    /// this survives export (a different render target) and device loss
+    /// alike, and needs no clearing in `recover_if_device_lost`. This is
+    /// what makes measuring and drawing a `Shape::Text` share one
+    /// `CreateTextLayout` instead of each frame paying for two (measure,
+    /// then `DrawText`'s own internal layout).
+    text_layout_cache: RefCell<HashMap<u64, (IDWriteTextLayout, f32, f32)>>,
     /// Finished blur mosaics, keyed by content (background bitmap identity +
     /// rect + block size) rather than shared by size the way this used to
     /// be - see the doc comment at its use in shapes.rs.
@@ -391,6 +405,7 @@ impl D2DRenderer {
                 scratch_brush: RefCell::new((0, None)),
                 hud_text_cache: RefCell::new(None),
                 loupe_brush_cache: RefCell::new((0, 0, None)),
+                text_layout_cache: RefCell::new(HashMap::new()),
                 blur_mosaic_cache: RefCell::new((0, HashMap::new())),
                 geometry_cache: RefCell::new((0, HashMap::new())),
                 image_cache: RefCell::new((0, HashMap::new())),
@@ -638,36 +653,83 @@ impl D2DRenderer {
         // Wrap at this width; f32::MAX for a single unbroken run per line.
         max_width: f32,
     ) -> (f32, f32) {
-        let fallback = || crate::types::measure_text_block(text, font_size);
-        let Ok(format) = self.get_custom_text_format(font_size, is_bold, is_italic, font_family)
-        else {
-            return fallback();
+        match self.get_or_build_text_layout(
+            text,
+            font_size,
+            is_bold,
+            is_italic,
+            font_family,
+            max_width,
+        ) {
+            Some((_, w, h)) => (w, h),
+            None => crate::types::measure_text_block(text, font_size),
+        }
+    }
+
+    /// The cached `IDWriteTextLayout` behind `measure_text_block`, also
+    /// available to draw from directly (`rt.DrawTextLayout`) so a
+    /// `Shape::Text` never pays for a second, `DrawText`-internal layout on
+    /// top of the one it was just measured with.
+    ///
+    /// Keyed on content, not identity: a moved/re-cloned annotation with the
+    /// same text/font/wrap hits the same entry, same reasoning as the
+    /// stroke/badge geometry caches.
+    pub(crate) fn get_or_build_text_layout(
+        &self,
+        text: &str,
+        font_size: f32,
+        is_bold: bool,
+        is_italic: bool,
+        font_family: TextFontFamily,
+        max_width: f32,
+    ) -> Option<(IDWriteTextLayout, f32, f32)> {
+        let wrap = if max_width.is_finite() {
+            max_width.max(1.0)
+        } else {
+            f32::MAX / 4.0
         };
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hasher);
+            font_size.to_bits().hash(&mut hasher);
+            is_bold.hash(&mut hasher);
+            is_italic.hash(&mut hasher);
+            (font_family as u32).hash(&mut hasher);
+            wrap.to_bits().hash(&mut hasher);
+            hasher.finish()
+        };
+
+        {
+            let cache = self.text_layout_cache.borrow();
+            if let Some((layout, w, h)) = cache.get(&key) {
+                return Some((layout.clone(), *w, *h));
+            }
+        }
+
+        let format = self
+            .get_custom_text_format(font_size, is_bold, is_italic, font_family)
+            .ok()?;
         let utf16: Vec<u16> = text.encode_utf16().collect();
         unsafe {
-            // Unbounded width means a line ends only where the author put a
-            // newline; a real width lets DirectWrite wrap, which is what a
-            // label inside a container needs.
-            let wrap = if max_width.is_finite() {
-                max_width.max(1.0)
-            } else {
-                f32::MAX / 4.0
-            };
-            let Ok(layout) =
-                self.dwrite_factory
-                    .CreateTextLayout(&utf16, &format, wrap, f32::MAX / 4.0)
-            else {
-                return fallback();
-            };
+            let layout = self
+                .dwrite_factory
+                .CreateTextLayout(&utf16, &format, wrap, f32::MAX / 4.0)
+                .ok()?;
             let mut metrics = DWRITE_TEXT_METRICS::default();
-            if layout.GetMetrics(&mut metrics).is_err() {
-                return fallback();
-            }
+            layout.GetMetrics(&mut metrics).ok()?;
             // A trailing empty line has zero measured width but still needs a
             // row, and an all-empty buffer still needs a caret-tall box.
             let lines = metrics.lineCount.max(1) as f32;
             let h = metrics.height.max(lines * font_size * 1.25);
-            (metrics.width.max(font_size * 0.6), h)
+            let w = metrics.width.max(font_size * 0.6);
+
+            let mut cache = self.text_layout_cache.borrow_mut();
+            if cache.len() > TEXT_LAYOUT_CACHE_MAX_ENTRIES {
+                cache.clear();
+            }
+            cache.insert(key, (layout.clone(), w, h));
+            Some((layout, w, h))
         }
     }
 
