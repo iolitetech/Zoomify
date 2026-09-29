@@ -10,7 +10,7 @@ homepage = "https://github.com/iolitetech/Zoomify"
 readme = "README.md"
 keywords = ["screen", "zoom", "annotation", "presentation", "windows"]
 categories = ["graphics", "os::windows-apis"]
-exclude = [".github/", ".claude/", "cliff.toml", "BUGFIX-ROADMAP.md", "ROADMAP.md"]
+exclude = [".github/", ".claude/", "assets/", "cliff.toml", "BUGFIX-ROADMAP.md", "ROADMAP.md"]
 
 [package.metadata.docs.rs]
 default-target = "x86_64-pc-windows-msvc"
