@@ -11,6 +11,114 @@ use windows::Win32::Graphics::Direct2D::{
 };
 use windows_numerics::Matrix3x2;
 
+const CHEAT_COL1: &[(&str, &str)] = &[
+    ("GLOBAL SHORTCUTS", ""),
+    ("Ctrl+1", "Static Freeze Zoom (Wheel/Pan/Draw)"),
+    ("Ctrl+2", "Draw / Annotation Mode"),
+    ("Ctrl+3", "Spotlight Mode (Wheel: resize)"),
+    ("Ctrl+4", "Live Zoom (Hardware magnifier)"),
+    ("Ctrl+5", "Presentation Countdown Timer"),
+    ("Ctrl+6", "Magnifier Loupe Lens (Wheel: zoom | Space: pin)"),
+    ("", ""),
+    ("DRAW TOOLS & KEYS", ""),
+    ("V", "Select (drag/resize, Del removes)"),
+    ("Ctrl+D / Ctrl+[ ]", "Duplicate / send back / bring front"),
+    ("Drag arrow end", "Re-anchor it, or drop in space to detach"),
+    (
+        "Ctrl+Alt+Arrows",
+        "Align selection (C/M: centre, H/V: spread)",
+    ),
+    ("Ctrl+Shift+Up/Dn", "Fade selection in / out"),
+    ("Ctrl+E", "Cycle arrowhead shape"),
+    ("Drag line middle", "Bow it into a curve"),
+    ("Ctrl+G / Ctrl+Shift+G", "Group / ungroup selection"),
+    ("P", "Pen (freehand with Bezier smoothing)"),
+    ("K", "Laser Pointer (glowing fading trail)"),
+    ("X", "Eraser (drag to delete strokes)"),
+    ("H", "Highlighter (translucent)"),
+    ("L", "Straight Line tool"),
+    ("A", "Arrow tool"),
+    ("Shift+R", "Rectangle tool"),
+    ("U", "Rounded Rectangle tool"),
+    ("Q", "Ellipse / Circle tool"),
+    ("T", "Text (Enter: new line | Esc: done)"),
+    ("Shift+S", "Sticky Note (click, then type)"),
+    ("N", "Step Badge (Shift+N: reset #)"),
+    ("Shift+X", "Redact / Blur mosaic box"),
+    ("", ""),
+    ("GESTURES & MODIFIERS", ""),
+    ("Hold Pen", "Hold 350ms to auto-snap shape"),
+    ("⋮⋮ Drag", "Move Fluent Toolbar anywhere"),
+    ("Shift + Drag", "Snap straight line (45°)"),
+    ("Ctrl + Drag", "Snap rectangle"),
+    ("Tab + Drag", "Snap ellipse"),
+    ("Alt + Drag", "Suppress snap to other shapes"),
+];
+
+const CHEAT_COL2: &[(&str, &str)] = &[
+    ("COLOR PRESETS", ""),
+    ("R", "Red"),
+    ("G", "Green"),
+    ("B", "Blue"),
+    ("Y", "Yellow"),
+    ("O", "Orange"),
+    ("Shift+P", "Pink / Purple"),
+    ("C / I", "Cyan"),
+    ("Shift+W / Shift+B", "White Pen / Black Pen"),
+    (
+        "Ctrl+I",
+        "Eyedropper — click to pick a colour off the screen",
+    ),
+    ("", ""),
+    ("CANVAS MODES", ""),
+    ("W", "Whiteboard slate"),
+    ("Shift+K", "Blackboard slate"),
+    ("", ""),
+    ("ACTIONS & CONTROLS", ""),
+    ("F2", "Toggle Fluent Toolbar & HUD"),
+    ("F3 / Ctrl+3", "Toggle Spotlight on/off"),
+    ("Space", "Toggle Pan/Zoom vs Draw mode"),
+    ("Wheel", "Zoom in / out centered at mouse"),
+    ("Middle-drag", "Pan — past the screen edge on a slate"),
+    ("Ctrl + Wheel", "Resize Spotlight circle"),
+    ("Shift + Wheel", "Adjust brush stroke width"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / Redo (with badge counter)"),
+    ("Ctrl+C / Ctrl+S", "Copy screen / Save snapshot"),
+    ("Ctrl+Shift+S / Ctrl+O", "Save / load annotation session"),
+    ("Ctrl+V", "Paste an image from the clipboard"),
+    ("Ctrl+Shift+E", "Cycle export scale (1x/2x/3x)"),
+    ("Ctrl+J", "Export annotations as SVG"),
+    ("Ctrl+P", "Export screen + drawings as PDF"),
+    ("Ctrl+T / Ctrl+W", "New board / close board"),
+    ("Ctrl+Shift+T", "Restore last closed board"),
+    ("Ctrl+Shift+] / [", "Next / previous board"),
+    ("E / Delete", "Clear canvas (undoable)"),
+    ("Esc / Right-Click", "Return to Pan mode / Exit overlay"),
+];
+
+/// Panel height must follow from the actual row content (headers/blanks/normal
+/// rows each advance the running y offset by a different amount - see the
+/// column render loops) rather than a hardcoded constant, or the last rows of
+/// whichever column is taller render past the bottom of the background.
+fn cheat_sheet_height() -> f32 {
+    let column_content_height = |rows: &[(&str, &str)]| -> f32 {
+        let mut y = 60.0f32;
+        for (key, desc) in rows {
+            if key.is_empty() {
+                y += 6.0;
+            } else if desc.is_empty() {
+                y += 20.0;
+            } else {
+                y += 18.5;
+            }
+        }
+        y
+    };
+    let content_h = column_content_height(CHEAT_COL1).max(column_content_height(CHEAT_COL2));
+    let bottom_padding = 24.0;
+    (content_h + bottom_padding).max(660.0)
+}
+
 impl D2DRenderer {
     #[allow(clippy::too_many_arguments)]
     pub(super) unsafe fn render_spotlight_mask(
@@ -483,7 +591,7 @@ impl D2DRenderer {
         use windows::core::Interface;
 
         const MODAL_W: f32 = 720.0;
-        const MODAL_H: f32 = 660.0;
+        let modal_h = cheat_sheet_height();
         unsafe {
             let rt_id = rt.as_raw() as usize;
             let dpi_bits = self.dpi.to_bits();
@@ -494,7 +602,7 @@ impl D2DRenderer {
                 let scale = self.dpi / 96.0;
                 let px = D2D_SIZE_U {
                     width: (MODAL_W * scale).ceil() as u32,
-                    height: (MODAL_H * scale).ceil() as u32,
+                    height: (modal_h * scale).ceil() as u32,
                 };
                 let fmt = D2D1_PIXEL_FORMAT {
                     format: DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -509,7 +617,7 @@ impl D2DRenderer {
                     target.SetDpi(self.dpi, self.dpi);
                     target.BeginDraw();
                     target.Clear(None);
-                    self.render_cheat_sheet_contents(&target, MODAL_W, MODAL_H);
+                    self.render_cheat_sheet_contents(&target, MODAL_W, modal_h);
                     if target.EndDraw(None, None).is_ok() {
                         *cache = Some((rt_id, dpi_bits, target));
                     }
@@ -525,14 +633,14 @@ impl D2DRenderer {
                 return;
             };
             let mx = (screen_w - MODAL_W) / 2.0;
-            let my = (screen_h - MODAL_H) / 2.0;
+            let my = (screen_h - modal_h) / 2.0;
             rt.DrawBitmap(
                 &bitmap,
                 Some(&D2D_RECT_F {
                     left: mx,
                     top: my,
                     right: mx + MODAL_W,
-                    bottom: my + MODAL_H,
+                    bottom: my + modal_h,
                 }),
                 1.0,
                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
@@ -548,8 +656,14 @@ impl D2DRenderer {
         screen_h: f32,
     ) {
         unsafe {
+            // Left column entries
+            let col1 = CHEAT_COL1;
+
+            // Right column entries
+            let col2 = CHEAT_COL2;
+
             let modal_w = 720.0;
-            let modal_h = 660.0;
+            let modal_h = cheat_sheet_height();
             let mx = (screen_w - modal_w) / 2.0;
             let my = (screen_h - modal_h) / 2.0;
 
@@ -634,91 +748,8 @@ impl D2DRenderer {
                     windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                 );
 
-                // Left column entries
-                let col1 = [
-                    ("GLOBAL SHORTCUTS", ""),
-                    ("Ctrl+1", "Static Freeze Zoom (Wheel/Pan/Draw)"),
-                    ("Ctrl+2", "Draw / Annotation Mode"),
-                    ("Ctrl+3", "Spotlight Mode (Wheel: resize)"),
-                    ("Ctrl+4", "Live Zoom (Hardware magnifier)"),
-                    ("Ctrl+5", "Presentation Countdown Timer"),
-                    ("Ctrl+6", "Magnifier Loupe Lens (Wheel: zoom | Space: pin)"),
-                    ("", ""),
-                    ("DRAW TOOLS & KEYS", ""),
-                    ("V", "Select (drag/resize, Del removes)"),
-                    ("Ctrl+D / Ctrl+[ ]", "Duplicate / send back / bring front"),
-                    ("Drag arrow end", "Re-anchor it, or drop in space to detach"),
-                    (
-                        "Ctrl+Alt+Arrows",
-                        "Align selection (C/M: centre, H/V: spread)",
-                    ),
-                    ("Ctrl+Shift+Up/Dn", "Fade selection in / out"),
-                    ("Ctrl+E", "Cycle arrowhead shape"),
-                    ("Drag line middle", "Bow it into a curve"),
-                    ("Ctrl+G / Ctrl+Shift+G", "Group / ungroup selection"),
-                    ("P", "Pen (freehand with Bezier smoothing)"),
-                    ("K", "Laser Pointer (glowing fading trail)"),
-                    ("X", "Eraser (drag to delete strokes)"),
-                    ("H", "Highlighter (translucent)"),
-                    ("L", "Straight Line tool"),
-                    ("A", "Arrow tool"),
-                    ("Shift+R", "Rectangle tool"),
-                    ("U", "Rounded Rectangle tool"),
-                    ("Q", "Ellipse / Circle tool"),
-                    ("T", "Text (Enter: new line | Esc: done)"),
-                    ("Shift+S", "Sticky Note (click, then type)"),
-                    ("N", "Step Badge (Shift+N: reset #)"),
-                    ("Shift+X", "Redact / Blur mosaic box"),
-                    ("", ""),
-                    ("GESTURES & MODIFIERS", ""),
-                    ("Hold Pen", "Hold 350ms to auto-snap shape"),
-                    ("⋮⋮ Drag", "Move Fluent Toolbar anywhere"),
-                    ("Shift + Drag", "Snap straight line (45°)"),
-                    ("Ctrl + Drag", "Snap rectangle"),
-                    ("Tab + Drag", "Snap ellipse"),
-                    ("Alt + Drag", "Suppress snap to other shapes"),
-                ];
-
-                // Right column entries
-                let col2 = [
-                    ("COLOR PRESETS", ""),
-                    ("R", "Red"),
-                    ("G", "Green"),
-                    ("B", "Blue"),
-                    ("Y", "Yellow"),
-                    ("O", "Orange"),
-                    ("Shift+P", "Pink / Purple"),
-                    ("C / I", "Cyan"),
-                    ("Shift+W / Shift+B", "White Pen / Black Pen"),
-                    ("", ""),
-                    ("CANVAS MODES", ""),
-                    ("W", "Whiteboard slate"),
-                    ("Shift+K", "Blackboard slate"),
-                    ("", ""),
-                    ("ACTIONS & CONTROLS", ""),
-                    ("F2", "Toggle Fluent Toolbar & HUD"),
-                    ("F3 / Ctrl+3", "Toggle Spotlight on/off"),
-                    ("Space", "Toggle Pan/Zoom vs Draw mode"),
-                    ("Wheel", "Zoom in / out centered at mouse"),
-                    ("Middle-drag", "Pan — past the screen edge on a slate"),
-                    ("Ctrl + Wheel", "Resize Spotlight circle"),
-                    ("Shift + Wheel", "Adjust brush stroke width"),
-                    ("Ctrl+Z / Ctrl+Y", "Undo / Redo (with badge counter)"),
-                    ("Ctrl+C / Ctrl+S", "Copy screen / Save snapshot"),
-                    ("Ctrl+Shift+S / Ctrl+O", "Save / load annotation session"),
-                    ("Ctrl+V", "Paste an image from the clipboard"),
-                    ("Ctrl+Shift+E", "Cycle export scale (1x/2x/3x)"),
-                    ("Ctrl+J", "Export annotations as SVG"),
-                    ("Ctrl+P", "Export screen + drawings as PDF"),
-                    ("Ctrl+T / Ctrl+W", "New board / close board"),
-                    ("Ctrl+Shift+T", "Restore last closed board"),
-                    ("Ctrl+Shift+] / [", "Next / previous board"),
-                    ("E / Delete", "Clear canvas (undoable)"),
-                    ("Esc / Right-Click", "Return to Pan mode / Exit overlay"),
-                ];
-
                 let mut y1 = my + 60.0;
-                for (key, desc) in &col1 {
+                for (key, desc) in col1 {
                     if key.is_empty() {
                         y1 += 6.0;
                         continue;
@@ -776,7 +807,7 @@ impl D2DRenderer {
                 }
 
                 let mut y2 = my + 60.0;
-                for (key, desc) in &col2 {
+                for (key, desc) in col2 {
                     if key.is_empty() {
                         y2 += 6.0;
                         continue;

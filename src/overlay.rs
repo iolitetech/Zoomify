@@ -200,6 +200,9 @@ pub struct OverlayWindow {
     pub marquee: Option<(Point2D, Point2D)>,
     pub current_tool: DrawTool,
     pub current_color: ColorPreset,
+    /// Tool to restore once the eyedropper (`Ctrl+I`) samples a colour or is
+    /// cancelled. `None` when the eyedropper isn't armed.
+    pub pre_eyedropper_tool: Option<DrawTool>,
     pub stroke_width: f32,
     pub fill_mode: FillMode,
     pub stroke_pattern: StrokePattern,
@@ -429,6 +432,7 @@ impl OverlayWindow {
                 active_shape: None,
                 current_tool: DrawTool::Pen,
                 current_color: initial_color,
+                pre_eyedropper_tool: None,
                 stroke_width: cfg.default_stroke_width,
                 fill_mode,
                 stroke_pattern,
@@ -821,6 +825,51 @@ impl OverlayWindow {
             let sh = self.logical_h();
             self.toolbar.update_layout(sw, sh);
         }
+    }
+
+    /// Arm the eyedropper: the next click samples a colour off the (frozen)
+    /// screen into `current_color`, then this reverts to whatever tool was
+    /// active before — a one-shot detour, unlike every other `DrawTool`.
+    pub fn enter_eyedropper(&mut self) {
+        self.ensure_draw_mode();
+        if self.current_tool != DrawTool::Eyedropper {
+            self.pre_eyedropper_tool = Some(self.current_tool);
+        }
+        self.current_tool = DrawTool::Eyedropper;
+        self.toolbar.active_tool = Some(DrawTool::Eyedropper);
+        self.set_toast("💧", "Eyedropper — click to pick a colour (Esc to cancel)");
+        self.request_repaint();
+    }
+
+    /// Restore the tool the eyedropper was armed from, without sampling.
+    pub fn cancel_eyedropper(&mut self) {
+        self.current_tool = self.pre_eyedropper_tool.take().unwrap_or(DrawTool::Select);
+        self.toolbar.active_tool = Some(self.current_tool);
+        self.sync_tool_to_toolbar();
+        self.set_toast("💧", "Eyedropper Cancelled");
+        self.request_repaint();
+    }
+
+    /// Sample `current_color` from the frozen background capture at a canvas
+    /// point (post `zoom.screen_to_canvas`, so it already matches whatever
+    /// pixel is visually under the cursor at the current pan/zoom), then
+    /// restore the tool the eyedropper was armed from.
+    pub fn pick_color_at(&mut self, canvas_pt: Point2D) {
+        let sampled = self.background_capture.as_ref().and_then(|cap| {
+            let px = (canvas_pt.x * self.dpi_scale()).round() as i32;
+            let py = (canvas_pt.y * self.dpi_scale()).round() as i32;
+            cap.pixel_at(px, py)
+        });
+        self.current_tool = self.pre_eyedropper_tool.take().unwrap_or(DrawTool::Select);
+        self.toolbar.active_tool = Some(self.current_tool);
+        self.sync_tool_to_toolbar();
+        if let Some((r, g, b)) = sampled {
+            self.apply_picked_color(ColorPreset::Custom(r, g, b));
+            self.set_toast("💧", format!("Picked #{:02X}{:02X}{:02X}", r, g, b));
+        } else {
+            self.set_toast("⚠️", "Nothing to sample there");
+        }
+        self.request_repaint();
     }
 
     pub fn enter_draw_mode(&mut self) {
@@ -5304,6 +5353,11 @@ impl OverlayWindow {
                         return LRESULT(0);
                     }
 
+                    if this.current_tool == DrawTool::Eyedropper {
+                        this.pick_color_at(canvas_pt);
+                        return LRESULT(0);
+                    }
+
                     if this.current_tool == DrawTool::StickyNote {
                         this.commit_text_editor();
                         this.place_sticky_note(canvas_pt);
@@ -5605,6 +5659,11 @@ impl OverlayWindow {
                 }
 
                 WM_RBUTTONDOWN => {
+                    // If eyedropper is armed, right click cancels it without sampling
+                    if this.current_tool == DrawTool::Eyedropper {
+                        this.cancel_eyedropper();
+                        return LRESULT(0);
+                    }
                     // If text editor is active, right click cancels text editor
                     if this.text_editor.is_some() {
                         this.cancel_text_editor();
@@ -6127,6 +6186,9 @@ impl OverlayWindow {
                             k if k == 'P' as i32 => {
                                 this.export_pdf();
                             }
+                            k if k == 'I' as i32 => {
+                                this.enter_eyedropper();
+                            }
                             // Ctrl+Shift+Up/Down fades the selection; Ctrl+E
                             // cycles the arrowhead; Ctrl+Shift+E cycles the
                             // export resolution multiplier.
@@ -6187,6 +6249,8 @@ impl OverlayWindow {
                             if this.show_cheat_sheet {
                                 this.show_cheat_sheet = false;
                                 this.request_repaint();
+                            } else if this.current_tool == DrawTool::Eyedropper {
+                                this.cancel_eyedropper();
                             } else if this.active_shape.is_some() {
                                 this.active_shape = None;
                                 this.is_drawing = false;

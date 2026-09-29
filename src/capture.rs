@@ -32,6 +32,17 @@ pub fn set_use_graphics_capture(enabled: bool) {
 }
 
 impl ScreenCapture {
+    /// Straight sRGB (r, g, b) at a physical pixel relative to this capture's
+    /// own origin, or `None` outside its bounds.
+    pub fn pixel_at(&self, px: i32, py: i32) -> Option<(u8, u8, u8)> {
+        if px < 0 || py < 0 || px as u32 >= self.width || py as u32 >= self.height {
+            return None;
+        }
+        let idx = (py as usize * self.width as usize + px as usize) * 4;
+        let bgra = self.pixels.get(idx..idx + 4)?;
+        Some((bgra[2], bgra[1], bgra[0]))
+    }
+
     /// Grab a screen rectangle, preferring Windows.Graphics.Capture.
     ///
     /// WGC sees what the compositor composed — hardware-overlay video and
@@ -291,5 +302,44 @@ impl ScreenCapture {
         }
 
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_capture() -> ScreenCapture {
+        // 2x2 BGRA: (0,0) red, (1,0) green, (0,1) blue, (1,1) white.
+        ScreenCapture {
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+            pixels: vec![
+                0, 0, 255, 255, // (0,0) red
+                0, 255, 0, 255, // (1,0) green
+                255, 0, 0, 255, // (0,1) blue
+                255, 255, 255, 255, // (1,1) white
+            ],
+        }
+    }
+
+    #[test]
+    fn pixel_at_reads_bgra_as_rgb() {
+        let cap = make_capture();
+        assert_eq!(cap.pixel_at(0, 0), Some((255, 0, 0)));
+        assert_eq!(cap.pixel_at(1, 0), Some((0, 255, 0)));
+        assert_eq!(cap.pixel_at(0, 1), Some((0, 0, 255)));
+        assert_eq!(cap.pixel_at(1, 1), Some((255, 255, 255)));
+    }
+
+    #[test]
+    fn pixel_at_out_of_bounds_is_none() {
+        let cap = make_capture();
+        assert_eq!(cap.pixel_at(-1, 0), None);
+        assert_eq!(cap.pixel_at(0, -1), None);
+        assert_eq!(cap.pixel_at(2, 0), None);
+        assert_eq!(cap.pixel_at(0, 2), None);
     }
 }
