@@ -305,12 +305,29 @@ unsafe fn read_dib() -> Option<ClipboardImage> {
             return None;
         }
 
-        // Pixels start after the header and any colour masks the DIB declares.
-        let mask_bytes = if header.biCompression == BI_BITFIELDS.0 {
+        // Anything but plain RGB or bitfields (RLE, embedded JPEG/PNG) has no
+        // pixel layout this function can read; better to decline than to
+        // interpret compressed bytes as pixels.
+        if header.biCompression != BI_RGB.0 && header.biCompression != BI_BITFIELDS.0 {
+            let _ = GlobalUnlock(hglobal);
+            return None;
+        }
+
+        // Pixels start after the header, any colour masks and any colour
+        // table. The three masks are a separate 12-byte block only after a
+        // plain 40-byte header; V4/V5 headers (108/124 bytes) carry them
+        // inside biSize already, so adding 12 there skipped into the pixels.
+        let mask_bytes: usize = if header.biCompression == BI_BITFIELDS.0
+            && header.biSize as usize == std::mem::size_of::<BITMAPINFOHEADER>()
+        {
             12
         } else {
             0
         };
+        // 24/32-bit DIBs may still declare an (unused) colour table that sits
+        // between the header and the pixels.
+        let table_bytes = (header.biClrUsed as usize).saturating_mul(4);
+        let mask_bytes = mask_bytes.saturating_add(table_bytes);
 
         let w = width as usize;
         let h = height as usize;

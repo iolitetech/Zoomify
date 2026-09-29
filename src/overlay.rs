@@ -437,7 +437,7 @@ impl OverlayWindow {
                 badge_size,
                 badge_shape,
                 pen_settings: StrokeToolSettings {
-                    stroke_width: 3.0,
+                    stroke_width: cfg.default_stroke_width,
                     pattern: StrokePattern::Solid,
                 },
                 highlighter_settings: StrokeToolSettings {
@@ -711,6 +711,16 @@ impl OverlayWindow {
         self.request_repaint();
     }
 
+    /// Switch tool from somewhere other than the toolbar (tray menu, hotkey),
+    /// keeping the toolbar's highlight, sub-bar and stroke settings in step.
+    pub fn select_tool(&mut self, tool: DrawTool) {
+        self.current_tool = tool;
+        self.toolbar.active_tool = Some(tool);
+        self.sync_tool_to_toolbar();
+        let (w, h) = (self.logical_w(), self.logical_h());
+        self.toolbar.update_layout(w, h);
+    }
+
     pub fn sync_tool_to_toolbar(&mut self) {
         match self.current_tool {
             DrawTool::Pen => {
@@ -896,6 +906,17 @@ impl OverlayWindow {
             self.capture_current_screen();
         }
         self.mode = AppMode::Timer;
+        // A dragged card position was saved against whichever monitor it was
+        // on; after a switch to a smaller one (or an unplug) it can sit
+        // entirely off-screen with no way to grab it back.
+        if let Some(pos) = self.timer_widget.custom_pos {
+            let (w, h) = (self.logical_w(), self.logical_h());
+            let (half_w, half_h) = (290.0_f32.min(w / 2.0), 225.0_f32.min(h / 2.0));
+            self.timer_widget.custom_pos = Some(Point2D::new(
+                pos.x.clamp(half_w, (w - half_w).max(half_w)),
+                pos.y.clamp(half_h, (h - half_h).max(half_h)),
+            ));
+        }
         self.loupe.active = false;
         self.loupe.pinned = false;
         self.spotlight.active = false;
@@ -6438,7 +6459,7 @@ impl OverlayWindow {
                         }
                         k if k == 'K' as i32 && !is_shift => {
                             this.ensure_draw_mode();
-                            this.current_tool = DrawTool::LaserPointer;
+                            this.select_tool(DrawTool::LaserPointer);
                             this.set_toast("🔴", "Laser Pointer");
                             this.request_repaint();
                         }

@@ -319,7 +319,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_draw_mode();
-                        overlay.current_tool = DrawTool::LaserPointer;
+                        overlay.select_tool(DrawTool::LaserPointer);
                         overlay.set_toast("🔴", "Laser Pointer Active (K)");
                         overlay.request_repaint();
                     }
@@ -327,7 +327,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_draw_mode();
-                        overlay.current_tool = DrawTool::Eraser;
+                        overlay.select_tool(DrawTool::Eraser);
                         overlay.set_toast("🧹", "Stroke Eraser Active (X)");
                         overlay.request_repaint();
                     }
@@ -335,7 +335,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_draw_mode();
-                        overlay.current_tool = DrawTool::Blur;
+                        overlay.select_tool(DrawTool::Blur);
                         overlay.set_toast("░", "Redact / Blur Tool Active (Shift+X)");
                         overlay.request_repaint();
                     }
@@ -359,8 +359,8 @@ unsafe extern "system" fn tray_wnd_proc(
                         let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         overlay.toolbar.custom_position = None;
                         overlay.toolbar.collapsed = false;
-                        let w = overlay.screen_width as f32;
-                        let h = overlay.screen_height as f32;
+                        let w = overlay.logical_w();
+                        let h = overlay.logical_h();
                         overlay.toolbar.update_layout(w, h);
                         overlay.set_toast("📌", "Toolbar Position Reset to Top Center");
                         overlay.request_repaint();
@@ -445,6 +445,11 @@ unsafe extern "system" fn tray_wnd_proc(
                 let failed = ctx.hotkeys.reload_from_config(&cfg);
                 let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                 overlay.stroke_width = cfg.default_stroke_width;
+                // Pen strokes take their width from pen_settings, not stroke_width.
+                overlay.pen_settings.stroke_width = cfg.default_stroke_width;
+                if overlay.current_tool == DrawTool::Pen {
+                    overlay.sync_tool_to_toolbar();
+                }
                 overlay.spotlight.radius = cfg.spotlight_radius;
                 overlay.timer_seconds = cfg.timer_duration_mins * 60;
                 overlay.timer_sound_enabled = cfg.timer_sound_enabled;
