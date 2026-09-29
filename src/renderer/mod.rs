@@ -20,9 +20,9 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DASH_STYLE_SOLID, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
     D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_STROKE_STYLE_PROPERTIES,
-    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Bitmap, ID2D1BitmapRenderTarget,
-    ID2D1Factory, ID2D1GeometryGroup, ID2D1HwndRenderTarget, ID2D1PathGeometry, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Bitmap, ID2D1BitmapBrush,
+    ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1GeometryGroup, ID2D1HwndRenderTarget,
+    ID2D1PathGeometry, ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
@@ -122,6 +122,11 @@ pub struct D2DRenderer {
     /// under it), but this skips re-running `format!`/`encode_utf16` on the
     /// vast majority of frames where nothing it displays actually changed.
     hud_text_cache: RefCell<Option<(HudTextKey, Vec<u16>)>>,
+    /// The loupe's magnifying bitmap brush, rebuilt only when the render
+    /// target or the background bitmap it wraps changes - every other frame
+    /// just updates its transform, which is the only part that actually
+    /// varies as the loupe follows the cursor.
+    loupe_brush_cache: RefCell<(usize, usize, Option<ID2D1BitmapBrush>)>,
     /// Finished blur mosaics, keyed by content (background bitmap identity +
     /// rect + block size) rather than shared by size the way this used to
     /// be - see the doc comment at its use in shapes.rs.
@@ -385,6 +390,7 @@ impl D2DRenderer {
                 solid_brush_cache: RefCell::new((0, HashMap::new())),
                 scratch_brush: RefCell::new((0, None)),
                 hud_text_cache: RefCell::new(None),
+                loupe_brush_cache: RefCell::new((0, 0, None)),
                 blur_mosaic_cache: RefCell::new((0, HashMap::new())),
                 geometry_cache: RefCell::new((0, HashMap::new())),
                 image_cache: RefCell::new((0, HashMap::new())),
@@ -737,6 +743,12 @@ impl D2DRenderer {
             cache.1.clear();
         }
         self.scratch_brush.borrow_mut().1 = None;
+        {
+            let mut cache = self.loupe_brush_cache.borrow_mut();
+            cache.0 = 0;
+            cache.1 = 0;
+            cache.2 = None;
+        }
         {
             let mut cache = self.blur_mosaic_cache.borrow_mut();
             cache.0 = 0;

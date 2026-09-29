@@ -3,6 +3,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_BRUSH_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_ELLIPSE,
     D2D1_EXTEND_MODE_CLAMP, D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1RenderTarget,
 };
+use windows::core::Interface;
 use windows_numerics::Matrix3x2;
 
 use super::{D2DRenderer, v2};
@@ -35,14 +36,28 @@ impl D2DRenderer {
 
             // 1. Setup GPU hardware matrix for magnified bitmap brush:
             // Translate origin to (-cx, -cy), scale by (m, m), then translate back to (cx, cy).
-            let brush_props = D2D1_BITMAP_BRUSH_PROPERTIES {
-                extendModeX: D2D1_EXTEND_MODE_CLAMP,
-                extendModeY: D2D1_EXTEND_MODE_CLAMP,
-                interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-            };
-
-            let Ok(bitmap_brush) = rt.CreateBitmapBrush(bg, Some(&brush_props), None) else {
-                return;
+            // Rebuilt only when the render target or the background bitmap
+            // identity changes - every other frame reuses the same brush and
+            // just moves its transform, which is all that actually varies as
+            // the loupe follows the cursor.
+            let rt_id = rt.as_raw() as usize;
+            let bg_id = bg.as_raw() as usize;
+            let bitmap_brush = {
+                let mut cache = self.loupe_brush_cache.borrow_mut();
+                if cache.0 != rt_id || cache.1 != bg_id || cache.2.is_none() {
+                    let brush_props = D2D1_BITMAP_BRUSH_PROPERTIES {
+                        extendModeX: D2D1_EXTEND_MODE_CLAMP,
+                        extendModeY: D2D1_EXTEND_MODE_CLAMP,
+                        interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    };
+                    let Ok(built) = rt.CreateBitmapBrush(bg, Some(&brush_props), None) else {
+                        return;
+                    };
+                    cache.0 = rt_id;
+                    cache.1 = bg_id;
+                    cache.2 = Some(built);
+                }
+                cache.2.clone().unwrap()
             };
 
             // `bg` is captured at 96 DPI (capture.rs), so its own coordinate
