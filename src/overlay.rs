@@ -4877,9 +4877,23 @@ impl OverlayWindow {
 
                     // Eraser execution when dragging
                     if this.is_drawing && this.current_tool == DrawTool::Eraser {
+                        // A cheap AABB reject (padded by the hit radius) before
+                        // the real per-segment intersection test: on a busy
+                        // canvas, most shapes are nowhere near the cursor on
+                        // any given mouse-move, so this turns most of them
+                        // into four comparisons instead of a full geometric test.
+                        const ERASER_RADIUS: f32 = 16.0;
                         let mut erased_idx = None;
                         for (idx, shape) in this.shapes.iter().enumerate().rev() {
-                            if shape_intersects_circle(&shape.shape, canvas_pt, 16.0) {
+                            let (l, t, r, b) = this.shape_bounds_exact(&shape.shape);
+                            if canvas_pt.x < l - ERASER_RADIUS
+                                || canvas_pt.x > r + ERASER_RADIUS
+                                || canvas_pt.y < t - ERASER_RADIUS
+                                || canvas_pt.y > b + ERASER_RADIUS
+                            {
+                                continue;
+                            }
+                            if shape_intersects_circle(&shape.shape, canvas_pt, ERASER_RADIUS) {
                                 erased_idx = Some(idx);
                                 break;
                             }
