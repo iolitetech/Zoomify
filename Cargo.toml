@@ -2,6 +2,19 @@
 name = "zoomify"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "Windows screen zoom, annotation, spotlight and presentation-timer overlay"
+license = "MIT"
+repository = "https://github.com/iolitetech/Zoomify"
+homepage = "https://github.com/iolitetech/Zoomify"
+readme = "README.md"
+keywords = ["screen", "zoom", "annotation", "presentation", "windows"]
+categories = ["graphics", "os::windows-apis"]
+exclude = [".github/", ".claude/", "cliff.toml", "BUGFIX-ROADMAP.md", "ROADMAP.md"]
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc"]
 
 [dependencies]
 windows = { version = "0.62.2", features = [
