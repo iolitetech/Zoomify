@@ -3443,6 +3443,10 @@ impl OverlayWindow {
     }
 
     pub fn copy_screen_to_clipboard(&mut self) {
+        // Commit any in-progress text edit first: otherwise the export would
+        // either bake in the editor's card chrome (PNG/PDF) or drop the text
+        // being typed entirely (SVG, which reads straight from self.shapes).
+        self.commit_text_editor();
         let Some(composite) = self.get_composite_capture(self.spotlight.active) else {
             self.set_toast("❌", "Nothing to copy");
             return;
@@ -3533,6 +3537,10 @@ impl OverlayWindow {
     }
 
     pub fn save_session(&mut self, manual: bool) {
+        // Commit any in-progress text edit first, so both the saved session
+        // data and its PNG preview include the text being typed rather than
+        // silently dropping it.
+        self.commit_text_editor();
         // Every board, not just the active one - this used to save only
         // self.shapes, so switching boards and exiting (with autosave, or a
         // manual save right after switching) silently dropped every other
@@ -3678,6 +3686,8 @@ impl OverlayWindow {
     }
 
     pub fn save_snapshot(&mut self) {
+        // Commit any in-progress text edit first: see copy_screen_to_clipboard.
+        self.commit_text_editor();
         let Some(mut composite) = self.get_composite_capture(self.spotlight.active) else {
             self.set_toast("❌", "Nothing to save");
             return;
@@ -3733,6 +3743,10 @@ impl OverlayWindow {
     /// there is no D2D render target involved, so `export_scale` has nothing
     /// to apply to — shapes are vector paths at native resolution regardless.
     pub fn export_svg(&mut self) {
+        // Commit any in-progress text edit first: this reads straight from
+        // self.shapes, so an uncommitted edit would otherwise be dropped
+        // entirely rather than just missing its card chrome.
+        self.commit_text_editor();
         let mut text_layout: std::collections::HashMap<ShapeId, (f32, f32)> =
             std::collections::HashMap::new();
         for a in &self.shapes {
@@ -3839,6 +3853,8 @@ impl OverlayWindow {
     /// `get_composite_capture` like those two, so it honours `export_scale`
     /// and the current spotlight the same way.
     pub fn export_pdf(&mut self) {
+        // Commit any in-progress text edit first: see copy_screen_to_clipboard.
+        self.commit_text_editor();
         let Some(composite) = self.get_composite_capture(self.spotlight.active) else {
             self.set_toast("❌", "Nothing to export");
             return;

@@ -67,8 +67,11 @@ width="{w}" height="{h}" viewBox="0 0 {w} {h}">
     // Everything — background included — sits under the same zoom transform
     // the live overlay applies, so the export matches what Save/Copy show.
     let z = input.zoom_level.max(1.0);
-    let zoomed = z > 1.001;
-    if zoomed {
+    // A 1x view can still be panned (infinite canvas / whiteboard drag), so
+    // gate on the pan offset too - PNG export always applies this transform
+    // and SVG must match it even when zoom itself is at rest.
+    let panned = input.view_x.abs() > 0.001 || input.view_y.abs() > 0.001;
+    if z > 1.001 || panned {
         let _ = write!(
             out,
             r#"<g transform="matrix({a} 0 0 {a} {e} {f})">"#,
@@ -647,7 +650,7 @@ fn write_text_run(
 ) {
     let _ = write!(
         out,
-        r#"<text x="{x}" y="{y}" font-family="{ff}" font-size="{fs}" font-weight="{fw}" font-style="{fs2}" fill="{fill}" fill-opacity="{fo}" style="dominant-baseline:hanging">"#,
+        r#"<text x="{x}" y="{y}" xml:space="preserve" font-family="{ff}" font-size="{fs}" font-weight="{fw}" font-style="{fs2}" fill="{fill}" fill-opacity="{fo}" style="dominant-baseline:hanging">"#,
         x = FNum(origin.x),
         y = FNum(origin.y),
         ff = font_family_css(font_family),
@@ -1063,6 +1066,10 @@ fn hex(color: ColorPreset) -> String {
 struct FNum(f32);
 impl std::fmt::Display for FNum {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.0.is_finite() {
+            eprintln!("svg_export: refusing to write non-finite value {}", self.0);
+            return write!(f, "0");
+        }
         let r = (self.0 * 1000.0).round() / 1000.0;
         if r == r.trunc() {
             write!(f, "{}", r as i64)
@@ -1076,6 +1083,10 @@ fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
+            // XML 1.0 forbids these control characters outright (tab/LF/CR
+            // are the only C0 codes it allows) - a pasted control byte would
+            // otherwise produce an SVG no browser or editor can parse.
+            '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}' => {}
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
@@ -1321,5 +1332,29 @@ mod tests {
     #[test]
     fn test_xml_escaping_covers_the_five_reserved_characters() {
         assert_eq!(esc("<a & \"b\">"), "&lt;a &amp; &quot;b&quot;&gt;");
+    }
+
+    #[test]
+    fn test_xml_escaping_strips_illegal_control_characters_but_keeps_tab_lf_cr() {
+        let s = "a\u{0}b\u{1}\tc\nd\re\u{1f}f";
+        assert_eq!(esc(s), "ab\tc\nd\ref");
+    }
+
+    #[test]
+    fn test_transform_is_emitted_for_a_pure_pan_at_1x_zoom() {
+        let shapes: Vec<Annotation> = Vec::new();
+        let layout = HashMap::new();
+        let mut i = input(&shapes, &layout);
+        i.view_x = 5.0;
+        i.view_y = 3.0;
+        let svg = build_svg(&i);
+        assert!(svg.contains("matrix(1 0 0 1 -5 -3)"));
+    }
+
+    #[test]
+    fn test_fnum_writes_zero_for_non_finite_values_instead_of_panicking() {
+        assert_eq!(FNum(f32::NAN).to_string(), "0");
+        assert_eq!(FNum(f32::INFINITY).to_string(), "0");
+        assert_eq!(FNum(f32::NEG_INFINITY).to_string(), "0");
     }
 }
