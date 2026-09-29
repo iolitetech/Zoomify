@@ -1130,17 +1130,49 @@ impl D2DRenderer {
             for (ax, ay, bx, by, marker) in guides {
                 if *marker {
                     // A filled diamond reads as "landed on this point" without
-                    // being mistaken for a selection grip.
+                    // being mistaken for a selection grip. Keyed on position
+                    // (the size, 5.0, is fixed) via the same content-hash
+                    // geometry_cache the hexagon badge and strokes use, so a
+                    // drag that keeps re-snapping to the same handful of
+                    // anchor points isn't rebuilding this every frame.
                     let s = 5.0;
-                    if let Ok(path) = self.factory.CreatePathGeometry()
-                        && let Ok(sink) = path.Open()
-                    {
-                        sink.BeginFigure(v2(*ax, ay - s), D2D1_FIGURE_BEGIN_FILLED);
-                        sink.AddLine(v2(ax + s, *ay));
-                        sink.AddLine(v2(*ax, ay + s));
-                        sink.AddLine(v2(ax - s, *ay));
-                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-                        let _ = sink.Close();
+                    let key = {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        0xD1A5_u32.hash(&mut hasher);
+                        ax.to_bits().hash(&mut hasher);
+                        ay.to_bits().hash(&mut hasher);
+                        hasher.finish()
+                    };
+                    let mut cache = self.geometry_cache.borrow_mut();
+                    let rt_id = rt.as_raw() as usize;
+                    if cache.0 != rt_id {
+                        cache.0 = rt_id;
+                        cache.1.clear();
+                    }
+                    let path = if let Some(p) = cache.1.get(&key) {
+                        Some(p.clone())
+                    } else {
+                        let built = self.factory.CreatePathGeometry().ok().and_then(|path| {
+                            let sink = path.Open().ok()?;
+                            sink.BeginFigure(v2(*ax, ay - s), D2D1_FIGURE_BEGIN_FILLED);
+                            sink.AddLine(v2(ax + s, *ay));
+                            sink.AddLine(v2(*ax, ay + s));
+                            sink.AddLine(v2(ax - s, *ay));
+                            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                            let _ = sink.Close();
+                            Some(path)
+                        });
+                        if let Some(p) = &built {
+                            if cache.1.len() > GEOMETRY_CACHE_MAX_ENTRIES {
+                                cache.1.clear();
+                            }
+                            cache.1.insert(key, p.clone());
+                        }
+                        built
+                    };
+                    drop(cache);
+                    if let Some(path) = path {
                         rt.FillGeometry(&path, &brush, None);
                     }
                 } else {
