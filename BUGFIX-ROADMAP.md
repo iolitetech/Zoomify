@@ -29,55 +29,94 @@ P6 hardening & polish.
 
 ---
 
+## Status (updated 2026-09-29)
+
+Every item below has been worked through and merged to `master` (PR #2 for P0-P6 up to
+P4-1, PR #3 for P4-4); the commit for each is in the index's Status column. The build has
+no warnings and the unit tests pass. **Nothing here has been checked by running the app**,
+so treat the "Verify" steps as still owed, especially the ones below.
+
+**Deviations from the plan as written:**
+
+- **P4-1** does not track a `scene_revision`. There were ~60 places that mutate shapes, so
+  the layer instead keeps a snapshot of the committed shapes and compares against it every
+  frame (`Arc`ed image pixels compare by pointer first). A missed invalidation can then only
+  cost speed, never show a stale picture. The layer is bypassed while a select-drag is
+  rewriting shapes each frame, and skipped entirely when there are no shapes. Annotation text
+  drawn into it uses grayscale smoothing, not ClearType.
+- **P4-4** replaces the segment-by-segment drawing with one winding-filled union of the same
+  capsules, for committed *solid* strokes only. The live stroke and dashed/dotted patterns keep
+  the old path. A translucent highlighter with pressure no longer double-darkens at overlaps.
+- **P4-5** caches layouts by content (text, font, wrap width) rather than by annotation
+  id + revision, and draws the caret as a line from `HitTestTextPosition`.
+- **P4-10** swaps the on-screen caches out for empty ones around `render_to_capture` and
+  restores them, rather than keeping a second permanent set.
+- **P4-11** was done except for: caching selection bounds (cheap enough after P4-5, and
+  risky around arrow bindings during a drag); `laser_trail` as a `VecDeque` (160 points, no
+  measurable cost); the StepBadge `number.to_string()` (trivial).
+- **P3-2 / P3-8** share one commit (`eac325c`), as do several P1 and P2/P3 pairs.
+
+**Still worth a manual pass:** the scene layer with text, blur, a pasted image, zoom/pan and a
+Ctrl+C export; the text-editor caret mid-text; pressure strokes with a pen; cancelling a pen
+stroke; Ctrl+Wheel in Live Zoom; unplugging a monitor; and one run at 150% scaling.
+
+**Noticed, not changed:** a few long cheat-sheet rows overlapped their neighbours in a
+screenshot (fixed-width text boxes, predates these changes); `render_contained_text` used
+`w.max(wrap)` as its draw width, which is `f32::MAX` for labels that ride on a shape.
+
+---
+
 ## Quick index
 
-| ID | One-liner | Files |
-|---|---|---|
-| P0-1 | Re-entrant `RefCell` borrow aborts the process while a file dialog is open | `main.rs` |
-| P0-2 | Heap over-read exporting after switching monitors | `overlay.rs`, `renderer/mod.rs` |
-| P1-1 | **Live Zoom shows past the screen edge on non-primary monitors (the reported bug)** | `live_zoom.rs` |
-| P1-2 | Zooming out shows out-of-bounds view for ~200 ms | `live_zoom.rs` |
-| P1-3 | Wheel zoom snaps an infinite-canvas pan back to the screen | `types.rs`, `overlay.rs` |
-| P1-4 | Moving the mouse erases a zoomed whiteboard pan | `overlay.rs` |
-| P1-5 | Minimap ignores the infinite canvas | `types.rs` |
-| P1-6 | Wheel changes zoom invisibly in Spotlight mode | `overlay.rs` |
-| P2-1 | Geometry cache: unbounded growth every frame + stale-draw bug | `renderer/mod.rs`, `renderer/shapes.rs` |
-| P2-2 | Image pixels deep-copied everywhere; undo history unbounded | `types.rs`, `overlay.rs` |
-| P2-3 | GPU image cache never evicts; weak cache key shows the wrong image | `renderer/mod.rs`, `types.rs` |
-| P2-4 | Clipboard `HGLOBAL` leaks and unsafe DIB read | `clipboard.rs` |
-| P2-5 | WGC capture rigs accumulate across display changes | `capture_wgc.rs`, `main.rs` |
-| P2-6 | No teardown at process exit | `main.rs`, `overlay.rs`, `settings_window.rs` |
-| P3-1 | Save/autosave writes only the active board; others are lost on exit | `overlay.rs`, `session.rs` |
-| P3-2 | Exiting while editing text deletes the text | `overlay.rs` |
-| P3-3 | Manual saves silently deleted by autosave pruning | `overlay.rs`, `session.rs` |
-| P3-4 | Settings window and overlay overwrite each other's config | `settings_window.rs`, `overlay.rs` |
-| P3-5 | Toolbar Undo during a text edit duplicates the text | `overlay.rs` |
-| P3-6 | Arrow re-anchoring is invisible to undo | `overlay.rs`, `types.rs` |
-| P3-7 | Duplicate copies group membership and arrow bindings | `overlay.rs` |
-| P3-8 | Re-edited text gets a new id, losing bindings/group/opacity | `overlay.rs` |
-| P3-9 | Loading a session lets group ids collide | `session.rs` |
-| P3-10 | Ctrl+W destroys a board with no undo | `overlay.rs` |
-| P4-1 | Retained scene layer (biggest perf win) | `renderer/mod.rs`, `overlay.rs` |
-| P4-2 | Select-drag deep-clones the selection twice per mouse move | `overlay.rs` |
-| P4-3 | Pen-down clones the whole canvas for snap anchors it then discards | `overlay.rs` |
-| P4-4 | Pressure strokes: one `DrawLine` per segment per frame | `renderer/shapes.rs` |
-| P4-5 | Text layouts rebuilt every frame (incl. on hover) | `renderer/shapes.rs`, `renderer/mod.rs`, `overlay.rs` |
-| P4-6 | Toolbar allocates ~25 brushes + ~35 text layouts per frame | `renderer/ui_toolbar.rs` |
-| P4-7 | Idle 60 fps repaints (caret, toast, timer) | `overlay.rs`, `types.rs` |
-| P4-8 | Brush cache self-flushes under picker/laser/toast | `renderer/mod.rs`, `renderer/ui_picker.rs` |
-| P4-9 | Blur re-renders its mosaic every frame; single-slot cache thrashes | `renderer/shapes.rs`, `renderer/mod.rs` |
-| P4-10 | Export wipes every render cache → hitch after each Copy/Save | `renderer/mod.rs` |
-| P4-11 | Misc per-frame allocations & linear scans | several |
-| P4-12 | Release profile options | `Cargo.toml` |
-| P5-1 | Settings window clicks land on the wrong control above 100% DPI | `settings_window.rs` |
-| P5-2 | Loupe magnifies the wrong area above 100% DPI | `renderer/ui_loupe.rs` |
-| P5-3 | Blur samples the wrong region above 100% DPI | `renderer/shapes.rs` |
-| P5-4 | Blur reveals the hidden desktop on Whiteboard/Blackboard | `renderer/mod.rs`, `overlay.rs`, `svg_export.rs` |
-| P5-5 | Shared text formats mutated (centred/no-wrap bleeds into other text) | `renderer/shapes.rs`, `ui_timer.rs`, `ui_toolbar.rs` |
-| P5-6 | Oversized exports/pastes silently blank or invisible | `renderer/mod.rs`, `clipboard.rs` |
-| P5-7 | Emoji cannot be typed (UTF-16 surrogates dropped) | `overlay.rs` |
-| P5-8 | Export mismatches (spotlight position, SVG pan, editor chrome) | `renderer/mod.rs`, `svg_export.rs` |
-| P6-* | Hardening & polish (see section) | several |
+| ID | One-liner | Files | Status |
+|---|---|---|---|
+| P0-1 | Re-entrant `RefCell` borrow aborts the process while a file dialog is open | `main.rs` | Done `75bad45` |
+| P0-2 | Heap over-read exporting after switching monitors | `overlay.rs`, `renderer/mod.rs` | Done `7d20c58` |
+| P1-1 | **Live Zoom shows past the screen edge on non-primary monitors (the reported bug)** | `live_zoom.rs` | Done `27c18f2` |
+| P1-2 | Zooming out shows out-of-bounds view for ~200 ms | `live_zoom.rs` | Done `27c18f2` |
+| P1-3 | Wheel zoom snaps an infinite-canvas pan back to the screen | `types.rs`, `overlay.rs` | Done `6d6c21e` |
+| P1-4 | Moving the mouse erases a zoomed whiteboard pan | `overlay.rs` | Done `6d6c21e` |
+| P1-5 | Minimap ignores the infinite canvas | `types.rs` | Done `6d6c21e` |
+| P1-6 | Wheel changes zoom invisibly in Spotlight mode | `overlay.rs` | Done `6d6c21e` |
+| P2-1 | Geometry cache: unbounded growth every frame + stale-draw bug | `renderer/mod.rs`, `renderer/shapes.rs` | Done `5e328a1` |
+| P2-2 | Image pixels deep-copied everywhere; undo history unbounded | `types.rs`, `overlay.rs` | Done `48c4459` |
+| P2-3 | GPU image cache never evicts; weak cache key shows the wrong image | `renderer/mod.rs`, `types.rs` | Done `291d1bb` |
+| P2-4 | Clipboard `HGLOBAL` leaks and unsafe DIB read | `clipboard.rs` | Done `b4b097f` |
+| P2-5 | WGC capture rigs accumulate across display changes | `capture_wgc.rs`, `main.rs` | Done `2f91c6b` |
+| P2-6 | No teardown at process exit | `main.rs`, `overlay.rs`, `settings_window.rs` | Done `59e106a` |
+| P3-1 | Save/autosave writes only the active board; others are lost on exit | `overlay.rs`, `session.rs` | Done `5e29af7` |
+| P3-2 | Exiting while editing text deletes the text | `overlay.rs` | Done `eac325c` |
+| P3-3 | Manual saves silently deleted by autosave pruning | `overlay.rs`, `session.rs` | Done `6f35e71` |
+| P3-4 | Settings window and overlay overwrite each other's config | `settings_window.rs`, `overlay.rs` | Done `0a10d03` |
+| P3-5 | Toolbar Undo during a text edit duplicates the text | `overlay.rs` | Done `9a85312` |
+| P3-6 | Arrow re-anchoring is invisible to undo | `overlay.rs`, `types.rs` | Done `08e68e2` |
+| P3-7 | Duplicate copies group membership and arrow bindings | `overlay.rs` | Done `218be7a` |
+| P3-8 | Re-edited text gets a new id, losing bindings/group/opacity | `overlay.rs` | Done `eac325c` |
+| P3-9 | Loading a session lets group ids collide | `session.rs` | Done `5e29af7` |
+| P3-10 | Ctrl+W destroys a board with no undo | `overlay.rs` | Done `0ec7153` |
+| P4-1 | Retained scene layer (biggest perf win) | `renderer/mod.rs`, `overlay.rs` | Done `524071f` (needs manual check) |
+| P4-2 | Select-drag deep-clones the selection twice per mouse move | `overlay.rs` | Done `4df5f3c` |
+| P4-3 | Pen-down clones the whole canvas for snap anchors it then discards | `overlay.rs` | Done `d603909` |
+| P4-4 | Pressure strokes: one `DrawLine` per segment per frame | `renderer/shapes.rs` | Done `1797a64` (needs a pen to check) |
+| P4-5 | Text layouts rebuilt every frame (incl. on hover) | `renderer/shapes.rs`, `renderer/mod.rs`, `overlay.rs` | Done `22b83b3` (check the editor caret) |
+| P4-6 | Toolbar allocates ~25 brushes + ~35 text layouts per frame | `renderer/ui_toolbar.rs` | Done `da914d9` |
+| P4-7 | Idle 60 fps repaints (caret, toast, timer) | `overlay.rs`, `types.rs` | Done `3e5d40f` |
+| P4-8 | Brush cache self-flushes under picker/laser/toast | `renderer/mod.rs`, `renderer/ui_picker.rs` | Done `6f331b5` |
+| P4-9 | Blur re-renders its mosaic every frame; single-slot cache thrashes | `renderer/shapes.rs`, `renderer/mod.rs` | Done `4ac22a7` |
+| P4-10 | Export wipes every render cache → hitch after each Copy/Save | `renderer/mod.rs` | Done `7e7be55` |
+| P4-11 | Misc per-frame allocations & linear scans | several | Mostly done, see notes |
+| P4-12 | Release profile options | `Cargo.toml` | Done `7e64945` |
+| P5-1 | Settings window clicks land on the wrong control above 100% DPI | `settings_window.rs` | Done `58d6795` |
+| P5-2 | Loupe magnifies the wrong area above 100% DPI | `renderer/ui_loupe.rs` | Done `402ec63` |
+| P5-3 | Blur samples the wrong region above 100% DPI | `renderer/shapes.rs` | Done `402ec63` |
+| P5-4 | Blur reveals the hidden desktop on Whiteboard/Blackboard | `renderer/mod.rs`, `overlay.rs`, `svg_export.rs` | Done `2b99901` |
+| P5-5 | Shared text formats mutated (centred/no-wrap bleeds into other text) | `renderer/shapes.rs`, `ui_timer.rs`, `ui_toolbar.rs` | Done `8c9c82e` |
+| P5-6 | Oversized exports/pastes silently blank or invisible | `renderer/mod.rs`, `clipboard.rs` | Done `3aaec65` |
+| P5-7 | Emoji cannot be typed (UTF-16 surrogates dropped) | `overlay.rs` | Done `7a30a51` |
+| P5-8 | Export mismatches (spotlight position, SVG pan, editor chrome) | `renderer/mod.rs`, `svg_export.rs` | Done `9a80ef3`, `405146d` |
+| P6-1 | Session/config file robustness | `types.rs`, `renderer/mod.rs`, `svg_export.rs`, `config.rs`, `main.rs` | Done `4a81a74` |
+| P6-2 | Input & device edge cases (stuck pen, Live Zoom Ctrl, unplugged monitor) | `overlay.rs`, `live_zoom.rs` | Done `314377c` |
+| P6-3 | Small UX consistencies, `read_dib` V4/V5 parsing | `main.rs`, `overlay.rs`, `clipboard.rs` | Done `b2b0041` |
 
 ---
 
