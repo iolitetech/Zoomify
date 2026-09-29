@@ -7,6 +7,12 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1RenderTarget,
 };
+use windows_core::Interface;
+
+/// Same cap as `shapes::GEOMETRY_CACHE_MAX_ENTRIES` (kept as its own constant
+/// rather than importing a private sibling item): both clear the same shared
+/// `geometry_cache` when it grows past this, so any consistent bound works.
+const GEOMETRY_CACHE_MAX_ENTRIES: usize = 512;
 
 impl D2DRenderer {
     #[allow(clippy::too_many_arguments)]
@@ -617,23 +623,56 @@ impl D2DRenderer {
             if let Some(arc_brush) = self.solid_brush(rt, &border_col) {
                 let segments = (128.0 * progress.clamp(0.0, 1.0)) as usize;
                 if segments > 1 {
-                    if let Ok(path) = self.factory.CreatePathGeometry()
-                        && let Ok(sink) = path.Open()
-                    {
-                        let start_angle = -std::f32::consts::FRAC_PI_2;
-                        let p0_x = ring_center.X + ring_radius * start_angle.cos();
-                        let p0_y = ring_center.Y + ring_radius * start_angle.sin();
+                    // Keyed on segments+center (radius is fixed at 100.0): the
+                    // card can force a repaint for unrelated reasons (caret
+                    // blink, a fading toast) far more often than this arc's
+                    // own discrete segment count actually advances.
+                    let key = {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        0xA4C5_u32.hash(&mut hasher);
+                        segments.hash(&mut hasher);
+                        ring_center.X.to_bits().hash(&mut hasher);
+                        ring_center.Y.to_bits().hash(&mut hasher);
+                        hasher.finish()
+                    };
+                    let mut cache = self.geometry_cache.borrow_mut();
+                    let rt_id = rt.as_raw() as usize;
+                    if cache.0 != rt_id {
+                        cache.0 = rt_id;
+                        cache.1.clear();
+                    }
+                    let path = if let Some(p) = cache.1.get(&key) {
+                        Some(p.clone())
+                    } else {
+                        let built = self.factory.CreatePathGeometry().ok().and_then(|path| {
+                            let sink = path.Open().ok()?;
+                            let start_angle = -std::f32::consts::FRAC_PI_2;
+                            let p0_x = ring_center.X + ring_radius * start_angle.cos();
+                            let p0_y = ring_center.Y + ring_radius * start_angle.sin();
 
-                        sink.BeginFigure(v2(p0_x, p0_y), D2D1_FIGURE_BEGIN_HOLLOW);
-                        for i in 1..=segments {
-                            let angle =
-                                start_angle + (i as f32 / 128.0) * std::f32::consts::PI * 2.0;
-                            let px = ring_center.X + ring_radius * angle.cos();
-                            let py = ring_center.Y + ring_radius * angle.sin();
-                            sink.AddLine(v2(px, py));
+                            sink.BeginFigure(v2(p0_x, p0_y), D2D1_FIGURE_BEGIN_HOLLOW);
+                            for i in 1..=segments {
+                                let angle =
+                                    start_angle + (i as f32 / 128.0) * std::f32::consts::PI * 2.0;
+                                let px = ring_center.X + ring_radius * angle.cos();
+                                let py = ring_center.Y + ring_radius * angle.sin();
+                                sink.AddLine(v2(px, py));
+                            }
+                            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                            let _ = sink.Close();
+                            Some(path)
+                        });
+                        if let Some(p) = &built {
+                            if cache.1.len() > GEOMETRY_CACHE_MAX_ENTRIES {
+                                cache.1.clear();
+                            }
+                            cache.1.insert(key, p.clone());
                         }
-                        sink.EndFigure(D2D1_FIGURE_END_OPEN);
-                        let _ = sink.Close();
+                        built
+                    };
+                    drop(cache);
+                    if let Some(path) = path {
                         rt.DrawGeometry(&path, &arc_brush, 7.0, Some(&self.round_stroke_style));
                     }
 
@@ -810,15 +849,45 @@ impl D2DRenderer {
                 },
             ) {
                 if paused {
-                    // Vector Play Triangle
-                    if let Ok(path) = self.factory.CreatePathGeometry()
-                        && let Ok(sink) = path.Open()
-                    {
-                        sink.BeginFigure(v2(cx - 6.0, btn_y - 9.0), D2D1_FIGURE_BEGIN_FILLED);
-                        sink.AddLine(v2(cx - 6.0, btn_y + 9.0));
-                        sink.AddLine(v2(cx + 9.0, btn_y));
-                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-                        let _ = sink.Close();
+                    // Vector Play Triangle - keyed on position (the shape
+                    // itself is fixed), same reasoning as the progress arc
+                    // above.
+                    let key = {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        0x9A17_u32.hash(&mut hasher);
+                        cx.to_bits().hash(&mut hasher);
+                        btn_y.to_bits().hash(&mut hasher);
+                        hasher.finish()
+                    };
+                    let mut cache = self.geometry_cache.borrow_mut();
+                    let rt_id = rt.as_raw() as usize;
+                    if cache.0 != rt_id {
+                        cache.0 = rt_id;
+                        cache.1.clear();
+                    }
+                    let path = if let Some(p) = cache.1.get(&key) {
+                        Some(p.clone())
+                    } else {
+                        let built = self.factory.CreatePathGeometry().ok().and_then(|path| {
+                            let sink = path.Open().ok()?;
+                            sink.BeginFigure(v2(cx - 6.0, btn_y - 9.0), D2D1_FIGURE_BEGIN_FILLED);
+                            sink.AddLine(v2(cx - 6.0, btn_y + 9.0));
+                            sink.AddLine(v2(cx + 9.0, btn_y));
+                            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                            let _ = sink.Close();
+                            Some(path)
+                        });
+                        if let Some(p) = &built {
+                            if cache.1.len() > GEOMETRY_CACHE_MAX_ENTRIES {
+                                cache.1.clear();
+                            }
+                            cache.1.insert(key, p.clone());
+                        }
+                        built
+                    };
+                    drop(cache);
+                    if let Some(path) = path {
                         rt.FillGeometry(&path, &white_brush, None);
                     }
                 } else {
