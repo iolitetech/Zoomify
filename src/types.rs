@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -610,36 +611,63 @@ pub enum Shape {
 pub struct ImagePixels {
     pub width: u32,
     pub height: u32,
-    pub bgra: Vec<u8>,
+    /// `Arc` rather than `Vec`: an `Annotation::clone()` (drag preview, undo
+    /// snapshot, duplicate) is otherwise a full pixel-buffer memcpy — tens of
+    /// megabytes for one paste, done twice per mouse move while dragging a
+    /// pasted image and again for every undo entry. Cloning the `Arc` is O(1)
+    /// and shares the same buffer until something actually needs to write to
+    /// it (nothing does today; pixels are set once, at paste/load time).
+    pub bgra: Arc<[u8]>,
+    /// Full-content hash, computed once by `new()` and reused by
+    /// `cache_key()` every frame instead of re-hashing the pixels each time.
+    /// Private so the only way to construct an `ImagePixels` keeps it
+    /// consistent with `bgra`.
+    content_hash: u64,
 }
 
 impl ImagePixels {
-    /// A stable key for the renderer's bitmap cache.
-    ///
-    /// Content-derived, so the same image pasted twice shares one GPU bitmap
-    /// and a session reload keys to the same entry it did before.
-    pub fn cache_key(&self) -> u64 {
-        // FNV-1a over the dimensions and a sample of the bytes. Hashing every
-        // byte of a large paste on each frame would cost more than it saves.
+    pub fn new(width: u32, height: u32, bgra: impl Into<Arc<[u8]>>) -> Self {
+        let bgra = bgra.into();
+        let content_hash = Self::hash_all(width, height, &bgra);
+        Self {
+            width,
+            height,
+            bgra,
+            content_hash,
+        }
+    }
+
+    /// FNV-1a over the dimensions and every byte. Used only here, once per
+    /// image at construction time (paste or session load) — see `cache_key`,
+    /// which is what actually runs every frame.
+    fn hash_all(width: u32, height: u32, bgra: &[u8]) -> u64 {
         let mut h: u64 = 0xcbf29ce484222325;
         let mut eat = |b: u8| {
             h ^= b as u64;
             h = h.wrapping_mul(0x100000001b3);
         };
-        for b in self.width.to_le_bytes() {
+        for b in width.to_le_bytes() {
             eat(b);
         }
-        for b in self.height.to_le_bytes() {
+        for b in height.to_le_bytes() {
             eat(b);
         }
-        for b in (self.bgra.len() as u64).to_le_bytes() {
+        for b in (bgra.len() as u64).to_le_bytes() {
             eat(b);
         }
-        let step = (self.bgra.len() / 4096).max(1);
-        for i in (0..self.bgra.len()).step_by(step) {
-            eat(self.bgra[i]);
+        for &b in bgra {
+            eat(b);
         }
         h
+    }
+
+    /// A stable key for the renderer's bitmap cache, checked every frame a
+    /// pasted image is on screen. O(1): the hash was computed once, in
+    /// `new()`, over the *entire* buffer — sampling a subset of bytes (the
+    /// previous approach) let two different images of the same size collide
+    /// on the same key, so one could render or export as the other.
+    pub fn cache_key(&self) -> u64 {
+        self.content_hash
     }
 }
 
@@ -740,9 +768,27 @@ impl<'de> Deserialize<'de> for ImagePixels {
             bgra_base64: String,
         }
         let raw = Raw::deserialize(d)?;
+        // A crafted or corrupted session file could claim dimensions large
+        // enough that width*height*4 wraps around usize::MAX on a 64-bit
+        // build (both near u32::MAX) - the wrapped "want" could then match
+        // a much smaller actual buffer, and every later reader of this
+        // ImagePixels (the renderer's CreateBitmap, in particular) would
+        // read width*height*4 real bytes out of a far smaller Vec. Reject
+        // absurd dimensions outright, matching the cap the clipboard paste
+        // path already uses, and check the multiplication itself rather
+        // than letting it silently wrap.
+        if raw.width > 32768 || raw.height > 32768 {
+            return Err(serde::de::Error::custom(format!(
+                "image dimensions {}x{} are too large",
+                raw.width, raw.height
+            )));
+        }
         let bgra = b64::decode(&raw.bgra_base64)
             .ok_or_else(|| serde::de::Error::custom("image bytes are not valid base64"))?;
-        let want = raw.width as usize * raw.height as usize * 4;
+        let want = (raw.width as usize)
+            .checked_mul(raw.height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| serde::de::Error::custom("image dimensions overflow"))?;
         if bgra.len() != want {
             return Err(serde::de::Error::custom(format!(
                 "image is {} bytes, but {}x{} needs {}",
@@ -752,11 +798,7 @@ impl<'de> Deserialize<'de> for ImagePixels {
                 want
             )));
         }
-        Ok(Self {
-            width: raw.width,
-            height: raw.height,
-            bgra,
-        })
+        Ok(Self::new(raw.width, raw.height, bgra))
     }
 }
 
@@ -778,6 +820,14 @@ pub struct TextEditorState {
     pub is_italic: bool,
     pub card_style: TextCardStyle,
     pub font_family: TextFontFamily,
+    /// The annotation this editor is re-editing, if any - lifted out of
+    /// `shapes` (by `reopen_selected_text`/`edit_container_label`) to start
+    /// the edit, and put back on commit or cancel rather than being
+    /// discarded. `None` for a brand-new text with nothing to go back to.
+    /// Carrying the *whole* original (not just its text) is what lets commit
+    /// restore the same id, group, opacity and any arrow bound to it instead
+    /// of minting a fresh annotation that nothing else recognises any more.
+    pub original: Option<Annotation>,
 }
 
 impl TextEditorState {
@@ -803,6 +853,7 @@ impl TextEditorState {
             is_italic,
             card_style,
             font_family,
+            original: None,
         }
     }
 
@@ -1014,6 +1065,21 @@ pub enum HistoryAction {
     /// dragging a group is one undo step, not one per shape.
     TransformShapes {
         items: Vec<(ShapeId, Shape, Shape)>,
+    },
+    /// An arrow/line endpoint re-anchored to a different shape, or detached
+    /// (`rebind_endpoint`) - the binding itself, not the geometry. Always
+    /// pushed right after the `TransformShapes` entry for the geometry
+    /// change that binding produced (via `settle_bindings`' snap), so
+    /// popping this one first (undo/redo history is LIFO) reverts the
+    /// binding *before* the paired geometry revert runs. Reverting geometry
+    /// first would have the very `settle_bindings()` call every undo/redo
+    /// already makes immediately re-snap it right back onto the still-new
+    /// binding - which is what made re-anchoring invisible to undo before
+    /// this existed.
+    SetBindings {
+        id: ShapeId,
+        before: (Option<ShapeId>, Option<ShapeId>),
+        after: (Option<ShapeId>, Option<ShapeId>),
     },
 }
 
@@ -1315,12 +1381,19 @@ impl ZoomState {
         self.view_y = self.target_view_y;
     }
 
+    /// `infinite` picks the same clamp `tick_smooth_pan` does: pass true only
+    /// for Draw mode on a Whiteboard/Blackboard background (the same
+    /// condition used everywhere else an infinite-canvas pan applies).
+    /// Getting this wrong for a gesture that changed the view is exactly what
+    /// silently snaps an infinite-canvas pan back onto the screen — see that
+    /// method's doc comment.
     pub fn set_zoom_centered(
         &mut self,
         new_level: f32,
         center_screen: Point2D,
         screen_w: f32,
         screen_h: f32,
+        infinite: bool,
     ) {
         let old_z = self.level.max(1.0);
         let new_z = new_level.clamp(1.0, 10.0);
@@ -1333,24 +1406,34 @@ impl ZoomState {
         self.level = new_z;
 
         // New viewport top-left so that canvas_cx remains under center_screen
-        let new_view_w = screen_w / new_z;
-        let new_view_h = screen_h / new_z;
-        let max_x = (screen_w - new_view_w).max(0.0);
-        let max_y = (screen_h - new_view_h).max(0.0);
-
-        self.view_x = (canvas_cx - center_screen.x / new_z).clamp(0.0, max_x);
-        self.view_y = (canvas_cy - center_screen.y / new_z).clamp(0.0, max_y);
+        self.view_x = canvas_cx - center_screen.x / new_z;
+        self.view_y = canvas_cy - center_screen.y / new_z;
         self.target_view_x = self.view_x;
         self.target_view_y = self.view_y;
+        if infinite {
+            self.clamp_viewport_infinite(screen_w, screen_h);
+        } else {
+            self.clamp_viewport(screen_w, screen_h);
+        }
     }
 
-    pub fn center_on_canvas_point(&mut self, canvas_pt: Point2D, screen_w: f32, screen_h: f32) {
+    pub fn center_on_canvas_point(
+        &mut self,
+        canvas_pt: Point2D,
+        screen_w: f32,
+        screen_h: f32,
+        infinite: bool,
+    ) {
         let z = self.level.max(1.0);
         let view_w = screen_w / z;
         let view_h = screen_h / z;
         self.target_view_x = canvas_pt.x - (view_w / 2.0);
         self.target_view_y = canvas_pt.y - (view_h / 2.0);
-        self.clamp_viewport(screen_w, screen_h);
+        if infinite {
+            self.clamp_viewport_infinite(screen_w, screen_h);
+        } else {
+            self.clamp_viewport(screen_w, screen_h);
+        }
         self.view_x = self.target_view_x;
         self.view_y = self.target_view_y;
     }
@@ -1624,11 +1707,18 @@ impl MinimapState {
     }
 
     /// Returns the viewport indicator rect on the minimap: (left, top, right, bottom).
+    /// `infinite`: pass true when the viewport being shown is Draw mode's
+    /// infinite-canvas pan (Whiteboard/Blackboard). A pan past the screen
+    /// edge then produces `norm_x`/`norm_y` outside `[0, 1]` rather than being
+    /// clamped into it — clamping here used to hide the out-of-bounds state
+    /// entirely by pinning the indicator to the preview's edge, drawing it as
+    /// if the view were still on-screen when it was not.
     pub fn get_viewport_rect(
         &self,
         screen_w: f32,
         screen_h: f32,
         zoom: &ZoomState,
+        infinite: bool,
     ) -> (f32, f32, f32, f32) {
         let (il, it, ir, ib) = self.get_inner_preview_rect(screen_w, screen_h);
         let iw = (ir - il).max(1.0);
@@ -1636,12 +1726,14 @@ impl MinimapState {
 
         let z = zoom.level.max(1.0);
         let norm_x = if screen_w > 0.0 {
-            (zoom.view_x / screen_w).clamp(0.0, 1.0)
+            let n = zoom.view_x / screen_w;
+            if infinite { n } else { n.clamp(0.0, 1.0) }
         } else {
             0.0
         };
         let norm_y = if screen_h > 0.0 {
-            (zoom.view_y / screen_h).clamp(0.0, 1.0)
+            let n = zoom.view_y / screen_h;
+            if infinite { n } else { n.clamp(0.0, 1.0) }
         } else {
             0.0
         };
@@ -1650,8 +1742,16 @@ impl MinimapState {
 
         let vp_l = il + norm_x * iw;
         let vp_t = it + norm_y * ih;
-        let vp_r = (vp_l + norm_w * iw).min(ir);
-        let vp_b = (vp_t + norm_h * ih).min(ib);
+        let vp_r = if infinite {
+            vp_l + norm_w * iw
+        } else {
+            (vp_l + norm_w * iw).min(ir)
+        };
+        let vp_b = if infinite {
+            vp_t + norm_h * ih
+        } else {
+            (vp_t + norm_h * ih).min(ib)
+        };
         (vp_l, vp_t, vp_r, vp_b)
     }
 
@@ -1982,6 +2082,15 @@ impl ToastNotification {
         } else {
             1.0
         }
+    }
+
+    /// True during the fade-in (first 0.15s) or fade-out (last 0.35s) - the
+    /// only parts of a toast's lifetime where `opacity()` actually changes
+    /// from one moment to the next. The steady middle (a toast is alive for
+    /// 1.8s total) needs no repaint on its account at all.
+    pub fn is_fading(&self) -> bool {
+        let elapsed = self.created_at.elapsed().as_secs_f32();
+        elapsed < 0.15 || elapsed > (self.duration_secs - 0.35)
     }
 }
 
@@ -2519,11 +2628,7 @@ mod tests {
         // Every byte value once, so a bad base64 alphabet or padding edge
         // would show up rather than hiding in an all-zero buffer.
         let bgra: Vec<u8> = (0..=255u8).cycle().take(4 * 3 * 2).collect();
-        let img = ImagePixels {
-            width: 3,
-            height: 2,
-            bgra,
-        };
+        let img = ImagePixels::new(3, 2, bgra);
         let json = serde_json::to_string(&img).unwrap();
         // The wire format is base64, not a huge JSON array of numbers.
         assert!(json.contains("bgra_base64"));
@@ -2542,19 +2647,22 @@ mod tests {
     }
 
     #[test]
+    fn test_image_pixels_rejects_dimensions_that_would_overflow_the_size_check() {
+        // width*height*4 would wrap a 64-bit usize if this were computed
+        // without checked_mul - must fail cleanly rather than let a wrapped
+        // "want" of 0 or some small value slip a tiny bgra_base64 past the
+        // length check.
+        let huge = r#"{"width":4294967295,"height":4294967295,"bgra_base64":""}"#;
+        assert!(serde_json::from_str::<ImagePixels>(huge).is_err());
+    }
+
+    #[test]
     fn test_image_cache_key_is_stable_and_content_sensitive() {
-        let a = ImagePixels {
-            width: 4,
-            height: 4,
-            bgra: vec![10u8; 4 * 4 * 4],
-        };
-        let b = ImagePixels {
-            width: 4,
-            height: 4,
-            bgra: vec![10u8; 4 * 4 * 4],
-        };
-        let mut c = b.clone();
-        c.bgra[0] = 200;
+        let a = ImagePixels::new(4, 4, vec![10u8; 4 * 4 * 4]);
+        let b = ImagePixels::new(4, 4, vec![10u8; 4 * 4 * 4]);
+        let mut raw = b.bgra.to_vec();
+        raw[0] = 200;
+        let c = ImagePixels::new(b.width, b.height, raw);
 
         assert_eq!(
             a.cache_key(),
@@ -2849,7 +2957,7 @@ mod tests {
         let screen_h = 1080.0;
         let center = Point2D::new(960.0, 540.0);
 
-        zoom.set_zoom_centered(2.0, center, screen_w, screen_h);
+        zoom.set_zoom_centered(2.0, center, screen_w, screen_h, false);
         assert_eq!(zoom.level, 2.0);
         assert_eq!(zoom.view_x, 480.0); // 960 - 960/2
         assert_eq!(zoom.view_y, 270.0); // 540 - 540/2
@@ -3637,7 +3745,7 @@ mod tests {
             ..Default::default()
         };
 
-        let (vl, vt, vr, vb) = minimap.get_viewport_rect(sw, sh, &zoom);
+        let (vl, vt, vr, vb) = minimap.get_viewport_rect(sw, sh, &zoom, false);
         let (il, it, ir, ib) = minimap.get_inner_preview_rect(sw, sh);
         let iw = ir - il;
         let ih = ib - it;
@@ -3656,7 +3764,7 @@ mod tests {
         assert!((click_pt.y - 540.0).abs() < 1.0);
 
         // Center on canvas point test
-        zoom.center_on_canvas_point(click_pt, sw, sh);
+        zoom.center_on_canvas_point(click_pt, sw, sh, false);
         assert!((zoom.view_x - 480.0).abs() < 1.0);
         assert!((zoom.view_y - 270.0).abs() < 1.0);
     }

@@ -1,4 +1,4 @@
-use super::{D2DRenderer, v2};
+use super::{D2DRenderer, HudTextKey, v2};
 use crate::types::{
     AppMode, CanvasBackground, ColorPreset, DrawTool, FluentToolbarState, SpotlightState,
     ToastNotification,
@@ -10,6 +10,114 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1Geometry, ID2D1RenderTarget,
 };
 use windows_numerics::Matrix3x2;
+
+const CHEAT_COL1: &[(&str, &str)] = &[
+    ("GLOBAL SHORTCUTS", ""),
+    ("Ctrl+1", "Static Freeze Zoom (Wheel/Pan/Draw)"),
+    ("Ctrl+2", "Draw / Annotation Mode"),
+    ("Ctrl+3", "Spotlight Mode (Wheel: resize)"),
+    ("Ctrl+4", "Live Zoom (Hardware magnifier)"),
+    ("Ctrl+5", "Presentation Countdown Timer"),
+    ("Ctrl+6", "Magnifier Loupe Lens (Wheel: zoom | Space: pin)"),
+    ("", ""),
+    ("DRAW TOOLS & KEYS", ""),
+    ("V", "Select (drag/resize, Del removes)"),
+    ("Ctrl+D / Ctrl+[ ]", "Duplicate / send back / bring front"),
+    ("Drag arrow end", "Re-anchor it, or drop in space to detach"),
+    (
+        "Ctrl+Alt+Arrows",
+        "Align selection (C/M: centre, H/V: spread)",
+    ),
+    ("Ctrl+Shift+Up/Dn", "Fade selection in / out"),
+    ("Ctrl+E", "Cycle arrowhead shape"),
+    ("Drag line middle", "Bow it into a curve"),
+    ("Ctrl+G / Ctrl+Shift+G", "Group / ungroup selection"),
+    ("P", "Pen (freehand with Bezier smoothing)"),
+    ("K", "Laser Pointer (glowing fading trail)"),
+    ("X", "Eraser (drag to delete strokes)"),
+    ("H", "Highlighter (translucent)"),
+    ("L", "Straight Line tool"),
+    ("A", "Arrow tool"),
+    ("Shift+R", "Rectangle tool"),
+    ("U", "Rounded Rectangle tool"),
+    ("Q", "Ellipse / Circle tool"),
+    ("T", "Text (Enter: new line | Esc: done)"),
+    ("Shift+S", "Sticky Note (click, then type)"),
+    ("N", "Step Badge (Shift+N: reset #)"),
+    ("Shift+X", "Redact / Blur mosaic box"),
+    ("", ""),
+    ("GESTURES & MODIFIERS", ""),
+    ("Hold Pen", "Hold 350ms to auto-snap shape"),
+    ("⋮⋮ Drag", "Move Fluent Toolbar anywhere"),
+    ("Shift + Drag", "Snap straight line (45°)"),
+    ("Ctrl + Drag", "Snap rectangle"),
+    ("Tab + Drag", "Snap ellipse"),
+    ("Alt + Drag", "Suppress snap to other shapes"),
+];
+
+const CHEAT_COL2: &[(&str, &str)] = &[
+    ("COLOR PRESETS", ""),
+    ("R", "Red"),
+    ("G", "Green"),
+    ("B", "Blue"),
+    ("Y", "Yellow"),
+    ("O", "Orange"),
+    ("Shift+P", "Pink / Purple"),
+    ("C / I", "Cyan"),
+    ("Shift+W / Shift+B", "White Pen / Black Pen"),
+    (
+        "Ctrl+I",
+        "Eyedropper — click to pick a colour off the screen",
+    ),
+    ("", ""),
+    ("CANVAS MODES", ""),
+    ("W", "Whiteboard slate"),
+    ("Shift+K", "Blackboard slate"),
+    ("", ""),
+    ("ACTIONS & CONTROLS", ""),
+    ("F2", "Toggle Fluent Toolbar & HUD"),
+    ("F3 / Ctrl+3", "Toggle Spotlight on/off"),
+    ("Space", "Toggle Pan/Zoom vs Draw mode"),
+    ("Wheel", "Zoom in / out centered at mouse"),
+    ("Middle-drag", "Pan — past the screen edge on a slate"),
+    ("Ctrl + Wheel", "Resize Spotlight circle"),
+    ("Shift + Wheel", "Adjust brush stroke width"),
+    ("Ctrl+Z / Ctrl+Y", "Undo / Redo (with badge counter)"),
+    ("Ctrl+C / Ctrl+S", "Copy screen / Save snapshot"),
+    ("Ctrl+Shift+S / Ctrl+O", "Save / load annotation session"),
+    ("Ctrl+V", "Paste an image from the clipboard"),
+    ("Ctrl+Shift+E", "Cycle export scale (1x/2x/3x)"),
+    ("Ctrl+J", "Export annotations as SVG"),
+    ("Ctrl+P", "Export screen + drawings as PDF"),
+    ("Ctrl+T / Ctrl+W", "New board / close board"),
+    ("Ctrl+Shift+T", "Restore last closed board"),
+    ("Ctrl+Shift+] / [", "Next / previous board"),
+    ("E / Delete", "Clear canvas (undoable)"),
+    ("Esc / Right-Click", "Return to Pan mode / Exit overlay"),
+];
+
+/// Panel height must follow from the actual row content (headers/blanks/normal
+/// rows each advance the running y offset by a different amount - see the
+/// column render loops) rather than a hardcoded constant, or the last rows of
+/// whichever column is taller render past the bottom of the background.
+fn cheat_sheet_height() -> f32 {
+    let column_content_height = |rows: &[(&str, &str)]| -> f32 {
+        let mut y = 60.0f32;
+        for (key, desc) in rows {
+            if key.is_empty() {
+                y += 6.0;
+            } else if desc.is_empty() {
+                y += 20.0;
+            } else {
+                y += 18.5;
+            }
+        }
+        y
+    };
+    let content_h = column_content_height(CHEAT_COL1).max(column_content_height(CHEAT_COL2));
+    let bottom_padding = 24.0;
+    (content_h + bottom_padding).max(660.0)
+}
 
 impl D2DRenderer {
     #[allow(clippy::too_many_arguments)]
@@ -197,35 +305,47 @@ impl D2DRenderer {
                 AppMode::Loupe => "🔍 Loupe Magnifier",
             };
 
-            let spot_info = if spotlight.active {
-                format!(" | 🔦 ⌀{}px", (spotlight.radius * 2.0).round() as u32)
-            } else {
-                "".to_string()
+            let spot_diameter = spotlight
+                .active
+                .then(|| (spotlight.radius * 2.0).round() as u32);
+            let zoom_tenths = (mode == AppMode::StaticZoom || mode == AppMode::LiveZoom)
+                .then(|| (zoom_level * 10.0).round() as i32);
+            let key = HudTextKey {
+                mode,
+                tool,
+                stroke_width: stroke_width.round() as u32,
+                zoom_tenths,
+                spot_diameter,
+                bg_type,
             };
 
-            let zoom_info = if mode == AppMode::StaticZoom || mode == AppMode::LiveZoom {
-                format!(" | {:.1}x", zoom_level)
-            } else {
-                "".to_string()
-            };
-
-            let bg_info = match bg_type {
-                CanvasBackground::Transparent => "",
-                CanvasBackground::Whiteboard => " | ⚪ Whiteboard",
-                CanvasBackground::Blackboard => " | ⚫ Blackboard",
-            };
-
-            let text = format!(
-                "{} • {} ({}px){}{}{} • F1: Help",
-                mode_name,
-                tool.name(),
-                stroke_width.round() as u32,
-                zoom_info,
-                spot_info,
-                bg_info
-            );
-
-            let utf16: Vec<u16> = text.encode_utf16().collect();
+            let mut cache = self.hud_text_cache.borrow_mut();
+            if cache.as_ref().map(|(k, _)| *k) != Some(key) {
+                let spot_info = match spot_diameter {
+                    Some(d) => format!(" | 🔦 ⌀{}px", d),
+                    None => String::new(),
+                };
+                let zoom_info = match zoom_tenths {
+                    Some(t) => format!(" | {:.1}x", t as f32 / 10.0),
+                    None => String::new(),
+                };
+                let bg_info = match bg_type {
+                    CanvasBackground::Transparent => "",
+                    CanvasBackground::Whiteboard => " | ⚪ Whiteboard",
+                    CanvasBackground::Blackboard => " | ⚫ Blackboard",
+                };
+                let text = format!(
+                    "{} • {} ({}px){}{}{} • F1: Help",
+                    mode_name,
+                    tool.name(),
+                    key.stroke_width,
+                    zoom_info,
+                    spot_info,
+                    bg_info
+                );
+                *cache = Some((key, text.encode_utf16().collect()));
+            }
+            let utf16 = &cache.as_ref().unwrap().1;
             let text_col = D2D1_COLOR_F {
                 r: 0.9,
                 g: 0.92,
@@ -240,7 +360,7 @@ impl D2DRenderer {
                     bottom: hud_y + hud_h - 4.0,
                 };
                 rt.DrawText(
-                    &utf16,
+                    utf16,
                     &self.text_format_hud,
                     &text_rect,
                     &tbrush,
@@ -286,7 +406,7 @@ impl D2DRenderer {
                 radiusX: 14.0,
                 radiusY: 14.0,
             };
-            if let Some(shadow_brush) = self.solid_brush(
+            if let Some(shadow_brush) = self.scratch_brush(
                 rt,
                 &D2D1_COLOR_F {
                     r: 0.0,
@@ -322,10 +442,10 @@ impl D2DRenderer {
                 a: 0.16 * opacity,
             };
 
-            if let Some(bg_brush) = self.solid_brush(rt, &bg_col) {
+            if let Some(bg_brush) = self.scratch_brush(rt, &bg_col) {
                 rt.FillRoundedRectangle(&main_rrect, &bg_brush);
             }
-            if let Some(border_brush) = self.solid_brush(rt, &border_col) {
+            if let Some(border_brush) = self.scratch_brush(rt, &border_col) {
                 rt.DrawRoundedRectangle(&main_rrect, &border_brush, 1.0, None);
             }
 
@@ -337,7 +457,7 @@ impl D2DRenderer {
                 b: 0.83,
                 a: 0.35 * opacity,
             };
-            if let Some(badge_brush) = self.solid_brush(rt, &badge_bg_col) {
+            if let Some(badge_brush) = self.scratch_brush(rt, &badge_bg_col) {
                 let badge_el = D2D1_ELLIPSE {
                     point: badge_center,
                     radiusX: 13.0,
@@ -354,7 +474,7 @@ impl D2DRenderer {
                 right: toast_x + 35.0,
                 bottom: toast_y + 35.0,
             };
-            if let Some(white_brush) = self.solid_brush(
+            if let Some(white_brush) = self.scratch_brush(
                 rt,
                 &D2D1_COLOR_F {
                     r: 1.0,
@@ -410,7 +530,7 @@ impl D2DRenderer {
                     right: toast_x + toast_w - 14.0,
                     bottom: toast_y + toast_h - 4.0,
                 };
-                if let Some(text_brush) = self.solid_brush(rt, &text_col) {
+                if let Some(text_brush) = self.scratch_brush(rt, &text_col) {
                     rt.DrawText(
                         &title_utf16,
                         &self.text_format_toast_title,
@@ -420,7 +540,7 @@ impl D2DRenderer {
                         windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                     );
                 }
-                if let Some(sub_brush) = self.solid_brush(rt, &sub_col) {
+                if let Some(sub_brush) = self.scratch_brush(rt, &sub_col) {
                     rt.DrawText(
                         &sub_utf16,
                         &self.text_format_toast_sub,
@@ -438,7 +558,7 @@ impl D2DRenderer {
                     right: toast_x + toast_w - 14.0,
                     bottom: toast_y + toast_h - 4.0,
                 };
-                if let Some(text_brush) = self.solid_brush(rt, &text_col) {
+                if let Some(text_brush) = self.scratch_brush(rt, &text_col) {
                     rt.DrawText(
                         &msg_utf16,
                         &self.text_format_toast_title,
@@ -452,7 +572,84 @@ impl D2DRenderer {
         }
     }
 
+    /// Blit the cached cheat sheet, rendering it into its offscreen target
+    /// first if this render target / DPI has not seen it yet. The content is
+    /// fully static, so this turns ~130 text draws per frame into one bitmap.
     pub(super) unsafe fn render_cheat_sheet_modal(
+        &self,
+        rt: &ID2D1RenderTarget,
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        use windows::Win32::Graphics::Direct2D::Common::{
+            D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
+        };
+        use windows::Win32::Graphics::Direct2D::{
+            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+        use windows::core::Interface;
+
+        const MODAL_W: f32 = 720.0;
+        let modal_h = cheat_sheet_height();
+        unsafe {
+            let rt_id = rt.as_raw() as usize;
+            let dpi_bits = self.dpi.to_bits();
+            let mut cache = self.cheat_sheet_cache.borrow_mut();
+            let stale = !matches!(&*cache, Some((r, d, _)) if *r == rt_id && *d == dpi_bits);
+            if stale {
+                *cache = None;
+                let scale = self.dpi / 96.0;
+                let px = D2D_SIZE_U {
+                    width: (MODAL_W * scale).ceil() as u32,
+                    height: (modal_h * scale).ceil() as u32,
+                };
+                let fmt = D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                };
+                if let Ok(target) = rt.CreateCompatibleRenderTarget(
+                    None,
+                    Some(&px),
+                    Some(&fmt),
+                    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+                ) {
+                    target.SetDpi(self.dpi, self.dpi);
+                    target.BeginDraw();
+                    target.Clear(None);
+                    self.render_cheat_sheet_contents(&target, MODAL_W, modal_h);
+                    if target.EndDraw(None, None).is_ok() {
+                        *cache = Some((rt_id, dpi_bits, target));
+                    }
+                }
+            }
+            let Some((_, _, target)) = &*cache else {
+                // Offscreen target unavailable: draw it directly.
+                drop(cache);
+                self.render_cheat_sheet_contents(rt, screen_w, screen_h);
+                return;
+            };
+            let Ok(bitmap) = target.GetBitmap() else {
+                return;
+            };
+            let mx = (screen_w - MODAL_W) / 2.0;
+            let my = (screen_h - modal_h) / 2.0;
+            rt.DrawBitmap(
+                &bitmap,
+                Some(&D2D_RECT_F {
+                    left: mx,
+                    top: my,
+                    right: mx + MODAL_W,
+                    bottom: my + modal_h,
+                }),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+        }
+    }
+
+    unsafe fn render_cheat_sheet_contents(
         &self,
         rt: &ID2D1RenderTarget,
         screen_w: f32,
@@ -460,112 +657,13 @@ impl D2DRenderer {
     ) {
         unsafe {
             // Left column entries
-            let col1 = [
-                ("GLOBAL SHORTCUTS", ""),
-                ("Ctrl+1", "Static Freeze Zoom (Wheel/Pan/Draw)"),
-                ("Ctrl+2", "Draw / Annotation Mode"),
-                ("Ctrl+3", "Spotlight Mode (Wheel: resize)"),
-                ("Ctrl+4", "Live Zoom (Hardware magnifier)"),
-                ("Ctrl+5", "Presentation Countdown Timer"),
-                ("Ctrl+6", "Magnifier Loupe Lens (Wheel: zoom | Space: pin)"),
-                ("", ""),
-                ("DRAW TOOLS & KEYS", ""),
-                ("V", "Select (drag/resize, Del removes)"),
-                ("Ctrl+D / Ctrl+[ ]", "Duplicate / send back / bring front"),
-                ("Drag arrow end", "Re-anchor it, or drop in space to detach"),
-                (
-                    "Ctrl+Alt+Arrows",
-                    "Align selection (C/M: centre, H/V: spread)",
-                ),
-                ("Ctrl+Shift+Up/Dn", "Fade selection in / out"),
-                ("Ctrl+E", "Cycle arrowhead shape"),
-                ("Drag line middle", "Bow it into a curve"),
-                ("Ctrl+G / Ctrl+Shift+G", "Group / ungroup selection"),
-                ("P", "Pen (freehand with Bezier smoothing)"),
-                ("K", "Laser Pointer (glowing fading trail)"),
-                ("X", "Eraser (drag to delete strokes)"),
-                ("H", "Highlighter (translucent)"),
-                ("L", "Straight Line tool"),
-                ("A", "Arrow tool"),
-                ("Shift+R", "Rectangle tool"),
-                ("U", "Rounded Rectangle tool"),
-                ("Q", "Ellipse / Circle tool"),
-                ("T", "Text (Enter: new line | Esc: done)"),
-                ("Shift+S", "Sticky Note (click, then type)"),
-                ("N", "Step Badge (Shift+N: reset #)"),
-                ("Shift+X", "Redact / Blur mosaic box"),
-                ("", ""),
-                ("GESTURES & MODIFIERS", ""),
-                ("Hold Pen", "Hold 350ms to auto-snap shape"),
-                ("⋮⋮ Drag", "Move Fluent Toolbar anywhere"),
-                ("Shift + Drag", "Snap straight line (45°)"),
-                ("Ctrl + Drag", "Snap rectangle"),
-                ("Tab + Drag", "Snap ellipse"),
-                ("Alt + Drag", "Suppress snap to other shapes"),
-            ];
+            let col1 = CHEAT_COL1;
 
             // Right column entries
-            let col2 = [
-                ("COLOR PRESETS", ""),
-                ("R", "Red"),
-                ("G", "Green"),
-                ("B", "Blue"),
-                ("Y", "Yellow"),
-                ("O", "Orange"),
-                ("Shift+P", "Pink / Purple"),
-                ("C / I", "Cyan"),
-                ("Shift+W / Shift+B", "White Pen / Black Pen"),
-                ("Ctrl+I", "Eyedropper — click to pick a colour off the screen"),
-                ("", ""),
-                ("CANVAS MODES", ""),
-                ("W", "Whiteboard slate"),
-                ("Shift+K", "Blackboard slate"),
-                ("", ""),
-                ("ACTIONS & CONTROLS", ""),
-                ("F2", "Toggle Fluent Toolbar & HUD"),
-                ("F3 / Ctrl+3", "Toggle Spotlight on/off"),
-                ("Space", "Toggle Pan/Zoom vs Draw mode"),
-                ("Wheel", "Zoom in / out centered at mouse"),
-                ("Middle-drag", "Pan — past the screen edge on a slate"),
-                ("Ctrl + Wheel", "Resize Spotlight circle"),
-                ("Shift + Wheel", "Adjust brush stroke width"),
-                ("Ctrl+Z / Ctrl+Y", "Undo / Redo (with badge counter)"),
-                ("Ctrl+C / Ctrl+S", "Copy screen / Save snapshot"),
-                ("Ctrl+Shift+S / Ctrl+O", "Save / load annotation session"),
-                ("Ctrl+V", "Paste an image from the clipboard"),
-                ("Ctrl+Shift+E", "Cycle export scale (1x/2x/3x)"),
-                ("Ctrl+J", "Export annotations as SVG"),
-                ("Ctrl+P", "Export screen + drawings as PDF"),
-                ("Ctrl+T / Ctrl+W", "New board / close board"),
-                ("Ctrl+Shift+T", "Restore last closed board"),
-                ("Ctrl+Shift+] / [", "Next / previous board"),
-                ("E / Delete", "Clear canvas (undoable)"),
-                ("Esc / Right-Click", "Return to Pan mode / Exit overlay"),
-            ];
-
-            // Panel height must follow from the actual row content (headers/blanks/
-            // normal rows each advance the running y offset by a different amount —
-            // see the column render loops below) rather than a hardcoded constant,
-            // or the last rows of whichever column is taller render past the bottom
-            // edge of the rounded-rect background.
-            let column_content_height = |rows: &[(&str, &str)]| -> f32 {
-                let mut y = 60.0f32;
-                for (key, desc) in rows {
-                    if key.is_empty() {
-                        y += 6.0;
-                    } else if desc.is_empty() {
-                        y += 20.0;
-                    } else {
-                        y += 18.5;
-                    }
-                }
-                y
-            };
-            let content_h = column_content_height(&col1).max(column_content_height(&col2));
-            let bottom_padding = 24.0;
+            let col2 = CHEAT_COL2;
 
             let modal_w = 720.0;
-            let modal_h = (content_h + bottom_padding).max(660.0);
+            let modal_h = cheat_sheet_height();
             let mx = (screen_w - modal_w) / 2.0;
             let my = (screen_h - modal_h) / 2.0;
 
@@ -651,7 +749,7 @@ impl D2DRenderer {
                 );
 
                 let mut y1 = my + 60.0;
-                for (key, desc) in &col1 {
+                for (key, desc) in col1 {
                     if key.is_empty() {
                         y1 += 6.0;
                         continue;
@@ -709,7 +807,7 @@ impl D2DRenderer {
                 }
 
                 let mut y2 = my + 60.0;
-                for (key, desc) in &col2 {
+                for (key, desc) in col2 {
                     if key.is_empty() {
                         y2 += 6.0;
                         continue;

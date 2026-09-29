@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use windows::Win32::Foundation::{HANDLE, HGLOBAL};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::Graphics::Gdi::{
     BI_BITFIELDS, BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, GetDC, GetDIBits,
     GetObjectW, HBITMAP, ReleaseDC,
@@ -21,10 +21,10 @@ const CF_UNICODETEXT: u32 = 13;
 /// `OpenClipboard` routinely fails with ERROR_ACCESS_DENIED while another
 /// process holds the clipboard open - clipboard managers and Office do this
 /// constantly. A single attempt makes copy fail at random, so retry briefly.
-fn open_clipboard_retrying() -> bool {
+fn open_clipboard_retrying(hwnd: Option<HWND>) -> bool {
     const ATTEMPTS: u32 = 10;
     for attempt in 0..ATTEMPTS {
-        if unsafe { OpenClipboard(None) }.is_ok() {
+        if unsafe { OpenClipboard(hwnd) }.is_ok() {
             return true;
         }
         if attempt + 1 < ATTEMPTS {
@@ -34,35 +34,26 @@ fn open_clipboard_retrying() -> bool {
     false
 }
 
-pub fn copy_bgra_to_clipboard(width: u32, height: u32, top_down_bgra: &[u8]) -> bool {
-    if width == 0 || height == 0 || top_down_bgra.len() != (width as usize) * (height as usize) * 4
-    {
-        return false;
-    }
-
-    if !open_clipboard_retrying() {
-        return false;
-    }
-
+/// Build the CF_DIB payload (header + bottom-up 32bpp rows) into a fresh
+/// `GMEM_MOVEABLE` block, ready to hand to `SetClipboardData`.
+///
+/// Frees the block itself on the one failure path that can happen after
+/// allocating it (the lock), so a caller that gets `None` never has to.
+unsafe fn build_dib_global(width: u32, height: u32, top_down_bgra: &[u8]) -> Option<HGLOBAL> {
     unsafe {
-        let _ = EmptyClipboard();
-
         let header_size = std::mem::size_of::<BITMAPINFOHEADER>();
         let image_size = (width as usize) * (height as usize) * 4;
         let total_size = header_size + image_size;
 
         let h_global = match GlobalAlloc(GMEM_MOVEABLE, total_size) {
             Ok(h) if !h.is_invalid() => h,
-            _ => {
-                let _ = CloseClipboard();
-                return false;
-            }
+            _ => return None,
         };
 
         let ptr = GlobalLock(h_global);
         if ptr.is_null() {
-            let _ = CloseClipboard();
-            return false;
+            let _ = GlobalFree(Some(h_global));
+            return None;
         }
 
         let header = BITMAPINFOHEADER {
@@ -103,43 +94,101 @@ pub fn copy_bgra_to_clipboard(width: u32, height: u32, top_down_bgra: &[u8]) -> 
         }
 
         let _ = GlobalUnlock(h_global);
-        let dib_success = SetClipboardData(CF_DIB, Some(HANDLE(h_global.0))).is_ok();
+        Some(h_global)
+    }
+}
 
-        // Also place PNG format on clipboard for modern apps (Discord, Slack, Telegram, browsers)
-        // so alpha transparency is preserved perfectly without black borders
-        let mut rgba = top_down_bgra.to_vec();
-        for chunk in rgba.as_chunks_mut::<4>().0 {
-            chunk.swap(0, 2);
+/// Encode a PNG copy of the same pixels (for apps - Discord, Slack, Telegram,
+/// browsers - that read CF_PNG rather than CF_DIB, preserving alpha without
+/// the black-border look a DIB gives them) into a fresh `GMEM_MOVEABLE`
+/// block. `None` on any failure (encoding, allocation, or lock); frees the
+/// block itself if it was allocated but the lock failed.
+unsafe fn build_png_global(
+    width: u32,
+    height: u32,
+    top_down_bgra: &[u8],
+) -> Option<(u32, HGLOBAL)> {
+    let mut rgba = top_down_bgra.to_vec();
+    for chunk in rgba.as_chunks_mut::<4>().0 {
+        chunk.swap(0, 2);
+    }
+
+    let mut png_bytes = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
+    image::ImageEncoder::write_image(
+        encoder,
+        &rgba,
+        width,
+        height,
+        image::ExtendedColorType::Rgba8,
+    )
+    .ok()?;
+    if png_bytes.is_empty() {
+        return None;
+    }
+
+    let cf_png = unsafe { RegisterClipboardFormatW(w!("PNG")) };
+    if cf_png == 0 {
+        return None;
+    }
+
+    unsafe {
+        let h_png = GlobalAlloc(GMEM_MOVEABLE, png_bytes.len()).ok()?;
+        if h_png.is_invalid() {
+            return None;
+        }
+        let png_ptr = GlobalLock(h_png);
+        if png_ptr.is_null() {
+            let _ = GlobalFree(Some(h_png));
+            return None;
+        }
+        std::ptr::copy_nonoverlapping(png_bytes.as_ptr(), png_ptr as *mut u8, png_bytes.len());
+        let _ = GlobalUnlock(h_png);
+        Some((cf_png, h_png))
+    }
+}
+
+pub fn copy_bgra_to_clipboard(hwnd: HWND, width: u32, height: u32, top_down_bgra: &[u8]) -> bool {
+    if width == 0 || height == 0 || top_down_bgra.len() != (width as usize) * (height as usize) * 4
+    {
+        return false;
+    }
+
+    // Build both payloads *before* ever touching the clipboard.
+    // EmptyClipboard discards whatever was there before; building these
+    // first means a failure here (allocation, encoding) leaves the user's
+    // existing clipboard content untouched instead of wiping it for nothing.
+    let Some(h_dib) = (unsafe { build_dib_global(width, height, top_down_bgra) }) else {
+        return false;
+    };
+    let png = unsafe { build_png_global(width, height, top_down_bgra) };
+
+    if !open_clipboard_retrying(Some(hwnd)) {
+        unsafe {
+            let _ = GlobalFree(Some(h_dib));
+        }
+        if let Some((_, h_png)) = png {
+            unsafe {
+                let _ = GlobalFree(Some(h_png));
+            }
+        }
+        return false;
+    }
+
+    unsafe {
+        let _ = EmptyClipboard();
+
+        // The system takes ownership of the handle only once SetClipboardData
+        // succeeds - on failure it is still ours to free.
+        let dib_success = SetClipboardData(CF_DIB, Some(HANDLE(h_dib.0))).is_ok();
+        if !dib_success {
+            let _ = GlobalFree(Some(h_dib));
         }
 
-        let mut png_bytes = Vec::new();
-        let encoder = image::codecs::png::PngEncoder::new(&mut png_bytes);
-        if image::ImageEncoder::write_image(
-            encoder,
-            &rgba,
-            width,
-            height,
-            image::ExtendedColorType::Rgba8,
-        )
-        .is_ok()
+        if let Some((cf_png, h_png)) = png
+            && SetClipboardData(cf_png, Some(HANDLE(h_png.0))).is_err()
         {
-            let cf_png = RegisterClipboardFormatW(w!("PNG"));
-            if cf_png != 0
-                && !png_bytes.is_empty()
-                && let Ok(h_png) = GlobalAlloc(GMEM_MOVEABLE, png_bytes.len())
-                && !h_png.is_invalid()
-            {
-                let png_ptr = GlobalLock(h_png);
-                if !png_ptr.is_null() {
-                    std::ptr::copy_nonoverlapping(
-                        png_bytes.as_ptr(),
-                        png_ptr as *mut u8,
-                        png_bytes.len(),
-                    );
-                    let _ = GlobalUnlock(h_png);
-                    let _ = SetClipboardData(cf_png, Some(HANDLE(h_png.0)));
-                }
-            }
+            let _ = GlobalFree(Some(h_png));
         }
 
         let _ = CloseClipboard();
@@ -148,7 +197,7 @@ pub fn copy_bgra_to_clipboard(width: u32, height: u32, top_down_bgra: &[u8]) -> 
 }
 
 pub fn get_clipboard_text() -> Option<String> {
-    if !open_clipboard_retrying() {
+    if !open_clipboard_retrying(None) {
         return None;
     }
 
@@ -197,7 +246,7 @@ pub struct ClipboardImage {
 /// among them — offer only CF_BITMAP, a GDI handle with no pixel bytes of its
 /// own, so that is the fallback.
 pub fn get_clipboard_image() -> Option<ClipboardImage> {
-    if !open_clipboard_retrying() {
+    if !open_clipboard_retrying(None) {
         return None;
     }
     let out = unsafe { read_dib().or_else(|| read_cf_bitmap()) };
@@ -214,6 +263,17 @@ unsafe fn read_dib() -> Option<ClipboardImage> {
             return None;
         }
         let hglobal = HGLOBAL(handle.0);
+        // Check the block is at least big enough to hold a BITMAPINFOHEADER
+        // *before* reinterpreting its contents as one - GlobalSize needs no
+        // lock, so this is safe to do first. A clipboard owner (a
+        // deliberately hostile one, or just a buggy one) could otherwise hand
+        // over a block smaller than the header, and `&*(ptr as *const
+        // BITMAPINFOHEADER)` below would read past the end of it.
+        let block_size = GlobalSize(hglobal);
+        if block_size < std::mem::size_of::<BITMAPINFOHEADER>() {
+            return None;
+        }
+
         let ptr = GlobalLock(hglobal);
         if ptr.is_null() {
             return None;
@@ -236,25 +296,52 @@ unsafe fn read_dib() -> Option<ClipboardImage> {
             let _ = GlobalUnlock(hglobal);
             return None;
         }
+        // biSize is trusted below as the offset pixels start at; a header
+        // claiming to be smaller than what we already validated the block
+        // holds (an OS/2-style BITMAPCOREHEADER, or just a corrupt value)
+        // is not a layout this function understands.
+        if (header.biSize as usize) < std::mem::size_of::<BITMAPINFOHEADER>() {
+            let _ = GlobalUnlock(hglobal);
+            return None;
+        }
 
-        // Pixels start after the header and any colour masks the DIB declares.
-        let mask_bytes = if header.biCompression == BI_BITFIELDS.0 {
+        // Anything but plain RGB or bitfields (RLE, embedded JPEG/PNG) has no
+        // pixel layout this function can read; better to decline than to
+        // interpret compressed bytes as pixels.
+        if header.biCompression != BI_RGB.0 && header.biCompression != BI_BITFIELDS.0 {
+            let _ = GlobalUnlock(hglobal);
+            return None;
+        }
+
+        // Pixels start after the header, any colour masks and any colour
+        // table. The three masks are a separate 12-byte block only after a
+        // plain 40-byte header; V4/V5 headers (108/124 bytes) carry them
+        // inside biSize already, so adding 12 there skipped into the pixels.
+        let mask_bytes: usize = if header.biCompression == BI_BITFIELDS.0
+            && header.biSize as usize == std::mem::size_of::<BITMAPINFOHEADER>()
+        {
             12
         } else {
             0
         };
-        let pixels = (ptr as *const u8).add(header.biSize as usize + mask_bytes);
+        // 24/32-bit DIBs may still declare an (unused) colour table that sits
+        // between the header and the pixels.
+        let table_bytes = (header.biClrUsed as usize).saturating_mul(4);
+        let mask_bytes = mask_bytes.saturating_add(table_bytes);
 
         let w = width as usize;
         let h = height as usize;
         let src_stride = (w * bpp as usize).div_ceil(32) * 4; // rows pad to 4 bytes
 
-        let block_size = GlobalSize(hglobal);
         let needed = header.biSize as usize + mask_bytes + src_stride * h;
         if block_size < needed {
             let _ = GlobalUnlock(hglobal);
             return None;
         }
+        // Computed only now that `needed` has been checked against the
+        // block's actual size, so every row this function goes on to read
+        // through `pixels` is inside the allocation.
+        let pixels = (ptr as *const u8).add(header.biSize as usize + mask_bytes);
         let mut bgra = vec![0u8; w * h * 4];
 
         for row in 0..h {

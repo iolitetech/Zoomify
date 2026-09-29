@@ -33,10 +33,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA,
     GetClientRect, GetWindowLongPtrW, IDC_ARROW, IDC_HAND, LoadCursorW, PostMessageW,
-    RegisterClassExW, SW_HIDE, SW_SHOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
-    ShowWindow, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY,
-    WM_PAINT, WM_SETCURSOR, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION, WS_EX_APPWINDOW,
-    WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
+    RegisterClassExW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SetCursor,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CLOSE, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETCURSOR,
+    WM_SYSKEYDOWN, WNDCLASSEXW, WS_CAPTION, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_OVERLAPPED,
+    WS_SYSMENU,
 };
 use windows::core::{PCWSTR, Result, w};
 use windows_numerics::Vector2;
@@ -347,10 +348,52 @@ impl SettingsWindow {
         }
     }
 
+    /// Copy onto `target` only the fields this dialog's own UI can change,
+    /// leaving everything else - most importantly the handful of fields the
+    /// overlay owns (toolbar position/collapsed, recent custom colours,
+    /// export scale, timer minutes) - as `target` already has it. Save goes
+    /// through this instead of writing `self.config` out wholesale, which is
+    /// what let this dialog's stale open-time snapshot revert a config
+    /// change the overlay made while it was open. The field list here must
+    /// track every `self.config.<field> = ` assignment elsewhere in this
+    /// file - grep for that pattern if a new control is added.
+    fn apply_dialog_fields(&self, target: &mut AppConfig) {
+        let c = &self.config;
+        target.hotkey_static_zoom = c.hotkey_static_zoom.clone();
+        target.hotkey_draw = c.hotkey_draw.clone();
+        target.hotkey_spotlight = c.hotkey_spotlight.clone();
+        target.hotkey_live_zoom = c.hotkey_live_zoom.clone();
+        target.hotkey_timer = c.hotkey_timer.clone();
+        target.hotkey_loupe = c.hotkey_loupe.clone();
+        target.allow_monitor_cycling = c.allow_monitor_cycling;
+        target.autosave_sessions = c.autosave_sessions;
+        target.default_color = c.default_color.clone();
+        target.default_stroke_width = c.default_stroke_width;
+        target.default_zoom_level = c.default_zoom_level;
+        target.session_export_png = c.session_export_png;
+        target.session_folder = c.session_folder.clone();
+        target.session_keep_last = c.session_keep_last;
+        target.show_minimap = c.show_minimap;
+        target.spotlight_radius = c.spotlight_radius;
+        target.start_with_windows = c.start_with_windows;
+        target.timer_duration_mins = c.timer_duration_mins;
+        target.timer_sound_enabled = c.timer_sound_enabled;
+        target.toolbar_collapsed = c.toolbar_collapsed;
+        target.use_graphics_capture = c.use_graphics_capture;
+    }
+
     fn request_repaint(&self) {
         unsafe {
             let _ = InvalidateRect(Some(self.hwnd), None, false);
         }
+    }
+
+    /// Physical pixels per DIP for this window right now (1.0 at 100%
+    /// scaling). Every layout constant this window hit-tests and draws
+    /// against is in DIPs; window messages hand back physical pixels.
+    fn dpi_scale(&self) -> f32 {
+        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(self.hwnd) };
+        if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 }
     }
 
     unsafe extern "system" fn wnd_proc(
@@ -391,8 +434,17 @@ impl SettingsWindow {
                 }
 
                 WM_MOUSEMOVE => {
-                    let x = (lparam.0 & 0xFFFF) as i16 as f32;
-                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+                    // lParam is physical pixels; every layout constant this
+                    // window hit-tests against (CLIENT_WIDTH, BTN_Y, ...) is
+                    // in DIPs, which the render target's SetDpi already
+                    // scales up to draw. Above 100% scaling, skipping this
+                    // conversion hit-tested against the wrong control
+                    // entirely - clicking a visible button could land on
+                    // whatever DIP-space control happened to sit at that
+                    // larger physical coordinate.
+                    let s = this.dpi_scale();
+                    let x = (lparam.0 & 0xFFFF) as i16 as f32 / s;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32 / s;
                     let prev_hover = this.hover_item.clone();
                     this.update_hover(x, y);
                     if this.hover_item != prev_hover {
@@ -402,8 +454,9 @@ impl SettingsWindow {
                 }
 
                 WM_LBUTTONDOWN => {
-                    let x = (lparam.0 & 0xFFFF) as i16 as f32;
-                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+                    let s = this.dpi_scale();
+                    let x = (lparam.0 & 0xFFFF) as i16 as f32 / s;
+                    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32 / s;
                     this.handle_click(x, y);
                     LRESULT(0)
                 }
@@ -455,6 +508,28 @@ impl SettingsWindow {
                             return LRESULT(0);
                         }
                     }
+                    LRESULT(0)
+                }
+
+                WM_DPICHANGED => {
+                    // The suggested rect already accounts for the new
+                    // monitor's DPI, keeping the window in place on whatever
+                    // monitor it was just dragged to. Resize to it, then
+                    // rebuild the render target so SetDpi and the pixel
+                    // size both match; the DIP-space layout constants
+                    // everything else hit-tests against need no change.
+                    let suggested = &*(lparam.0 as *const RECT);
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        suggested.left,
+                        suggested.top,
+                        suggested.right - suggested.left,
+                        suggested.bottom - suggested.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                    let _ = this.init_render_target();
+                    this.request_repaint();
                     LRESULT(0)
                 }
 
@@ -753,8 +828,15 @@ impl SettingsWindow {
                 self.hide();
                 return;
             } else if x >= 585.0 && x <= 700.0 {
-                // Save & Apply
-                self.config.save();
+                // Save & Apply. Merge onto the config as it is *now* on disk,
+                // not this dialog's snapshot from when it was opened - the
+                // overlay may have written its own fields (toolbar position,
+                // recent colours, export scale, ...) in the meantime, and
+                // saving the stale snapshot outright used to revert them.
+                let mut fresh = AppConfig::load();
+                self.apply_dialog_fields(&mut fresh);
+                fresh.save();
+                self.config = fresh;
                 unsafe {
                     let _ = PostMessageW(
                         Some(self.notify_hwnd),

@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::ID2D1Bitmap;
@@ -21,8 +21,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassExW, SW_HIDE, SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDBLCLK,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
-    WM_PAINT, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_PAINT, WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, Result, w};
 
@@ -32,7 +33,7 @@ use crate::live_zoom::LiveZoomEngine;
 use crate::renderer::D2DRenderer;
 use crate::shapes::{
     ARROW_BINDING_GAP, AlignTo, SELECTION_HANDLE_SIZE, SELECTION_HANDLE_SLOP, SNAP_TOLERANCE_DIP,
-    SnapGuide, align_offsets, can_bind_arrow, can_contain_text, collect_anchors,
+    SnapGuide, align_offsets, anchor_points, can_bind_arrow, can_contain_text,
     container_height_for, curve_from_handle, curve_handle, distribute_offsets, handle_at,
     label_rides_on_shape, normalize_rect, push_pressure, recognize_smart_shape, resize_shape,
     resized_bounds, resolve_arrow_ends, set_shape_color, set_shape_fill, set_shape_pattern,
@@ -107,6 +108,24 @@ const TIMER_ID_ANIMATION: usize = 1001;
 /// Upper bound on laser trail points held at once.
 const MAX_LASER_TRAIL_POINTS: usize = 160;
 
+/// Upper bound on undo_history/redo_history entries. Some history actions
+/// (TransformShapes, AddShape, Clear) store whole Shape clones, so without a
+/// cap a long editing session - especially one involving pasted images -
+/// would grow these indefinitely. See `OverlayWindow::record_undo`.
+const MAX_HISTORY_ENTRIES: usize = 200;
+
+/// How long a run of arrow-key nudges of the same selection may be apart and
+/// still count as one held-key burst, merged into a single undo entry. Key
+/// repeat is much faster than this in practice; the point is just to not
+/// merge two separate, deliberate taps of the arrow key days apart.
+const NUDGE_MERGE_WINDOW: Duration = Duration::from_millis(750);
+
+/// How many Ctrl+W-closed boards `closed_boards` remembers before the
+/// oldest is dropped. Ctrl+W used to discard a board outright with nothing
+/// kept anywhere - closing the wrong one by reflex (it is a common "close
+/// this" shortcut in other apps) lost everything on it for good.
+const MAX_CLOSED_BOARDS: usize = 10;
+
 /// Posted to the tray host window whenever a Live Zoom session starts (wparam 1)
 /// or stops (wparam 0), so the host can claim / release the Ctrl+Up/Down/+/- keys.
 pub const WM_LIVE_ZOOM_STATE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_USER + 400;
@@ -139,6 +158,11 @@ pub struct OverlayWindow {
     pub shapes: Vec<Annotation>,
     pub undo_history: Vec<HistoryAction>,
     pub redo_history: Vec<HistoryAction>,
+    /// When the most recent arrow-key nudge landed and which shapes it moved,
+    /// so a run of key-repeat nudges of the same selection merges into the
+    /// burst's single history entry instead of pushing one per tick. See
+    /// `nudge_selection` and `NUDGE_MERGE_WINDOW`.
+    last_nudge: Option<(Instant, Vec<ShapeId>)>,
     /// Every board, including the active one — always at least one. The
     /// active board's slot (`boards[active_board]`) is stale while it's
     /// loaded: its live content is on `shapes`/`undo_history`/`redo_history`
@@ -148,6 +172,10 @@ pub struct OverlayWindow {
     pub boards: Vec<Board>,
     /// Index into `boards` of the page currently loaded onto `shapes` et al.
     pub active_board: usize,
+    /// Boards closed with Ctrl+W this session, most-recent-last, restorable
+    /// with Ctrl+Shift+T. Capped at `MAX_CLOSED_BOARDS`; not persisted, and
+    /// cleared whenever the overlay exits.
+    pub closed_boards: Vec<Board>,
     pub active_shape: Option<Shape>,
     /// Pressure from the most recent pen sample, 0..=1. `None` for mouse,
     /// touch, or a pen with no pressure axis.
@@ -188,6 +216,18 @@ pub struct OverlayWindow {
     pub draw_start_pt: Point2D,
     pub step_counter: u32,
     pub text_editor: Option<TextEditorState>,
+    /// A high surrogate received from WM_CHAR, waiting for the low surrogate
+    /// that completes it. WM_CHAR delivers a character outside the Basic
+    /// Multilingual Plane (any emoji, among others) as two separate
+    /// messages, one per UTF-16 surrogate half; `char::from_u32` on either
+    /// half alone fails and used to just drop it as a bogus control
+    /// character.
+    pub pending_high_surrogate: Option<u16>,
+    /// The 500ms wall-clock phase (see render_text_editor's show_caret) as
+    /// of the last animation tick, so the tick can tell whether the caret's
+    /// visible/hidden state actually changed since then instead of
+    /// repainting the whole scene every 16ms regardless.
+    last_caret_phase: Option<u128>,
     pub font_size: f32,
     pub text_is_bold: bool,
     pub text_is_italic: bool,
@@ -221,6 +261,11 @@ pub struct OverlayWindow {
     pub timer_alarm_sounded: bool,
     pub timer_sound_enabled: bool,
     pub timer_last_tick: Instant,
+    /// (displayed whole seconds, countdown-ring arc segment, overtime flag)
+    /// as of the last animation tick that actually needed a repaint - the
+    /// countdown only visibly changes when one of these changes, not every
+    /// 16ms tick.
+    last_timer_paint_state: Option<(i64, i64, bool)>,
     pub timer_widget: TimerWidgetState,
     pub screen_x: i32,
     pub screen_y: i32,
@@ -233,6 +278,37 @@ pub struct OverlayWindow {
     pub available_monitors: Vec<crate::monitor::MonitorInfo>,
     pub current_monitor_index: usize,
     pub current_monitor: crate::monitor::MonitorInfo,
+}
+
+/// Nearest-neighbour downscale of a top-down BGRA buffer so neither
+/// dimension exceeds `max_dim`. Returns the input unchanged (dimensions and
+/// buffer both, no copy) if it already fits.
+///
+/// Only ever used as a last-resort safety net for a pasted image bigger
+/// than the GPU can create a bitmap from, not for everyday paste scaling
+/// (which only ever resizes the on-canvas *display* size, not the pixel
+/// data) - a simple nearest-neighbour resample is a deliberate trade of
+/// quality for simplicity, since this path is rare.
+fn downscale_bgra_to_fit(w: u32, h: u32, bgra: Vec<u8>, max_dim: u32) -> (u32, u32, Vec<u8>) {
+    if w <= max_dim && h <= max_dim {
+        return (w, h, bgra);
+    }
+    let scale = (max_dim as f32 / w as f32).min(max_dim as f32 / h as f32);
+    let new_w = ((w as f32 * scale).floor().max(1.0)) as u32;
+    let new_h = ((h as f32 * scale).floor().max(1.0)) as u32;
+    let mut out = vec![0u8; new_w as usize * new_h as usize * 4];
+    for y in 0..new_h {
+        let sy = ((y as f32 / new_h as f32) * h as f32) as u32;
+        let sy = sy.min(h - 1);
+        for x in 0..new_w {
+            let sx = ((x as f32 / new_w as f32) * w as f32) as u32;
+            let sx = sx.min(w - 1);
+            let src = (sy as usize * w as usize + sx as usize) * 4;
+            let dst = (y as usize * new_w as usize + x as usize) * 4;
+            out[dst..dst + 4].copy_from_slice(&bgra[src..src + 4]);
+        }
+    }
+    (new_w, new_h, out)
 }
 
 impl OverlayWindow {
@@ -349,8 +425,10 @@ impl OverlayWindow {
                 shapes: Vec::new(),
                 undo_history: Vec::new(),
                 redo_history: Vec::new(),
+                last_nudge: None,
                 boards: vec![Board::default()],
                 active_board: 0,
+                closed_boards: Vec::new(),
                 active_shape: None,
                 current_tool: DrawTool::Pen,
                 current_color: initial_color,
@@ -363,7 +441,7 @@ impl OverlayWindow {
                 badge_size,
                 badge_shape,
                 pen_settings: StrokeToolSettings {
-                    stroke_width: 3.0,
+                    stroke_width: cfg.default_stroke_width,
                     pattern: StrokePattern::Solid,
                 },
                 highlighter_settings: StrokeToolSettings {
@@ -422,6 +500,8 @@ impl OverlayWindow {
                 draw_start_pt: Point2D::default(),
                 step_counter: 1,
                 text_editor: None,
+                pending_high_surrogate: None,
+                last_caret_phase: None,
                 font_size: 22.0,
                 text_is_bold: false,
                 text_is_italic: false,
@@ -456,6 +536,7 @@ impl OverlayWindow {
                 timer_alarm_sounded: false,
                 timer_sound_enabled: cfg.timer_sound_enabled,
                 timer_last_tick: Instant::now(),
+                last_timer_paint_state: None,
                 timer_widget: TimerWidgetState::default(),
                 screen_x,
                 screen_y,
@@ -615,6 +696,7 @@ impl OverlayWindow {
             cursor_screen,
             self.logical_w(),
             self.logical_h(),
+            false, // entering StaticZoom, which never uses the infinite-canvas clamp
         );
         self.mode = AppMode::StaticZoom;
         self.loupe.active = false;
@@ -631,6 +713,16 @@ impl OverlayWindow {
         self.show_window();
         self.set_toast("🔎", "Static Zoom (Wheel: Zoom | Pan)");
         self.request_repaint();
+    }
+
+    /// Switch tool from somewhere other than the toolbar (tray menu, hotkey),
+    /// keeping the toolbar's highlight, sub-bar and stroke settings in step.
+    pub fn select_tool(&mut self, tool: DrawTool) {
+        self.current_tool = tool;
+        self.toolbar.active_tool = Some(tool);
+        self.sync_tool_to_toolbar();
+        let (w, h) = (self.logical_w(), self.logical_h());
+        self.toolbar.update_layout(w, h);
     }
 
     pub fn sync_tool_to_toolbar(&mut self) {
@@ -863,6 +955,17 @@ impl OverlayWindow {
             self.capture_current_screen();
         }
         self.mode = AppMode::Timer;
+        // A dragged card position was saved against whichever monitor it was
+        // on; after a switch to a smaller one (or an unplug) it can sit
+        // entirely off-screen with no way to grab it back.
+        if let Some(pos) = self.timer_widget.custom_pos {
+            let (w, h) = (self.logical_w(), self.logical_h());
+            let (half_w, half_h) = (290.0_f32.min(w / 2.0), 225.0_f32.min(h / 2.0));
+            self.timer_widget.custom_pos = Some(Point2D::new(
+                pos.x.clamp(half_w, (w - half_w).max(half_w)),
+                pos.y.clamp(half_h, (h - half_h).max(half_h)),
+            ));
+        }
         self.loupe.active = false;
         self.loupe.pinned = false;
         self.spotlight.active = false;
@@ -985,39 +1088,39 @@ impl OverlayWindow {
         (self.timer_seconds as f32 / 60.0).round().max(1.0) as u32
     }
 
+    /// Only ever writes the handful of fields the overlay actually owns:
+    /// toolbar position/collapsed state, recently-picked custom colours,
+    /// export scale, and the timer's last-set duration. Everything else
+    /// here used to be "whatever tool state happened to be live" (the
+    /// highlighter's width, the last colour a shape was drawn in, current
+    /// fill mode/stroke pattern/badge size, the spotlight radius, minimap
+    /// visibility) written into the *same* fields Settings' "Default ..."
+    /// controls edit - so exiting the overlay after using, say, the
+    /// highlighter at 14px silently overwrote a stroke width the user had
+    /// deliberately set in Settings to something else. Reloading fresh
+    /// (rather than starting from whatever was loaded at overlay startup)
+    /// means a Settings change made while this overlay session was running
+    /// also survives.
     pub fn save_config(&self) {
         let mut cfg = crate::config::AppConfig::load();
-        cfg.default_stroke_width = self.stroke_width;
-        cfg.spotlight_radius = self.spotlight.radius;
         cfg.timer_duration_mins = (self.timer_seconds / 60).max(1);
         cfg.toolbar_collapsed = self.toolbar.collapsed;
-        cfg.show_minimap = self.show_minimap;
         // Unconditional: a `Some`-only write means "Reset Toolbar Position"
         // never clears the stale position from config.json.
         cfg.toolbar_custom_position = self.toolbar.custom_position.map(|p| (p.x, p.y));
-        cfg.default_color = self.current_color.name();
         cfg.recent_custom_colors = self.color_picker.recent.iter().map(|c| c.name()).collect();
-        cfg.default_fill_mode = match self.fill_mode {
-            FillMode::None => "None".to_string(),
-            FillMode::Tinted => "Tinted".to_string(),
-            FillMode::Solid => "Solid".to_string(),
-        };
-        cfg.default_stroke_pattern = match self.stroke_pattern {
-            StrokePattern::Dashed => "Dashed".to_string(),
-            StrokePattern::Dotted => "Dotted".to_string(),
-            StrokePattern::Solid => "Solid".to_string(),
-        };
-        cfg.default_badge_size = match self.badge_size {
-            BadgeSize::Small => "Small".to_string(),
-            BadgeSize::Large => "Large".to_string(),
-            BadgeSize::ExtraLarge => "ExtraLarge".to_string(),
-            BadgeSize::Medium => "Medium".to_string(),
-        };
         cfg.export_scale = self.export_scale;
         cfg.save();
     }
 
     pub fn exit_overlay(&mut self) {
+        // An edit still open when the overlay closes (global hotkey toggling
+        // the mode off, the toolbar's Close button, the Timer's close
+        // button) used to be dropped here with a bare `text_editor = None`,
+        // silently losing whatever was typed - and for a re-opened text,
+        // losing the original too, recoverable only via Ctrl+Z. Committing
+        // it also means autosave (right below) actually captures it.
+        self.commit_text_editor();
         self.save_config();
         // Capture the canvas before teardown clears it.
         if crate::config::AppConfig::load().autosave_sessions {
@@ -1032,9 +1135,9 @@ impl OverlayWindow {
         self.loupe.active = false;
         self.loupe.pinned = false;
         self.is_drawing = false;
+        self.pen_active = false;
         self.active_shape = None;
         self.selection = None;
-        self.text_editor = None;
         self.show_cheat_sheet = false;
         self.background_bitmap = None;
         self.background_capture = None;
@@ -1042,8 +1145,15 @@ impl OverlayWindow {
         self.shapes.clear();
         self.undo_history.clear();
         self.redo_history.clear();
+        self.last_nudge = None;
         self.boards = vec![Board::default()];
         self.active_board = 0;
+        self.closed_boards.clear();
+        // The shapes that filled it are gone for good (not parked in undo
+        // history like clear_all()'s Ctrl+Z-able clear), so nothing will
+        // reuse these entries again this session.
+        self.renderer.clear_geometry_cache();
+        self.renderer.clear_image_cache();
         self.background_type = CanvasBackground::Transparent;
         self.laser_trail.clear();
         self.laser_ripples.clear();
@@ -1056,10 +1166,37 @@ impl OverlayWindow {
     pub fn refresh_monitors(&mut self) {
         self.available_monitors = crate::monitor::MonitorManager::enumerate_monitors();
         self.toolbar.monitor_count = self.available_monitors.len();
-        if self.current_monitor_index >= self.available_monitors.len() {
-            self.current_monitor_index = 0;
+        // The list is re-sorted on every enumeration, so the old index can now
+        // name a different screen (or none). Find the monitor we were on by
+        // identity; if it is gone, fall back to the primary rather than
+        // leaving the overlay bound to a screen that no longer exists.
+        let old = self.current_monitor.clone();
+        let idx = self
+            .available_monitors
+            .iter()
+            .position(|m| m.hmonitor == old.hmonitor)
+            .or_else(|| {
+                self.available_monitors
+                    .iter()
+                    .position(|m| m.x == old.x && m.y == old.y)
+            })
+            .or_else(|| self.available_monitors.iter().position(|m| m.is_primary))
+            .unwrap_or(0);
+        if idx >= self.available_monitors.len() {
+            return;
         }
-        if let Some(mon) = self.available_monitors.get(self.current_monitor_index) {
+        self.current_monitor_index = idx;
+        self.toolbar.current_monitor_index = idx;
+        let mon = &self.available_monitors[idx];
+        let moved = mon.x != self.screen_x
+            || mon.y != self.screen_y
+            || mon.width != self.screen_width
+            || mon.height != self.screen_height;
+        if moved && self.mode != AppMode::Idle {
+            // set_active_monitor re-binds the window, drops the stale capture
+            // and resizes the renderer.
+            self.set_active_monitor(idx);
+        } else {
             self.current_monitor = mon.clone();
         }
     }
@@ -1074,6 +1211,26 @@ impl OverlayWindow {
             let sy = self.current_monitor.y;
             let sw = self.current_monitor.width;
             let sh = self.current_monitor.height;
+
+            // A cached background capture belongs to whichever monitor's
+            // dimensions were current when it was taken. Carrying it across a
+            // real monitor switch pairs old, possibly smaller pixel data with
+            // the new screen_width/screen_height downstream
+            // (get_composite_capture -> render_to_capture), which reads past
+            // the end of the buffer when building the export bitmap - and on
+            // screen it just shows the old monitor's frozen picture stretched
+            // over the new one. Force a recapture whenever the monitor
+            // actually changes; every caller already does
+            // `if background_bitmap.is_none() { capture_current_screen() }`
+            // right after calling this.
+            if sx != self.screen_x
+                || sy != self.screen_y
+                || sw != self.screen_width
+                || sh != self.screen_height
+            {
+                self.background_bitmap = None;
+                self.background_capture = None;
+            }
 
             self.screen_x = sx;
             self.screen_y = sy;
@@ -1341,6 +1498,31 @@ impl OverlayWindow {
         self.request_repaint();
     }
 
+    /// Push onto `undo_history`, dropping the oldest entry once it grows
+    /// past `MAX_HISTORY_ENTRIES`. Unbounded history is not just a slow leak:
+    /// `HistoryAction::TransformShapes`/`AddShape` store whole `Shape`
+    /// clones, so a pasted image held under a repeating arrow key (one
+    /// nudge, one history entry, per key-repeat tick) could otherwise grow
+    /// this by hundreds of megabytes a second for as long as the key stayed
+    /// down. Every `self.undo_history.push(...)` call site goes through this
+    /// instead of pushing directly.
+    fn record_undo(&mut self, action: HistoryAction) {
+        self.undo_history.push(action);
+        if self.undo_history.len() > MAX_HISTORY_ENTRIES {
+            self.undo_history.remove(0);
+        }
+    }
+
+    /// Same cap as `record_undo`, for symmetry - `redo_history` can only grow
+    /// by undoing, so it is already bounded by `undo_history`'s own cap, but
+    /// there is no reason to let it hold anything this cap would not.
+    fn record_redo(&mut self, action: HistoryAction) {
+        self.redo_history.push(action);
+        if self.redo_history.len() > MAX_HISTORY_ENTRIES {
+            self.redo_history.remove(0);
+        }
+    }
+
     pub fn push_shape(&mut self, shape: Shape) -> ShapeId {
         self.selection = None;
         let annotation = Annotation::new(shape);
@@ -1357,23 +1539,30 @@ impl OverlayWindow {
             },
             None => HistoryAction::AddShape(annotation),
         };
-        self.undo_history.push(action);
+        self.record_undo(action);
         self.redo_history.clear();
         id
     }
 
     pub fn undo(&mut self) {
+        // A text edit in progress has no representation in undo_history yet
+        // (see commit_text_editor's doc comment) - popping some unrelated
+        // earlier action out from under it used to leave the editor holding
+        // a copy that would still commit on top of whatever undo just
+        // restored, which was the toolbar-Undo-duplicates-text bug. Commit
+        // it first, so Undo always acts on committed state.
+        self.commit_text_editor();
         if let Some(action) = self.undo_history.pop() {
             match action {
                 HistoryAction::AddShape(_) => {
                     if let Some(shape) = self.shapes.pop() {
-                        self.redo_history.push(HistoryAction::AddShape(shape));
+                        self.record_redo(HistoryAction::AddShape(shape));
                         self.set_toast("↩️", "Undo Shape");
                     }
                 }
                 HistoryAction::AddStepBadge { prev_counter, .. } => {
                     if let Some(shape) = self.shapes.pop() {
-                        self.redo_history.push(HistoryAction::AddStepBadge {
+                        self.record_redo(HistoryAction::AddStepBadge {
                             shape,
                             prev_counter,
                         });
@@ -1384,8 +1573,7 @@ impl OverlayWindow {
                 HistoryAction::DeleteShape { index, shape } => {
                     let insert_idx = index.min(self.shapes.len());
                     self.shapes.insert(insert_idx, shape.clone());
-                    self.redo_history
-                        .push(HistoryAction::DeleteShape { index, shape });
+                    self.record_redo(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↩️", "Restored Erased Shape");
                 }
                 HistoryAction::SetGroup { items } => {
@@ -1394,7 +1582,7 @@ impl OverlayWindow {
                             a.group = *before;
                         }
                     }
-                    self.redo_history.push(HistoryAction::SetGroup { items });
+                    self.record_redo(HistoryAction::SetGroup { items });
                     self.set_toast("↩️", "Undo Grouping");
                 }
                 HistoryAction::SetOpacity { items } => {
@@ -1403,15 +1591,14 @@ impl OverlayWindow {
                             a.opacity = *before;
                         }
                     }
-                    self.redo_history.push(HistoryAction::SetOpacity { items });
+                    self.record_redo(HistoryAction::SetOpacity { items });
                     self.set_toast("↩️", "Undo Opacity");
                 }
                 HistoryAction::Reorder { id, from, to } => {
                     if let Some(now) = self.shapes.iter().position(|a| a.id == id) {
                         let a = self.shapes.remove(now);
                         self.shapes.insert(from.min(self.shapes.len()), a);
-                        self.redo_history
-                            .push(HistoryAction::Reorder { id, from, to });
+                        self.record_redo(HistoryAction::Reorder { id, from, to });
                         self.set_toast("↩️", "Undo Reorder");
                     }
                 }
@@ -1421,13 +1608,12 @@ impl OverlayWindow {
                         let at = (*index).min(self.shapes.len());
                         self.shapes.insert(at, shape.clone());
                     }
-                    self.redo_history
-                        .push(HistoryAction::DeleteShapes { items });
+                    self.record_redo(HistoryAction::DeleteShapes { items });
                     self.set_toast("↩️", "Restored Deleted Annotation");
                 }
                 HistoryAction::Clear(prev_shapes) => {
                     let current_shapes = std::mem::replace(&mut self.shapes, prev_shapes);
-                    self.redo_history.push(HistoryAction::Clear(current_shapes));
+                    self.record_redo(HistoryAction::Clear(current_shapes));
                     self.set_toast("↩️", "Restored Cleared Canvas");
                 }
                 HistoryAction::TransformShapes { items } => {
@@ -1436,9 +1622,16 @@ impl OverlayWindow {
                             a.shape = before.clone();
                         }
                     }
-                    self.redo_history
-                        .push(HistoryAction::TransformShapes { items });
+                    self.record_redo(HistoryAction::TransformShapes { items });
                     self.set_toast("↩️", "Undo Edit");
+                }
+                HistoryAction::SetBindings { id, before, after } => {
+                    if let Some(a) = self.shapes.iter_mut().find(|a| a.id == id) {
+                        a.start_bound = before.0;
+                        a.end_bound = before.1;
+                    }
+                    self.record_redo(HistoryAction::SetBindings { id, before, after });
+                    self.set_toast("↩️", "Undo Re-anchor");
                 }
             }
             self.selection = None;
@@ -1448,11 +1641,13 @@ impl OverlayWindow {
     }
 
     pub fn redo(&mut self) {
+        // See the matching comment in undo().
+        self.commit_text_editor();
         if let Some(action) = self.redo_history.pop() {
             match action {
                 HistoryAction::AddShape(shape) => {
                     self.shapes.push(shape.clone());
-                    self.undo_history.push(HistoryAction::AddShape(shape));
+                    self.record_undo(HistoryAction::AddShape(shape));
                     self.set_toast("↪️", "Redo Shape");
                 }
                 HistoryAction::AddStepBadge {
@@ -1461,7 +1656,7 @@ impl OverlayWindow {
                 } => {
                     self.shapes.push(shape.clone());
                     self.step_counter = prev_counter + 1;
-                    self.undo_history.push(HistoryAction::AddStepBadge {
+                    self.record_undo(HistoryAction::AddStepBadge {
                         shape,
                         prev_counter,
                     });
@@ -1473,8 +1668,7 @@ impl OverlayWindow {
                     } else if !self.shapes.is_empty() {
                         self.shapes.pop();
                     }
-                    self.undo_history
-                        .push(HistoryAction::DeleteShape { index, shape });
+                    self.record_undo(HistoryAction::DeleteShape { index, shape });
                     self.set_toast("↪️", "Re-erased Shape");
                 }
                 HistoryAction::SetGroup { items } => {
@@ -1483,7 +1677,7 @@ impl OverlayWindow {
                             a.group = *after;
                         }
                     }
-                    self.undo_history.push(HistoryAction::SetGroup { items });
+                    self.record_undo(HistoryAction::SetGroup { items });
                     self.set_toast("↪️", "Redo Grouping");
                 }
                 HistoryAction::SetOpacity { items } => {
@@ -1492,15 +1686,14 @@ impl OverlayWindow {
                             a.opacity = *after;
                         }
                     }
-                    self.undo_history.push(HistoryAction::SetOpacity { items });
+                    self.record_undo(HistoryAction::SetOpacity { items });
                     self.set_toast("↪️", "Redo Opacity");
                 }
                 HistoryAction::Reorder { id, from, to } => {
                     if let Some(now) = self.shapes.iter().position(|a| a.id == id) {
                         let a = self.shapes.remove(now);
                         self.shapes.insert(to.min(self.shapes.len()), a);
-                        self.undo_history
-                            .push(HistoryAction::Reorder { id, from, to });
+                        self.record_undo(HistoryAction::Reorder { id, from, to });
                         self.set_toast("↪️", "Redo Reorder");
                     }
                 }
@@ -1511,13 +1704,12 @@ impl OverlayWindow {
                             self.shapes.remove(*index);
                         }
                     }
-                    self.undo_history
-                        .push(HistoryAction::DeleteShapes { items });
+                    self.record_undo(HistoryAction::DeleteShapes { items });
                     self.set_toast("↪️", "Re-deleted Annotation");
                 }
                 HistoryAction::Clear(_prev_shapes) => {
                     let current_shapes = std::mem::take(&mut self.shapes);
-                    self.undo_history.push(HistoryAction::Clear(current_shapes));
+                    self.record_undo(HistoryAction::Clear(current_shapes));
                     self.set_toast("↪️", "Re-cleared Canvas");
                 }
                 HistoryAction::TransformShapes { items } => {
@@ -1526,9 +1718,16 @@ impl OverlayWindow {
                             a.shape = after.clone();
                         }
                     }
-                    self.undo_history
-                        .push(HistoryAction::TransformShapes { items });
+                    self.record_undo(HistoryAction::TransformShapes { items });
                     self.set_toast("↪️", "Redo Edit");
+                }
+                HistoryAction::SetBindings { id, before, after } => {
+                    if let Some(a) = self.shapes.iter_mut().find(|a| a.id == id) {
+                        a.start_bound = after.0;
+                        a.end_bound = after.1;
+                    }
+                    self.record_undo(HistoryAction::SetBindings { id, before, after });
+                    self.set_toast("↪️", "Redo Re-anchor");
                 }
             }
             self.selection = None;
@@ -1540,7 +1739,7 @@ impl OverlayWindow {
     pub fn clear_all(&mut self) {
         if !self.shapes.is_empty() {
             let old = std::mem::take(&mut self.shapes);
-            self.undo_history.push(HistoryAction::Clear(old));
+            self.record_undo(HistoryAction::Clear(old));
             self.redo_history.clear();
             self.selection = None;
             self.set_toast("🧹", "Canvas Cleared (Ctrl+Z to Undo)");
@@ -1579,6 +1778,9 @@ impl OverlayWindow {
         self.active_shape = None;
         self.is_drawing = false;
         self.snap_guides.clear();
+        // A different board's undo_history is now live; a merge check against
+        // the previous board's last entry would be meaningless at best.
+        self.last_nudge = None;
 
         self.set_toast(
             "📑",
@@ -1605,6 +1807,7 @@ impl OverlayWindow {
         self.active_shape = None;
         self.is_drawing = false;
         self.snap_guides.clear();
+        self.last_nudge = None;
 
         self.set_toast(
             "📑",
@@ -1628,6 +1831,22 @@ impl OverlayWindow {
         }
         self.commit_text_editor();
 
+        // self.boards[active_board] is only ever a stale placeholder while a
+        // board is loaded (see the Board doc comment) - the real content is
+        // in self.shapes/undo_history/redo_history directly, so it has to be
+        // lifted out of *those* before it is overwritten below, or Ctrl+W
+        // would discard whatever was actually on screen while leaving an
+        // empty placeholder in closed_boards instead.
+        let closed = Board {
+            shapes: std::mem::take(&mut self.shapes),
+            undo_history: std::mem::take(&mut self.undo_history),
+            redo_history: std::mem::take(&mut self.redo_history),
+        };
+        self.closed_boards.push(closed);
+        if self.closed_boards.len() > MAX_CLOSED_BOARDS {
+            self.closed_boards.remove(0);
+        }
+
         self.boards.remove(self.active_board);
         let next = self.active_board.min(self.boards.len() - 1);
 
@@ -1641,11 +1860,55 @@ impl OverlayWindow {
         self.active_shape = None;
         self.is_drawing = false;
         self.snap_guides.clear();
+        self.last_nudge = None;
 
         self.set_toast(
             "📑",
             format!(
-                "Board Closed ({} of {})",
+                "Board Closed ({} of {}) — Ctrl+Shift+T to restore",
+                self.active_board + 1,
+                self.boards.len()
+            ),
+        );
+        self.request_repaint();
+    }
+
+    /// Bring back the most recently Ctrl+W-closed board (Ctrl+Shift+T),
+    /// right after the currently active one, and switch to it.
+    pub fn reopen_last_closed_board(&mut self) {
+        let Some(board) = self.closed_boards.pop() else {
+            self.set_toast("📑", "No Closed Board to Restore");
+            self.request_repaint();
+            return;
+        };
+        self.commit_text_editor();
+
+        // Park the active board back into self.boards first, exactly as
+        // switch_board does, so its live content is not lost when the
+        // restored board takes over self.shapes/undo_history/redo_history
+        // below.
+        self.boards[self.active_board].shapes = std::mem::take(&mut self.shapes);
+        self.boards[self.active_board].undo_history = std::mem::take(&mut self.undo_history);
+        self.boards[self.active_board].redo_history = std::mem::take(&mut self.redo_history);
+
+        let insert_at = self.active_board + 1;
+        self.boards.insert(insert_at, board);
+        self.shapes = std::mem::take(&mut self.boards[insert_at].shapes);
+        self.undo_history = std::mem::take(&mut self.boards[insert_at].undo_history);
+        self.redo_history = std::mem::take(&mut self.boards[insert_at].redo_history);
+        self.active_board = insert_at;
+
+        self.selection = None;
+        self.marquee = None;
+        self.active_shape = None;
+        self.is_drawing = false;
+        self.snap_guides.clear();
+        self.last_nudge = None;
+
+        self.set_toast(
+            "📑",
+            format!(
+                "Board Restored ({} of {})",
                 self.active_board + 1,
                 self.boards.len()
             ),
@@ -1790,7 +2053,7 @@ impl OverlayWindow {
 
     /// Drop anything in the selection that is no longer on the canvas.
     fn validate_selection(&mut self) {
-        let live: Vec<ShapeId> = self.shapes.iter().map(|a| a.id).collect();
+        let live: std::collections::HashSet<ShapeId> = self.shapes.iter().map(|a| a.id).collect();
         if let Some(sel) = &mut self.selection {
             sel.ids.retain(|id| live.contains(id));
             if sel.ids.is_empty() {
@@ -1927,7 +2190,12 @@ impl OverlayWindow {
         let dx = canvas_pt.x - sel.grab.x;
         let dy = canvas_pt.y - sel.grab.y;
         let grab = sel.grab;
-        let originals = sel.originals.clone();
+        // Borrowed, not cloned: originals never changes during a drag, and
+        // every match arm below already clones just the individual shapes
+        // it actually updates - cloning the whole selection here first was
+        // a second full copy of every selected shape (a pasted image among
+        // them, pre-Arc) on top of that, every single mouse move.
+        let originals = &sel.originals;
         let original_bounds = sel.original_bounds;
         let snapping = self.snapping_enabled();
         let tol = self.snap_tolerance();
@@ -2040,15 +2308,16 @@ impl OverlayWindow {
             }
         };
 
-        let mut changed = false;
+        let mut moved_ids: Vec<ShapeId> = Vec::new();
         for (id, shape) in updates {
             if let Some(i) = self.annotation_index(id) {
                 self.shapes[i].shape = shape;
-                changed = true;
+                moved_ids.push(id);
             }
         }
+        let changed = !moved_ids.is_empty();
         if changed {
-            self.settle_bindings();
+            self.settle_bindings_for(&moved_ids);
         }
         changed
     }
@@ -2074,9 +2343,10 @@ impl OverlayWindow {
                     .map(|s| s.id)
                     .collect();
                 let mut hits = hits;
+                let mut seen: std::collections::HashSet<ShapeId> = hits.iter().copied().collect();
                 for id in hits.clone() {
                     for f in self.travelling_with(id) {
-                        if !hits.contains(&f) {
+                        if seen.insert(f) {
                             hits.push(f);
                         }
                     }
@@ -2104,10 +2374,29 @@ impl OverlayWindow {
         let Some(kind) = sel.drag.take() else {
             return;
         };
-        let originals = sel.originals.clone();
+        // Taken, not cloned: this selection's `originals` is stale the
+        // moment the drag ends anyway (the next drag repopulates it fresh
+        // in begin_drag), so there is nothing to preserve by copying it.
+        let originals = std::mem::take(&mut sel.originals);
+        // Captured while `sel` is still the pre-rebind selection: only an
+        // endpoint drag rebinds anything, and only ever the one shape being
+        // dragged (rebind_endpoint only ever acts on the sole selected id).
+        let rebind_id = if matches!(kind, DragKind::Endpoint(_)) {
+            sel.only()
+        } else {
+            None
+        };
+        let before_bound =
+            rebind_id.and_then(|id| self.annotation(id).map(|a| (a.start_bound, a.end_bound)));
         if let DragKind::Endpoint(is_start) = kind {
             self.rebind_endpoint(is_start);
         }
+        let rebind_change = rebind_id.zip(before_bound).and_then(|(id, before)| {
+            self.annotation(id)
+                .map(|a| (a.start_bound, a.end_bound))
+                .filter(|after| *after != before)
+                .map(|after| (id, before, after))
+        });
         let mut items: Vec<(ShapeId, Shape, Shape)> = Vec::new();
         for (id, before) in originals {
             if let Some(after) = self.annotation(id).map(|a| a.shape.clone())
@@ -2117,8 +2406,14 @@ impl OverlayWindow {
             }
         }
         if !items.is_empty() {
-            self.undo_history
-                .push(HistoryAction::TransformShapes { items });
+            self.record_undo(HistoryAction::TransformShapes { items });
+            self.redo_history.clear();
+        }
+        // Pushed *after* the geometry entry above: undo/redo history is
+        // LIFO, and popping this one first is what makes the binding revert
+        // before the paired geometry revert - see SetBindings' doc comment.
+        if let Some((id, before, after)) = rebind_change {
+            self.record_undo(HistoryAction::SetBindings { id, before, after });
             self.redo_history.clear();
         }
         // Shrinking a box below its label would clip words, so it grows back.
@@ -2183,8 +2478,7 @@ impl OverlayWindow {
             return false;
         }
         items.reverse();
-        self.undo_history
-            .push(HistoryAction::DeleteShapes { items });
+        self.record_undo(HistoryAction::DeleteShapes { items });
         self.redo_history.clear();
         self.settle_bindings();
         true
@@ -2197,7 +2491,7 @@ impl OverlayWindow {
             return;
         }
         let mut items: Vec<(ShapeId, Shape, Shape)> = Vec::new();
-        for id in ids {
+        for &id in &ids {
             let Some(index) = self.annotation_index(id) else {
                 continue;
             };
@@ -2210,9 +2504,36 @@ impl OverlayWindow {
         if items.is_empty() {
             return;
         }
-        self.undo_history
-            .push(HistoryAction::TransformShapes { items });
-        self.redo_history.clear();
+
+        // An arrow key held down fires this once per key-repeat tick. Treat a
+        // fast-enough run of nudges of the same selection as one gesture:
+        // fold this tick's result into the burst's existing history entry
+        // instead of pushing (and cloning every selected Shape into) a new
+        // one, so holding the key for a second costs one undo step and one
+        // set of Shape clones, not dozens.
+        let now = Instant::now();
+        let same_burst = self.last_nudge.as_ref().is_some_and(|(t, prev_ids)| {
+            now.duration_since(*t) < NUDGE_MERGE_WINDOW && *prev_ids == ids
+        });
+        let merged = same_burst
+            && if let Some(HistoryAction::TransformShapes { items: last_items }) =
+                self.undo_history.last_mut()
+            {
+                for (id, _before, after) in &items {
+                    if let Some(slot) = last_items.iter_mut().find(|(lid, _, _)| lid == id) {
+                        slot.2 = after.clone();
+                    }
+                }
+                true
+            } else {
+                false
+            };
+        if !merged {
+            self.record_undo(HistoryAction::TransformShapes { items });
+            self.redo_history.clear();
+        }
+        self.last_nudge = Some((now, ids));
+
         self.settle_bindings();
         self.request_repaint();
     }
@@ -2243,11 +2564,14 @@ impl OverlayWindow {
         else {
             return false;
         };
-        self.undo_history.push(HistoryAction::DeleteShape {
-            index,
-            shape: annotation,
-        });
-        self.redo_history.clear();
+        // No history entry yet: commit_text_editor()/cancel_text_editor()
+        // decide what actually happened (edited, cleared to nothing, or
+        // cancelled) and record exactly one entry for it, using `original`
+        // below to put things back either way. Recording a delete here too,
+        // as this used to, meant an edit that was committed cost two
+        // separate undo steps instead of one, and an edit that was
+        // interrupted by exit/load (which used to skip commit entirely) lost
+        // the original with no history entry at all.
         self.selection = None;
 
         let mut editor = TextEditorState::new(
@@ -2261,26 +2585,45 @@ impl OverlayWindow {
         );
         editor.cursor = text.len();
         editor.text = text;
+        editor.original = Some(annotation);
         self.text_editor = Some(editor);
         self.set_toast("✏️", "Editing Text (Esc to finish)");
         self.request_repaint();
         true
     }
 
+    /// Finish whatever text edit is in progress: a brand-new text/label goes
+    /// in as a fresh annotation exactly as before; re-committing an existing
+    /// one (`editor.original` is `Some`) keeps its id, group, opacity and any
+    /// binding to it, and is recorded as one `TransformShapes` undo step
+    /// instead of the delete-then-add pair this used to be two of. Called
+    /// from every mode-entry/board-switch point and, since the P3-2 fix,
+    /// from `exit_overlay`/`load_session_from` too - so an edit in progress
+    /// when the overlay closes or a session loads is committed rather than
+    /// silently discarded.
     pub fn commit_text_editor(&mut self) {
-        if let Some(editor) = self.text_editor.take() {
-            if !editor.text.trim().is_empty() {
+        let Some(editor) = self.text_editor.take() else {
+            return;
+        };
+        let is_empty = editor.text.trim().is_empty();
+        let new_shape = Shape::Text {
+            origin: editor.origin,
+            text: editor.text,
+            font_size: editor.font_size,
+            color: editor.color,
+            is_bold: editor.is_bold,
+            is_italic: editor.is_italic,
+            card_style: editor.card_style,
+            font_family: editor.font_family,
+        };
+
+        match (editor.original, is_empty) {
+            (None, true) => {
+                // Nothing was ever there, and nothing was typed.
+            }
+            (None, false) => {
                 let container = editor.container;
-                let id = self.push_shape(Shape::Text {
-                    origin: editor.origin,
-                    text: editor.text,
-                    font_size: editor.font_size,
-                    color: editor.color,
-                    is_bold: editor.is_bold,
-                    is_italic: editor.is_italic,
-                    card_style: editor.card_style,
-                    font_family: editor.font_family,
-                });
+                let id = self.push_shape(new_shape);
                 if let Some(cid) = container {
                     if self.annotation(cid).is_some() {
                         if let Some(a) = self.shapes.iter_mut().find(|a| a.id == id) {
@@ -2296,8 +2639,49 @@ impl OverlayWindow {
                     }
                 }
             }
-            self.request_repaint();
+            (Some(orig), true) => {
+                // Cleared to nothing and confirmed: treated as an explicit
+                // delete of the original, in one undo step.
+                self.record_undo(HistoryAction::DeleteShape {
+                    index: self.shapes.len(),
+                    shape: orig,
+                });
+                self.redo_history.clear();
+            }
+            (Some(mut orig), false) => {
+                let before_shape = orig.shape.clone();
+                let id = orig.id;
+                let container_alive = editor
+                    .container
+                    .is_some_and(|cid| self.annotation(cid).is_some());
+                orig.container = editor.container.filter(|_| container_alive);
+                orig.shape = new_shape.clone();
+                self.shapes.push(orig);
+                if let Some(cid) = editor.container.filter(|_| container_alive) {
+                    self.grow_container_to_fit(cid);
+                }
+                self.record_undo(HistoryAction::TransformShapes {
+                    items: vec![(id, before_shape, new_shape)],
+                });
+                self.redo_history.clear();
+            }
         }
+        self.settle_bindings();
+        self.request_repaint();
+    }
+
+    /// Cancel an in-progress text edit (right-click), putting back exactly
+    /// what `reopen_selected_text`/`edit_container_label` removed rather than
+    /// committing whatever was typed. A brand-new text has nothing to put
+    /// back, so this is a no-op beyond closing the editor for it.
+    fn cancel_text_editor(&mut self) {
+        if let Some(editor) = self.text_editor.take()
+            && let Some(orig) = editor.original
+        {
+            self.shapes.push(orig);
+            self.settle_bindings();
+        }
+        self.request_repaint();
     }
 
     /// Line the selection up, or spread it evenly.
@@ -2375,8 +2759,7 @@ impl OverlayWindow {
         if items.is_empty() {
             return;
         }
-        self.undo_history
-            .push(HistoryAction::TransformShapes { items });
+        self.record_undo(HistoryAction::TransformShapes { items });
         self.redo_history.clear();
         self.settle_bindings();
         self.set_toast("↔", label);
@@ -2411,7 +2794,7 @@ impl OverlayWindow {
             return;
         }
         let shown = items[0].2;
-        self.undo_history.push(HistoryAction::SetOpacity { items });
+        self.record_undo(HistoryAction::SetOpacity { items });
         self.redo_history.clear();
         self.set_toast("◑", format!("Opacity {:.0}%", shown * 100.0));
         self.request_repaint();
@@ -2478,8 +2861,7 @@ impl OverlayWindow {
             return 0;
         }
         let n = items.len();
-        self.undo_history
-            .push(HistoryAction::TransformShapes { items });
+        self.record_undo(HistoryAction::TransformShapes { items });
         self.redo_history.clear();
         // A label's box may need to grow if its text just got bigger.
         for id in self.selected_ids() {
@@ -2512,8 +2894,7 @@ impl OverlayWindow {
         if items.is_empty() {
             return;
         }
-        self.undo_history
-            .push(HistoryAction::TransformShapes { items });
+        self.record_undo(HistoryAction::TransformShapes { items });
         self.redo_history.clear();
         self.request_repaint();
     }
@@ -2554,8 +2935,7 @@ impl OverlayWindow {
             self.set_toast("◑", "Select an arrow first");
             return;
         }
-        self.undo_history
-            .push(HistoryAction::TransformShapes { items });
+        self.record_undo(HistoryAction::TransformShapes { items });
         self.redo_history.clear();
         if let Some(h) = shown {
             self.set_toast("➤", format!("Arrowhead: {}", h.name()));
@@ -2616,7 +2996,7 @@ impl OverlayWindow {
             return;
         }
         let n = items.len();
-        self.undo_history.push(HistoryAction::SetGroup { items });
+        self.record_undo(HistoryAction::SetGroup { items });
         self.redo_history.clear();
         self.set_toast(
             "🔗",
@@ -2649,8 +3029,7 @@ impl OverlayWindow {
         }
         let a = self.shapes.remove(from);
         self.shapes.insert(to, a);
-        self.undo_history
-            .push(HistoryAction::Reorder { id, from, to });
+        self.record_undo(HistoryAction::Reorder { id, from, to });
         self.redo_history.clear();
         let (icon, label) = if to_front {
             ("⬆", "Brought to Front")
@@ -2678,20 +3057,29 @@ impl OverlayWindow {
         let mut copy = source.clone();
         copy.id = ShapeId::fresh();
         translate_shape(&mut copy.shape, OFFSET, OFFSET);
+        // A duplicate is a new, independent shape: joining the source's
+        // group used to mean dragging either one moved both, and keeping a
+        // bound arrow's start_bound/end_bound used to have settle_bindings()
+        // immediately pull the copy back onto the same target as the
+        // original - landing exactly on top of it, invisible.
+        copy.group = None;
+        copy.start_bound = None;
+        copy.end_bound = None;
         let new_id = copy.id;
 
         let label_copy = self.label_of(source.id).cloned().map(|mut l| {
             l.id = ShapeId::fresh();
             l.container = Some(new_id);
+            l.group = None;
             translate_shape(&mut l.shape, OFFSET, OFFSET);
             l
         });
 
         self.shapes.push(copy.clone());
-        self.undo_history.push(HistoryAction::AddShape(copy));
+        self.record_undo(HistoryAction::AddShape(copy));
         if let Some(l) = label_copy {
             self.shapes.push(l.clone());
-            self.undo_history.push(HistoryAction::AddShape(l));
+            self.record_undo(HistoryAction::AddShape(l));
         }
         self.redo_history.clear();
 
@@ -2716,10 +3104,42 @@ impl OverlayWindow {
             .filter(|(_, a)| a.start_bound.is_some() || a.end_bound.is_some())
             .map(|(i, _)| i)
             .collect();
+        self.settle_bindings_at(&bound);
+    }
+
+    /// Like `settle_bindings`, but only for an arrow whose own shape just
+    /// changed or whose bound target is in `moved_ids` - the interactive
+    /// drag path's fast case, where most bound arrows on the canvas have
+    /// nothing to do with whatever was just moved and a full O(shapes)
+    /// rescan (each one re-cloning both its own geometry and both targets'
+    /// geometry) is wasted work on every single mouse move. Every other
+    /// caller (session load, undo/redo, delete, clear) still uses
+    /// `settle_bindings` itself - they can't cheaply say what moved, and
+    /// only run once per discrete action rather than once per frame.
+    fn settle_bindings_for(&mut self, moved_ids: &[ShapeId]) {
+        if moved_ids.is_empty() {
+            return;
+        }
+        let bound: Vec<usize> = self
+            .shapes
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                (a.start_bound.is_some() || a.end_bound.is_some())
+                    && (moved_ids.contains(&a.id)
+                        || a.start_bound.is_some_and(|id| moved_ids.contains(&id))
+                        || a.end_bound.is_some_and(|id| moved_ids.contains(&id)))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        self.settle_bindings_at(&bound);
+    }
+
+    fn settle_bindings_at(&mut self, bound: &[usize]) {
         if bound.is_empty() {
             return;
         }
-        for i in bound {
+        for &i in bound {
             let (shape, sb, eb) = {
                 let a = &self.shapes[i];
                 (a.shape.clone(), a.start_bound, a.end_bound)
@@ -2930,11 +3350,19 @@ impl OverlayWindow {
             return;
         }
 
+        let max_dim = self.renderer.max_bitmap_size();
+        let was_oversized = img.width > max_dim || img.height > max_dim;
+
         let sw = self.logical_w();
         let sh = self.logical_h();
         let centre = self.zoom.screen_to_canvas(Point2D::new(sw / 2.0, sh / 2.0));
         let id = self.place_image_shape(centre, img.width, img.height, img.bgra);
-        self.finish_placing_images(vec![id], "📋", "Pasted Image".to_string());
+        let label = if was_oversized {
+            "Pasted Image (scaled down to fit)".to_string()
+        } else {
+            "Pasted Image".to_string()
+        };
+        self.finish_placing_images(vec![id], "📋", label);
     }
 
     /// Fit an image inside most of the viewport, place it centred on
@@ -2951,6 +3379,17 @@ impl OverlayWindow {
         img_h: u32,
         bgra: Vec<u8>,
     ) -> ShapeId {
+        // A pasted image whose pixel dimensions exceed what the GPU can
+        // actually create a bitmap from (clipboard.rs allows up to 32768px;
+        // this device's real limit is usually 16384) used to leave a
+        // selectable annotation on the canvas that image_bitmap's
+        // CreateBitmap failed to upload and so rendered as nothing at all.
+        // Downscale the pixel data itself - not just the on-canvas display
+        // size computed below, which is unrelated: the underlying bitmap
+        // still had to be the full native size before this.
+        let max_dim = self.renderer.max_bitmap_size();
+        let (img_w, img_h, bgra) = downscale_bgra_to_fit(img_w, img_h, bgra, max_dim);
+
         let sw = self.logical_w();
         let sh = self.logical_h();
         let max_w = (sw * 0.7).max(80.0);
@@ -2962,11 +3401,7 @@ impl OverlayWindow {
         self.push_shape(Shape::Image {
             start: Point2D::new(centre.x - w * 0.5, centre.y - h * 0.5),
             end: Point2D::new(centre.x + w * 0.5, centre.y + h * 0.5),
-            pixels: ImagePixels {
-                width: img_w,
-                height: img_h,
-                bgra,
-            },
+            pixels: ImagePixels::new(img_w, img_h, bgra),
         })
     }
 
@@ -3000,51 +3435,56 @@ impl OverlayWindow {
         let owner_shape = owner.shape.clone();
         let bounds = shape_bounds(&owner_shape);
 
-        // An existing label is lifted out and put back on commit, so editing
-        // and creating follow exactly the same path.
-        let existing = self.label_of(container).map(|a| (a.id, a.shape.clone()));
-        let (text, font_size, color, is_bold, is_italic, card_style, font_family) = match existing {
-            Some((
-                id,
-                Shape::Text {
-                    text,
-                    font_size,
-                    color,
-                    is_bold,
-                    is_italic,
-                    card_style,
-                    font_family,
-                    ..
-                },
-            )) => {
-                if let Some(index) = self.annotation_index(id) {
-                    let removed = self.shapes.remove(index);
-                    self.undo_history.push(HistoryAction::DeleteShape {
-                        index,
-                        shape: removed,
-                    });
-                    self.redo_history.clear();
+        // An existing label is lifted out and put back on commit or cancel,
+        // so editing and creating follow exactly the same path. No history
+        // entry yet - commit_text_editor()/cancel_text_editor() record
+        // exactly one, using `original` below, the same as re-editing a
+        // free-floating text.
+        let existing_label_id = self.label_of(container).map(|a| a.id);
+        let removed = existing_label_id
+            .and_then(|id| self.annotation_index(id).map(|idx| self.shapes.remove(idx)));
+        let (text, font_size, color, is_bold, is_italic, card_style, font_family, original) =
+            match removed {
+                Some(annotation) => {
+                    let Shape::Text {
+                        text,
+                        font_size,
+                        color,
+                        is_bold,
+                        is_italic,
+                        card_style,
+                        font_family,
+                        ..
+                    } = annotation.shape.clone()
+                    else {
+                        // label_of only ever returns Shape::Text, so this
+                        // should not happen - but if it somehow did, don't
+                        // just drop what was removed.
+                        self.shapes.push(annotation);
+                        return false;
+                    };
+                    (
+                        text,
+                        font_size,
+                        color,
+                        is_bold,
+                        is_italic,
+                        card_style,
+                        font_family,
+                        Some(annotation),
+                    )
                 }
-                (
-                    text,
-                    font_size,
-                    color,
-                    is_bold,
-                    is_italic,
-                    card_style,
-                    font_family,
-                )
-            }
-            _ => (
-                String::new(),
-                self.font_size,
-                self.current_color,
-                self.text_is_bold,
-                self.text_is_italic,
-                self.text_card_style,
-                self.text_font_family,
-            ),
-        };
+                None => (
+                    String::new(),
+                    self.font_size,
+                    self.current_color,
+                    self.text_is_bold,
+                    self.text_is_italic,
+                    self.text_card_style,
+                    self.text_font_family,
+                    None,
+                ),
+            };
 
         let mut editor = TextEditorState::new(
             Point2D::new(bounds.0, bounds.1),
@@ -3060,6 +3500,7 @@ impl OverlayWindow {
         editor.container = Some(container);
         editor.container_bounds = Some(bounds);
         editor.container_wraps = !label_rides_on_shape(&owner_shape);
+        editor.original = original;
         self.text_editor = Some(editor);
         self.selection = None;
         self.set_toast("✏️", "Label (Esc to finish)");
@@ -3102,13 +3543,22 @@ impl OverlayWindow {
     }
 
     pub fn copy_screen_to_clipboard(&mut self) {
+        // Commit any in-progress text edit first: otherwise the export would
+        // either bake in the editor's card chrome (PNG/PDF) or drop the text
+        // being typed entirely (SVG, which reads straight from self.shapes).
+        self.commit_text_editor();
         let Some(composite) = self.get_composite_capture(self.spotlight.active) else {
             self.set_toast("❌", "Nothing to copy");
             return;
         };
         // Previously a failed copy was silent, so the user had no idea the
         // clipboard still held whatever was there before.
-        if copy_bgra_to_clipboard(composite.width, composite.height, &composite.pixels) {
+        if copy_bgra_to_clipboard(
+            self.hwnd,
+            composite.width,
+            composite.height,
+            &composite.pixels,
+        ) {
             if self.export_scale > 1 {
                 self.set_toast(
                     "📋",
@@ -3168,8 +3618,35 @@ impl OverlayWindow {
     /// `manual` is the Ctrl+Shift+S path, which reports through a toast. The
     /// autosave path runs while the overlay is tearing down, where a toast can
     /// no longer be drawn, so it routes failures to a tray balloon instead.
+    /// Every board's shapes, in order, with the active board's *live*
+    /// content (`self.shapes`) substituted for `boards[active_board]`'s
+    /// placeholder, which is stale while a board is loaded — see the `Board`
+    /// doc comment.
+    fn all_boards_snapshot(&self) -> Vec<Vec<Annotation>> {
+        self.boards
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                if i == self.active_board {
+                    self.shapes.clone()
+                } else {
+                    b.shapes.clone()
+                }
+            })
+            .collect()
+    }
+
     pub fn save_session(&mut self, manual: bool) {
-        if self.shapes.is_empty() {
+        // Commit any in-progress text edit first, so both the saved session
+        // data and its PNG preview include the text being typed rather than
+        // silently dropping it.
+        self.commit_text_editor();
+        // Every board, not just the active one - this used to save only
+        // self.shapes, so switching boards and exiting (with autosave, or a
+        // manual save right after switching) silently dropped every other
+        // board when exit_overlay() reset self.boards afterwards.
+        let all_boards = self.all_boards_snapshot();
+        if all_boards.iter().all(|b| b.is_empty()) {
             if manual {
                 self.set_toast("❌", "Nothing to save");
             }
@@ -3178,8 +3655,11 @@ impl OverlayWindow {
         let cfg = crate::config::AppConfig::load();
         let dir = crate::session::sessions_dir(&cfg);
         let path = crate::session::next_session_path(&dir);
+        let board_count = all_boards.len();
+        let total_count: usize = all_boards.iter().map(|b| b.len()).sum();
         let sess = crate::session::Session::new(
-            self.shapes.clone(),
+            all_boards,
+            self.active_board,
             self.background_type,
             self.step_counter,
         );
@@ -3201,39 +3681,85 @@ impl OverlayWindow {
             let _ = composite.save_png(&png.to_string_lossy());
         }
 
-        crate::session::prune(&dir, cfg.session_keep_last as usize);
+        // Only the autosave path prunes. A manual Ctrl+Shift+S save used to
+        // run the same prune unconditionally, so a user who never turned
+        // autosave on could still lose their oldest manual save (silently)
+        // the moment total saves passed session_keep_last.
+        if !manual {
+            crate::session::prune(&dir, cfg.session_keep_last as usize);
+        }
 
         if manual {
             let name = path
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let count = self.shapes.len();
-            self.set_toast("💾", format!("Saved {} annotation(s) — {}", count, name));
+            let label = if board_count > 1 {
+                format!(
+                    "Saved {} annotation(s) across {} board(s) — {}",
+                    total_count, board_count, name
+                )
+            } else {
+                format!("Saved {} annotation(s) — {}", total_count, name)
+            };
+            self.set_toast("💾", label);
         }
     }
 
     /// Replace the canvas with a saved session. Undoable in one step.
     pub fn load_session_from(&mut self, path: &std::path::Path) {
+        // An edit still open when a session loads used to be dropped with a
+        // bare `text_editor = None` after the swap below had already
+        // replaced self.shapes - so even a successful commit would have
+        // landed on the *new* board instead of the one being replaced.
+        // Commit first, while it still belongs to whatever was showing.
+        self.commit_text_editor();
         match crate::session::load(path) {
             Ok(sess) => {
-                let count = sess.shapes.len();
+                let mut boards_shapes = sess.boards_or_single();
+                if boards_shapes.is_empty() {
+                    boards_shapes.push(Vec::new());
+                }
+                let board_count = boards_shapes.len();
+                let count: usize = boards_shapes.iter().map(|b| b.len()).sum();
                 let background = sess.background_enum();
-                let previous = std::mem::replace(&mut self.shapes, sess.shapes);
-                self.undo_history.push(HistoryAction::Clear(previous));
+                let active = sess.active_board.min(board_count - 1);
+
+                // Only the active board's previous content becomes undoable
+                // in one step, matching what a single-board load always did;
+                // the other boards are replaced outright, the same way
+                // exit_overlay() already discards board state non-undoably.
+                let new_active_shapes = std::mem::take(&mut boards_shapes[active]);
+                let previous = std::mem::replace(&mut self.shapes, new_active_shapes);
+                self.record_undo(HistoryAction::Clear(previous));
                 self.redo_history.clear();
+
+                self.boards = boards_shapes
+                    .into_iter()
+                    .map(|shapes| Board {
+                        shapes,
+                        ..Default::default()
+                    })
+                    .collect();
+                self.active_board = active;
+                self.last_nudge = None;
+
                 self.selection = None;
                 self.active_shape = None;
-                self.text_editor = None;
                 self.is_drawing = false;
                 self.background_type = background;
                 self.step_counter = sess.step_counter;
                 self.toolbar.badge_counter = self.step_counter;
                 self.settle_bindings();
-                self.set_toast(
-                    "📂",
-                    format!("Loaded {} annotation(s) — {}", count, sess.saved_at),
-                );
+                let label = if board_count > 1 {
+                    format!(
+                        "Loaded {} annotation(s) across {} board(s) — {}",
+                        count, board_count, sess.saved_at
+                    )
+                } else {
+                    format!("Loaded {} annotation(s) — {}", count, sess.saved_at)
+                };
+                self.set_toast("📂", label);
                 self.request_repaint();
             }
             Err(e) => self.set_toast("❌", format!("Load failed: {}", e)),
@@ -3260,6 +3786,8 @@ impl OverlayWindow {
     }
 
     pub fn save_snapshot(&mut self) {
+        // Commit any in-progress text edit first: see copy_screen_to_clipboard.
+        self.commit_text_editor();
         let Some(mut composite) = self.get_composite_capture(self.spotlight.active) else {
             self.set_toast("❌", "Nothing to save");
             return;
@@ -3315,6 +3843,10 @@ impl OverlayWindow {
     /// there is no D2D render target involved, so `export_scale` has nothing
     /// to apply to — shapes are vector paths at native resolution regardless.
     pub fn export_svg(&mut self) {
+        // Commit any in-progress text edit first: this reads straight from
+        // self.shapes, so an uncommitted edit would otherwise be dropped
+        // entirely rather than just missing its card chrome.
+        self.commit_text_editor();
         let mut text_layout: std::collections::HashMap<ShapeId, (f32, f32)> =
             std::collections::HashMap::new();
         for a in &self.shapes {
@@ -3354,10 +3886,18 @@ impl OverlayWindow {
             text_layout.insert(a.id, size);
         }
 
-        let bg_pixels = self
-            .background_capture
-            .as_ref()
-            .map(|c| c.pixels.as_slice());
+        // On a Whiteboard/Blackboard the frozen screenshot is exactly what
+        // the user covered the desktop to hide; write_background() already
+        // ignores it there (it matches on bg_type first), but write_blur()
+        // used to be handed it regardless and would mosaic a pixelated copy
+        // of the hidden desktop into the exported SVG.
+        let bg_pixels = if self.background_type == CanvasBackground::Transparent {
+            self.background_capture
+                .as_ref()
+                .map(|c| c.pixels.as_slice())
+        } else {
+            None
+        };
         let (bg_px_w, bg_px_h) = self
             .background_capture
             .as_ref()
@@ -3413,6 +3953,8 @@ impl OverlayWindow {
     /// `get_composite_capture` like those two, so it honours `export_scale`
     /// and the current spotlight the same way.
     pub fn export_pdf(&mut self) {
+        // Commit any in-progress text edit first: see copy_screen_to_clipboard.
+        self.commit_text_editor();
         let Some(composite) = self.get_composite_capture(self.spotlight.active) else {
             self.set_toast("❌", "Nothing to export");
             return;
@@ -3482,14 +4024,17 @@ impl OverlayWindow {
     }
 
     fn rebuild_snap_anchors_excluding(&mut self, skip: &[ShapeId]) {
+        // Builds anchors straight from &Shape, with no intermediate Vec<Shape>
+        // clone of the whole canvas - a pasted image's pixel buffer used to
+        // get copied here just to be thrown away a call later, and this runs
+        // on the latency path of the very first point of every freehand
+        // stroke (see rebuild_snap_anchors's Pen/Highlighter callers).
         self.snap_anchors = if self.snapping_enabled() {
-            let live: Vec<Shape> = self
-                .shapes
+            self.shapes
                 .iter()
                 .filter(|a| !skip.contains(&a.id) && !a.is_contained_text())
-                .map(|a| a.shape.clone())
-                .collect();
-            collect_anchors(&live)
+                .flat_map(|a| anchor_points(&a.shape))
+                .collect()
         } else {
             Vec::new()
         };
@@ -3929,6 +4474,22 @@ impl OverlayWindow {
             // recorded on the side. Handling them here (rather than letting
             // DefWindowProc promote them) also stops each contact arriving
             // twice, once as a pointer and once as a synthetic mouse click.
+            // The pen was cancelled or its capture stolen (palm rejection, another
+            // window grabbing input) without a matching WM_POINTERUP: with
+            // `pen_active` left set, the bystander rule below would swallow every
+            // mouse event from then on. Abandon any stroke it was drawing too.
+            if msg == WM_POINTERCAPTURECHANGED {
+                if this.pen_active {
+                    this.pen_active = false;
+                    if this.is_drawing {
+                        this.is_drawing = false;
+                        this.active_shape = None;
+                        this.request_repaint();
+                    }
+                }
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+
             let (msg, lparam, from_pointer) = match msg {
                 WM_POINTERDOWN | WM_POINTERUPDATE | WM_POINTERUP => {
                     let Some(sample) = pointer_sample(hwnd, wparam) else {
@@ -4061,6 +4622,7 @@ impl OverlayWindow {
                         } else {
                             None
                         },
+                        this.selection.as_ref().is_some_and(|s| s.drag.is_some()),
                     );
 
                     let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);
@@ -4091,18 +4653,57 @@ impl OverlayWindow {
                                     let _ = MessageBeep(0);
                                 }
                             }
-                            needs_paint = true;
+                            // The visible digits change once a second and the
+                            // countdown ring advances in total/128 steps -
+                            // repainting on every 16ms tick regardless meant
+                            // redrawing the whole scene (a full background
+                            // bitmap, a dim fill, a rebuilt 128-segment arc
+                            // path) 60 times a second for output that was
+                            // pixel-identical between most of those frames.
+                            let total = this.timer_seconds.max(1) as f32;
+                            let abs_rem = this.timer_remaining.abs() as f32;
+                            let secs_bucket = abs_rem.floor() as i64;
+                            let is_overtime = this.timer_remaining < 0.0;
+                            let progress = if is_overtime {
+                                1.0
+                            } else {
+                                1.0 - (abs_rem / total).clamp(0.0, 1.0)
+                            };
+                            let arc_segment = (progress * 128.0) as i64;
+                            let timer_state = (secs_bucket, arc_segment, is_overtime);
+                            if this.last_timer_paint_state != Some(timer_state) {
+                                this.last_timer_paint_state = Some(timer_state);
+                                needs_paint = true;
+                            }
                         } else {
                             this.timer_last_tick = Instant::now();
                         }
 
+                        // Opacity only actually changes during the fade-in
+                        // (first 0.15s) and fade-out (last 0.35s) - forcing a
+                        // repaint for the whole 1.8s lifetime (a toast fires
+                        // on nearly every action) used to spend roughly 78
+                        // full-scene frames drawing pixel-identical output.
                         if let Some(t) = &this.toast
                             && !t.is_expired()
+                            && t.is_fading()
                         {
                             needs_paint = true;
                         }
 
-                        if this.text_editor.is_some() {
+                        // The caret only actually toggles every 500ms (same
+                        // wall-clock phase render_text_editor's show_caret
+                        // uses) - repainting on every tick regardless meant
+                        // 60 full-scene frames a second for a caret that
+                        // visibly changes twice.
+                        let caret_phase = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis()
+                            / 500;
+                        let caret_toggled = this.last_caret_phase != Some(caret_phase);
+                        this.last_caret_phase = Some(caret_phase);
+                        if this.text_editor.is_some() && caret_toggled {
                             needs_paint = true;
                         }
 
@@ -4296,7 +4897,10 @@ impl OverlayWindow {
                     {
                         if this.minimap.is_dragging {
                             let target_canvas = this.minimap.minimap_pt_to_canvas_pt(sw, sh, x, y);
-                            this.zoom.center_on_canvas_point(target_canvas, sw, sh);
+                            let infinite = this.mode == AppMode::Draw
+                                && this.background_type != CanvasBackground::Transparent;
+                            this.zoom
+                                .center_on_canvas_point(target_canvas, sw, sh, infinite);
                             this.request_repaint();
                             return LRESULT(0);
                         }
@@ -4389,9 +4993,23 @@ impl OverlayWindow {
 
                     // Eraser execution when dragging
                     if this.is_drawing && this.current_tool == DrawTool::Eraser {
+                        // A cheap AABB reject (padded by the hit radius) before
+                        // the real per-segment intersection test: on a busy
+                        // canvas, most shapes are nowhere near the cursor on
+                        // any given mouse-move, so this turns most of them
+                        // into four comparisons instead of a full geometric test.
+                        const ERASER_RADIUS: f32 = 16.0;
                         let mut erased_idx = None;
                         for (idx, shape) in this.shapes.iter().enumerate().rev() {
-                            if shape_intersects_circle(&shape.shape, canvas_pt, 16.0) {
+                            let (l, t, r, b) = this.shape_bounds_exact(&shape.shape);
+                            if canvas_pt.x < l - ERASER_RADIUS
+                                || canvas_pt.x > r + ERASER_RADIUS
+                                || canvas_pt.y < t - ERASER_RADIUS
+                                || canvas_pt.y > b + ERASER_RADIUS
+                            {
+                                continue;
+                            }
+                            if shape_intersects_circle(&shape.shape, canvas_pt, ERASER_RADIUS) {
                                 erased_idx = Some(idx);
                                 break;
                             }
@@ -4428,10 +5046,17 @@ impl OverlayWindow {
                     }
 
                     if (this.mode == AppMode::StaticZoom
-                        || (this.mode == AppMode::Draw && this.zoom.level > 1.001))
+                        || (this.mode == AppMode::Draw
+                            && this.zoom.level > 1.001
+                            && this.background_type == CanvasBackground::Transparent))
                         && !this.is_drawing
                         && !this.zoom.is_dragging
                     {
+                        // update_target_from_cursor() always recenters the view on the
+                        // screen-bound range - correct for a live screen capture, but on
+                        // a Whiteboard/Blackboard (infinite canvas) it overwrites a
+                        // middle-mouse pan that deliberately sits past the screen edge,
+                        // snapping it back the instant the mouse moves.
                         this.zoom.update_target_from_cursor(x, y, sw, sh);
                         this.request_repaint();
                         return LRESULT(0);
@@ -4592,7 +5217,10 @@ impl OverlayWindow {
                         && this.minimap.hit_test(sw, sh, x, y)
                     {
                         let target_canvas = this.minimap.minimap_pt_to_canvas_pt(sw, sh, x, y);
-                        this.zoom.center_on_canvas_point(target_canvas, sw, sh);
+                        let infinite = this.mode == AppMode::Draw
+                            && this.background_type != CanvasBackground::Transparent;
+                        this.zoom
+                            .center_on_canvas_point(target_canvas, sw, sh, infinite);
                         this.minimap.is_dragging = true;
                         let _ = windows::Win32::UI::Input::KeyboardAndMouse::SetCapture(this.hwnd);
                         this.request_repaint();
@@ -4862,13 +5490,16 @@ impl OverlayWindow {
 
                     // Freehand is never snapped; for everything else the first
                     // corner is pulled onto nearby geometry just like the last.
-                    this.rebuild_snap_anchors(None);
+                    // Building anchors only to immediately clear_snap() them
+                    // sat on the latency of every single pen stroke's first
+                    // point for no reason.
                     let canvas_pt = if this.current_tool == DrawTool::Pen
                         || this.current_tool == DrawTool::Highlighter
                     {
                         this.clear_snap();
                         canvas_pt
                     } else {
+                        this.rebuild_snap_anchors(None);
                         this.apply_point_snap(canvas_pt)
                     };
 
@@ -5035,8 +5666,7 @@ impl OverlayWindow {
                     }
                     // If text editor is active, right click cancels text editor
                     if this.text_editor.is_some() {
-                        this.text_editor = None;
-                        this.request_repaint();
+                        this.cancel_text_editor();
                         return LRESULT(0);
                     }
                     // If drawing in progress, right click cancels active drawing
@@ -5189,11 +5819,14 @@ impl OverlayWindow {
                         return LRESULT(0);
                     }
 
-                    // 3. Normal Wheel: ALWAYS ZOOMS in Freeze modes (StaticZoom, Draw, Spotlight)!
-                    if this.mode == AppMode::StaticZoom
-                        || this.mode == AppMode::Draw
-                        || this.mode == AppMode::Spotlight
-                    {
+                    // 3. Normal Wheel: ALWAYS ZOOMS in Freeze modes (StaticZoom, Draw)!
+                    // Spotlight is deliberately excluded: render_frame forces z = 1.0
+                    // for AppMode::Spotlight (nothing on screen would show the zoom),
+                    // but render_to_capture ignores mode and always honours
+                    // zoom_state - so letting the wheel move it here used to produce
+                    // a Copy/Save/PDF export that was silently zoomed/panned relative
+                    // to what Spotlight actually displayed.
+                    if this.mode == AppMode::StaticZoom || this.mode == AppMode::Draw {
                         let mut pt = POINT::default();
                         let sx = this.screen_x;
                         let sy = this.screen_y;
@@ -5208,11 +5841,14 @@ impl OverlayWindow {
                             (sw / 2.0, sh / 2.0)
                         };
                         let new_lvl = (this.zoom.level + delta * 0.25).clamp(1.0, 10.0);
+                        let infinite = this.mode == AppMode::Draw
+                            && this.background_type != CanvasBackground::Transparent;
                         this.zoom.set_zoom_centered(
                             new_lvl,
                             Point2D::new(cursor_x, cursor_y),
                             sw,
                             sh,
+                            infinite,
                         );
                         this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                         this.request_repaint();
@@ -5231,7 +5867,28 @@ impl OverlayWindow {
                 }
 
                 WM_CHAR => {
-                    let ch = char::from_u32(wparam.0 as u32).unwrap_or('\0');
+                    let unit = wparam.0 as u16;
+                    // A character outside the BMP (any emoji, among others -
+                    // the Win+. picker is the common way to type one) arrives
+                    // as two WM_CHAR messages, one per UTF-16 surrogate half.
+                    // char::from_u32 on either half alone fails, so combine
+                    // them across the two messages before decoding.
+                    let ch = if (0xD800..=0xDBFF).contains(&unit) {
+                        this.pending_high_surrogate = Some(unit);
+                        None
+                    } else if (0xDC00..=0xDFFF).contains(&unit) {
+                        this.pending_high_surrogate.take().and_then(|high| {
+                            let c =
+                                0x10000 + ((high as u32 - 0xD800) << 10) + (unit as u32 - 0xDC00);
+                            char::from_u32(c)
+                        })
+                    } else {
+                        this.pending_high_surrogate = None;
+                        char::from_u32(unit as u32)
+                    };
+                    let Some(ch) = ch else {
+                        return LRESULT(0);
+                    };
                     if let Some(editor) = &mut this.text_editor {
                         if ch == '\x08' || ch == '\x1b' || ch == '\x7f' || ch == '\r' || ch == '\n'
                         {
@@ -5286,7 +5943,8 @@ impl OverlayWindow {
                     // ── Text editor intercepts all keys first ──
                     if this.text_editor.is_some() {
                         if key == VK_ESCAPE.0 as i32 {
-                            // Esc keeps what was typed; right-click discards.
+                            // Esc commits what was typed; right-click
+                            // (cancel_text_editor) discards it instead.
                             this.commit_text_editor();
                             return LRESULT(0);
                         } else if key == VK_RETURN.0 as i32 {
@@ -5567,8 +6225,11 @@ impl OverlayWindow {
                             k if k == 0xDB && is_shift => {
                                 this.prev_board();
                             }
-                            k if k == 'T' as i32 => {
+                            k if k == 'T' as i32 && !is_shift => {
                                 this.new_board();
+                            }
+                            k if k == 'T' as i32 && is_shift => {
+                                this.reopen_last_closed_board();
                             }
                             k if k == 'W' as i32 => {
                                 this.close_board();
@@ -5863,7 +6524,7 @@ impl OverlayWindow {
                         }
                         k if k == 'K' as i32 && !is_shift => {
                             this.ensure_draw_mode();
-                            this.current_tool = DrawTool::LaserPointer;
+                            this.select_tool(DrawTool::LaserPointer);
                             this.set_toast("🔴", "Laser Pointer");
                             this.request_repaint();
                         }
@@ -6253,6 +6914,7 @@ impl OverlayWindow {
                                     Point2D::new(cursor_x, cursor_y),
                                     sw,
                                     sh,
+                                    false, // this branch only runs in StaticZoom
                                 );
                                 this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                             } else {
@@ -6292,6 +6954,7 @@ impl OverlayWindow {
                                     Point2D::new(cursor_x, cursor_y),
                                     sw,
                                     sh,
+                                    false, // this branch only runs in StaticZoom
                                 );
                                 this.set_toast("🔎", format!("Zoom {:.2}x", new_lvl));
                             } else {
@@ -6341,5 +7004,33 @@ impl OverlayWindow {
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_downscale_bgra_to_fit_passes_through_an_image_that_already_fits() {
+        let bgra = vec![7u8; 4 * 4 * 4];
+        let (w, h, out) = downscale_bgra_to_fit(4, 4, bgra.clone(), 16384);
+        assert_eq!((w, h), (4, 4));
+        assert_eq!(out, bgra);
+    }
+
+    #[test]
+    fn test_downscale_bgra_to_fit_shrinks_an_oversized_image_to_the_limit() {
+        // A pasted image whose pixel dimensions exceed the GPU's max bitmap
+        // size used to leave a selectable annotation that CreateBitmap
+        // silently failed to upload, rendering as nothing at all.
+        let w = 20000u32;
+        let h = 1000u32;
+        let bgra = vec![0u8; w as usize * h as usize * 4];
+        let (new_w, new_h, out) = downscale_bgra_to_fit(w, h, bgra, 16384);
+        assert!(new_w <= 16384 && new_h <= 16384);
+        // Aspect ratio preserved (same scale factor on both axes).
+        assert_eq!(out.len(), new_w as usize * new_h as usize * 4);
+        assert!((new_w as f32 / new_h as f32 - w as f32 / h as f32).abs() < 0.5);
     }
 }

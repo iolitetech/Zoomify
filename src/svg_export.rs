@@ -67,8 +67,11 @@ width="{w}" height="{h}" viewBox="0 0 {w} {h}">
     // Everything — background included — sits under the same zoom transform
     // the live overlay applies, so the export matches what Save/Copy show.
     let z = input.zoom_level.max(1.0);
-    let zoomed = z > 1.001;
-    if zoomed {
+    // A 1x view can still be panned (infinite canvas / whiteboard drag), so
+    // gate on the pan offset too - PNG export always applies this transform
+    // and SVG must match it even when zoom itself is at rest.
+    let panned = input.view_x.abs() > 0.001 || input.view_y.abs() > 0.001;
+    if z > 1.001 || panned {
         let _ = write!(
             out,
             r#"<g transform="matrix({a} 0 0 {a} {e} {f})">"#,
@@ -647,7 +650,7 @@ fn write_text_run(
 ) {
     let _ = write!(
         out,
-        r#"<text x="{x}" y="{y}" font-family="{ff}" font-size="{fs}" font-weight="{fw}" font-style="{fs2}" fill="{fill}" fill-opacity="{fo}" style="dominant-baseline:hanging">"#,
+        r#"<text x="{x}" y="{y}" xml:space="preserve" font-family="{ff}" font-size="{fs}" font-weight="{fw}" font-style="{fs2}" fill="{fill}" fill-opacity="{fo}" style="dominant-baseline:hanging">"#,
         x = FNum(origin.x),
         y = FNum(origin.y),
         ff = font_family_css(font_family),
@@ -891,12 +894,25 @@ fn write_blur(out: &mut String, shape: &Shape, input: &SvgExportInput) {
     if w < 1.0 || h < 1.0 {
         return;
     }
+    // input.bg_pixels is None on a Whiteboard/Blackboard (see export_svg()),
+    // since that frozen screenshot is exactly what the user covered the
+    // desktop to hide - Blur must not mosaic a pixelated copy of it. Falls
+    // back to the same flat redaction block the live renderer and PNG
+    // export draw when there is nothing to mosaic, rather than silently
+    // omitting the shape.
     let Some(bg) = input.bg_pixels else {
+        write_blur_fallback_block(out, l, t, r, b);
         return;
     };
     let b_size = block_size.clamp(4.0, 64.0);
-    let cols = ((w / b_size).ceil().max(1.0)) as u32;
-    let rows = ((h / b_size).ceil().max(1.0)) as u32;
+    // start/end come straight from a Shape::Blur, which a crafted or
+    // corrupted session file controls - w/h (and so cols/rows) are not
+    // otherwise bounded by anything real like a screen size. Capped well
+    // past what any real redaction needs, so a garbage rect cannot demand
+    // a many-gigapixel mosaic or overflow the pixel-buffer arithmetic
+    // below.
+    let cols = ((w / b_size).ceil().max(1.0) as u32).min(4096);
+    let rows = ((h / b_size).ceil().max(1.0) as u32).min(4096);
 
     let Some(mosaic) = mosaic_tiles(
         bg,
@@ -910,6 +926,7 @@ fn write_blur(out: &mut String, shape: &Shape, input: &SvgExportInput) {
         cols,
         rows,
     ) else {
+        write_blur_fallback_block(out, l, t, r, b);
         return;
     };
     if let Some(uri) = png_data_uri(&mosaic, cols, rows) {
@@ -925,6 +942,19 @@ fn write_blur(out: &mut String, shape: &Shape, input: &SvgExportInput) {
             h = FNum(h),
         );
     }
+}
+
+/// The same flat redaction block the live renderer and PNG export fall back
+/// to when there is no background to mosaic.
+fn write_blur_fallback_block(out: &mut String, l: f32, t: f32, r: f32, b: f32) {
+    let _ = write!(
+        out,
+        r#"<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="rgba(26,26,26,0.85)" stroke="rgba(102,179,255,0.45)" stroke-width="1"/>"#,
+        x = FNum(l),
+        y = FNum(t),
+        w = FNum(r - l),
+        h = FNum(b - t),
+    );
 }
 
 /// Box-average `bg` (top-down BGRA at `bg_w`x`bg_h` physical pixels) over the
@@ -950,7 +980,11 @@ fn mosaic_tiles(
     let px_w = (w * dpi_scale).max(1.0);
     let px_h = (h * dpi_scale).max(1.0);
 
-    let mut out = vec![0u8; (cols * rows * 4) as usize];
+    // Defense in depth alongside write_blur()'s cap on cols/rows: reject
+    // rather than silently wrap if this is ever called with cols/rows large
+    // enough (both near u32::MAX) to overflow the pixel-count arithmetic.
+    let total = (cols as usize).checked_mul(rows as usize)?.checked_mul(4)?;
+    let mut out = vec![0u8; total];
     for row in 0..rows {
         for col in 0..cols {
             let tile_l = (px_x + px_w * col as f32 / cols as f32).round() as i64;
@@ -1032,6 +1066,10 @@ fn hex(color: ColorPreset) -> String {
 struct FNum(f32);
 impl std::fmt::Display for FNum {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.0.is_finite() {
+            eprintln!("svg_export: refusing to write non-finite value {}", self.0);
+            return write!(f, "0");
+        }
         let r = (self.0 * 1000.0).round() / 1000.0;
         if r == r.trunc() {
             write!(f, "{}", r as i64)
@@ -1045,6 +1083,10 @@ fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
+            // XML 1.0 forbids these control characters outright (tab/LF/CR
+            // are the only C0 codes it allows) - a pasted control byte would
+            // otherwise produce an SVG no browser or editor can parse.
+            '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}' => {}
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
             '>' => out.push_str("&gt;"),
@@ -1173,13 +1215,15 @@ mod tests {
             }),
         ];
         let svg = build_svg(&input(&shapes, &layout));
-        // Blur with no background pixels is silently skipped, not a panic —
-        // everything else must have left a mark.
+        // Blur with no background pixels draws the flat redaction fallback
+        // rather than panicking or silently vanishing — everything else
+        // must have left a mark too.
         assert!(svg.contains("<path"));
         assert!(svg.contains("<polygon"));
         assert!(svg.contains("<ellipse"));
         assert!(svg.contains("<text"));
         assert!(svg.contains("tspan"));
+        assert!(svg.contains("rgba(26,26,26,0.85)"));
     }
 
     #[test]
@@ -1247,6 +1291,38 @@ mod tests {
     }
 
     #[test]
+    fn test_mosaic_tiles_rejects_a_cols_rows_pair_that_would_overflow() {
+        // cols*rows*4 overflows a u64 once both are near u32::MAX; must
+        // fail cleanly rather than allocate a wrapped (too-small) buffer
+        // and panic indexing into it as if it were cols*rows big.
+        let bg = vec![0u8; 4];
+        assert!(mosaic_tiles(&bg, 1, 1, 0.0, 0.0, 1.0, 1.0, 1.0, u32::MAX, u32::MAX).is_none());
+    }
+
+    #[test]
+    fn test_write_blur_with_an_absurd_rect_does_not_panic() {
+        // start/end come straight from a Shape::Blur, which a crafted or
+        // corrupted session file controls - a garbage rect must fall back
+        // to the flat redaction block rather than panic trying to mosaic a
+        // many-gigapixel region.
+        let bg = vec![0u8; 4 * 4 * 4];
+        let mut out = String::new();
+        let shape = Shape::Blur {
+            start: Point2D::new(0.0, 0.0),
+            end: Point2D::new(1.0e20, 1.0e20),
+            block_size: 4.0,
+        };
+        let shapes: Vec<Annotation> = Vec::new();
+        let layout = HashMap::new();
+        let mut i = input(&shapes, &layout);
+        i.bg_pixels = Some(&bg);
+        i.bg_px_w = 4;
+        i.bg_px_h = 4;
+        write_blur(&mut out, &shape, &i);
+        assert!(!out.is_empty());
+    }
+
+    #[test]
     fn test_dash_attr_is_empty_for_solid_and_present_otherwise() {
         assert_eq!(dash_attr(StrokePattern::Solid, 3.0), "");
         assert!(dash_attr(StrokePattern::Dashed, 3.0).contains("stroke-dasharray"));
@@ -1256,5 +1332,29 @@ mod tests {
     #[test]
     fn test_xml_escaping_covers_the_five_reserved_characters() {
         assert_eq!(esc("<a & \"b\">"), "&lt;a &amp; &quot;b&quot;&gt;");
+    }
+
+    #[test]
+    fn test_xml_escaping_strips_illegal_control_characters_but_keeps_tab_lf_cr() {
+        let s = "a\u{0}b\u{1}\tc\nd\re\u{1f}f";
+        assert_eq!(esc(s), "ab\tc\nd\ref");
+    }
+
+    #[test]
+    fn test_transform_is_emitted_for_a_pure_pan_at_1x_zoom() {
+        let shapes: Vec<Annotation> = Vec::new();
+        let layout = HashMap::new();
+        let mut i = input(&shapes, &layout);
+        i.view_x = 5.0;
+        i.view_y = 3.0;
+        let svg = build_svg(&i);
+        assert!(svg.contains("matrix(1 0 0 1 -5 -3)"));
+    }
+
+    #[test]
+    fn test_fnum_writes_zero_for_non_finite_values_instead_of_panicking() {
+        assert_eq!(FNum(f32::NAN).to_string(), "0");
+        assert_eq!(FNum(f32::INFINITY).to_string(), "0");
+        assert_eq!(FNum(f32::NEG_INFINITY).to_string(), "0");
     }
 }

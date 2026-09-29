@@ -84,6 +84,46 @@ unsafe extern "system" fn tray_wnd_proc(
 
         let ctx = &mut *raw_ptr;
 
+        // A modal dialog (e.g. the session open/save picker) runs its own
+        // message loop on this thread while `overlay` or `settings_window`
+        // stays borrowed for the dialog's duration. Any hotkey, tray click or
+        // system message dispatched during that window must not panic on a
+        // re-entrant `borrow_mut` - that would abort the whole process from
+        // inside this `extern "system"` callback. Re-post the message instead
+        // so it is retried once the borrow is free again.
+        macro_rules! try_overlay {
+            ($ctx:expr, $hwnd:expr, $msg:expr, $wparam:expr, $lparam:expr) => {
+                match $ctx.overlay.try_borrow_mut() {
+                    Ok(o) => o,
+                    Err(_) => {
+                        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                            Some($hwnd),
+                            $msg,
+                            $wparam,
+                            $lparam,
+                        );
+                        return LRESULT(0);
+                    }
+                }
+            };
+        }
+        macro_rules! try_settings {
+            ($ctx:expr, $hwnd:expr, $msg:expr, $wparam:expr, $lparam:expr) => {
+                match $ctx.settings_window.try_borrow_mut() {
+                    Ok(o) => o,
+                    Err(_) => {
+                        let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                            Some($hwnd),
+                            $msg,
+                            $wparam,
+                            $lparam,
+                        );
+                        return LRESULT(0);
+                    }
+                }
+            };
+        }
+
         // Explorer restarted and dropped every tray icon: claim ours back.
         // Registered at runtime, so it cannot be a `match` arm.
         let taskbar_created = ctx.tray.taskbar_created_msg();
@@ -95,7 +135,7 @@ unsafe extern "system" fn tray_wnd_proc(
         match msg {
             WM_HOTKEY => {
                 let hotkey_id = wparam.0 as i32;
-                let mut overlay = ctx.overlay.borrow_mut();
+                let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
 
                 match hotkey_id {
                     HOTKEY_STATIC_ZOOM => {
@@ -166,7 +206,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         }
                     }
                     HOTKEY_SETTINGS => {
-                        ctx.settings_window.borrow_mut().show();
+                        try_settings!(ctx, hwnd, msg, wparam, lparam).show();
                     }
                     _ => {}
                 }
@@ -175,7 +215,7 @@ unsafe extern "system" fn tray_wnd_proc(
 
             windows::Win32::UI::WindowsAndMessaging::WM_TIMER => {
                 if wparam.0 == TIMER_ID_LIVE_ZOOM_PAN {
-                    let mut overlay = ctx.overlay.borrow_mut();
+                    let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                     if overlay.live_zoom.is_active() {
                         overlay.live_zoom.tick_smooth_pan(0.25);
                     }
@@ -188,7 +228,7 @@ unsafe extern "system" fn tray_wnd_proc(
                 if event == WM_RBUTTONUP || event == WM_LBUTTONUP {
                     ctx.tray.show_menu();
                 } else if event == WM_LBUTTONDBLCLK {
-                    let mut overlay = ctx.overlay.borrow_mut();
+                    let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                     if overlay.live_zoom.is_active() {
                         overlay.stop_live_zoom();
                     }
@@ -217,7 +257,14 @@ unsafe extern "system" fn tray_wnd_proc(
             }
 
             WM_DISPLAYCHANGE => {
-                let mut overlay = ctx.overlay.borrow_mut();
+                // HMONITOR values can be reissued across a display change
+                // (unplug/replug, dock/undock, resolution change), so any
+                // cached WGC capture rig keyed on the old value would
+                // otherwise sit there - GPU memory and all - for the rest of
+                // the process, keyed to a monitor handle that may no longer
+                // mean anything.
+                capture_wgc::reset();
+                let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                 overlay.refresh_monitors();
                 let count = overlay.available_monitors.len();
                 let label = if count > 1 {
@@ -234,7 +281,7 @@ unsafe extern "system" fn tray_wnd_proc(
 
                 match id {
                     ID_TRAY_LIVE_ZOOM => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         if overlay.live_zoom.is_active() {
                             overlay.stop_live_zoom();
                             overlay.mode = AppMode::Idle;
@@ -244,56 +291,56 @@ unsafe extern "system" fn tray_wnd_proc(
                         }
                     }
                     ID_TRAY_STATIC_ZOOM => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_static_zoom();
                     }
                     ID_TRAY_DRAW => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_draw_mode();
                     }
                     ID_TRAY_SPOTLIGHT => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_spotlight_mode();
                     }
                     ID_TRAY_TIMER => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_timer_mode(0);
                     }
                     ID_TRAY_LOUPE => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_loupe_mode();
                     }
                     ID_TRAY_LASER => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_draw_mode();
-                        overlay.current_tool = DrawTool::LaserPointer;
+                        overlay.select_tool(DrawTool::LaserPointer);
                         overlay.set_toast("🔴", "Laser Pointer Active (K)");
                         overlay.request_repaint();
                     }
                     ID_TRAY_ERASER => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_draw_mode();
-                        overlay.current_tool = DrawTool::Eraser;
+                        overlay.select_tool(DrawTool::Eraser);
                         overlay.set_toast("🧹", "Stroke Eraser Active (X)");
                         overlay.request_repaint();
                     }
                     ID_TRAY_BLUR => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_draw_mode();
-                        overlay.current_tool = DrawTool::Blur;
+                        overlay.select_tool(DrawTool::Blur);
                         overlay.set_toast("░", "Redact / Blur Tool Active (Shift+X)");
                         overlay.request_repaint();
                     }
                     ID_TRAY_WHITEBOARD => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_draw_mode();
                         overlay.background_type = CanvasBackground::Whiteboard;
@@ -301,7 +348,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         overlay.request_repaint();
                     }
                     ID_TRAY_BLACKBOARD => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_draw_mode();
                         overlay.background_type = CanvasBackground::Blackboard;
@@ -309,17 +356,17 @@ unsafe extern "system" fn tray_wnd_proc(
                         overlay.request_repaint();
                     }
                     ID_TRAY_RESET_TOOLBAR => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         overlay.toolbar.custom_position = None;
                         overlay.toolbar.collapsed = false;
-                        let w = overlay.screen_width as f32;
-                        let h = overlay.screen_height as f32;
+                        let w = overlay.logical_w();
+                        let h = overlay.logical_h();
                         overlay.toolbar.update_layout(w, h);
                         overlay.set_toast("📌", "Toolbar Position Reset to Top Center");
                         overlay.request_repaint();
                     }
                     ID_TRAY_SETTINGS => {
-                        ctx.settings_window.borrow_mut().show();
+                        try_settings!(ctx, hwnd, msg, wparam, lparam).show();
                     }
                     ID_TRAY_OPEN_CONFIG => {
                         if let Some(appdata) = std::env::var_os("APPDATA") {
@@ -347,7 +394,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         }
                     }
                     ID_TRAY_CHEATSHEET => {
-                        let mut overlay = ctx.overlay.borrow_mut();
+                        let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                         ensure_live_zoom_stopped(&mut overlay);
                         overlay.enter_draw_mode();
                         overlay.show_cheat_sheet = true;
@@ -375,7 +422,7 @@ unsafe extern "system" fn tray_wnd_proc(
                         );
                     }
                     ID_TRAY_EXIT => {
-                        ctx.overlay.borrow_mut().exit_overlay();
+                        try_overlay!(ctx, hwnd, msg, wparam, lparam).exit_overlay();
                         PostQuitMessage(0);
                     }
                     _ => {}
@@ -396,8 +443,13 @@ unsafe extern "system" fn tray_wnd_proc(
                 let cfg = config::AppConfig::load();
                 capture::set_use_graphics_capture(cfg.use_graphics_capture);
                 let failed = ctx.hotkeys.reload_from_config(&cfg);
-                let mut overlay = ctx.overlay.borrow_mut();
+                let mut overlay = try_overlay!(ctx, hwnd, msg, wparam, lparam);
                 overlay.stroke_width = cfg.default_stroke_width;
+                // Pen strokes take their width from pen_settings, not stroke_width.
+                overlay.pen_settings.stroke_width = cfg.default_stroke_width;
+                if overlay.current_tool == DrawTool::Pen {
+                    overlay.sync_tool_to_toolbar();
+                }
                 overlay.spotlight.radius = cfg.spotlight_radius;
                 overlay.timer_seconds = cfg.timer_duration_mins * 60;
                 overlay.timer_sound_enabled = cfg.timer_sound_enabled;
@@ -422,19 +474,29 @@ unsafe extern "system" fn tray_wnd_proc(
             }
 
             WM_DESTROY => {
-                ctx.overlay.borrow_mut().exit_overlay();
+                // Best-effort: the window is going away regardless, and there is
+                // nowhere to re-post a message to once it has been destroyed.
+                if let Ok(mut overlay) = ctx.overlay.try_borrow_mut() {
+                    overlay.exit_overlay();
+                }
                 PostQuitMessage(0);
                 LRESULT(0)
             }
 
             windows::Win32::UI::WindowsAndMessaging::WM_QUERYENDSESSION => {
-                ctx.overlay.borrow_mut().exit_overlay();
+                // Best-effort save; always allow the session to end rather than
+                // block logoff/shutdown on a borrow that a modal dialog is holding.
+                if let Ok(mut overlay) = ctx.overlay.try_borrow_mut() {
+                    overlay.exit_overlay();
+                }
                 LRESULT(1)
             }
 
             windows::Win32::UI::WindowsAndMessaging::WM_ENDSESSION => {
                 if wparam.0 != 0 {
-                    ctx.overlay.borrow_mut().exit_overlay();
+                    if let Ok(mut overlay) = ctx.overlay.try_borrow_mut() {
+                        overlay.exit_overlay();
+                    }
                 }
                 LRESULT(0)
             }
@@ -490,6 +552,9 @@ fn main() -> Result<()> {
                 w!("Zoomify Running"),
                 MB_OK | MB_ICONINFORMATION | MB_SYSTEMMODAL,
             );
+            if let Ok(h) = mutex_handle {
+                let _ = windows::Win32::Foundation::CloseHandle(h);
+            }
             return Ok(());
         }
 
@@ -583,6 +648,19 @@ Choose different combos in Settings (Ctrl+,).",
         app_ctx.hotkeys.unregister_all();
         app_ctx.overlay.borrow_mut().exit_overlay();
         app_ctx.settings_window.borrow_mut().hide();
+
+        // Nothing ever called DestroyWindow on either window before this, so
+        // their renderers, the Live Zoom engine and every device resource
+        // they own lived until the process itself exited rather than being
+        // torn down. Each borrow ends before DestroyWindow runs, since it
+        // synchronously drives WM_DESTROY/WM_NCDESTROY straight into that
+        // window's own wndproc, which reclaims and drops the Rc<RefCell<_>>
+        // this same Box still holds a clone of.
+        let overlay_hwnd = app_ctx.overlay.borrow().hwnd;
+        let settings_hwnd = app_ctx.settings_window.borrow().hwnd;
+        let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(overlay_hwnd);
+        let _ = windows::Win32::UI::WindowsAndMessaging::DestroyWindow(settings_hwnd);
+        drop(app_ctx);
 
         windows::Win32::System::Ole::OleUninitialize();
         if let Ok(h) = mutex_handle {

@@ -11,25 +11,26 @@ use std::collections::HashMap;
 
 use windows::Win32::Foundation::{D2DERR_RECREATE_TARGET, HWND};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED,
-    D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
+    D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-    D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DOT,
+    D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND,
+    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DOT,
     D2D1_DASH_STYLE_SOLID, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
     D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_STROKE_STYLE_PROPERTIES,
-    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Bitmap, ID2D1BitmapRenderTarget,
-    ID2D1Factory, ID2D1GeometryGroup, ID2D1HwndRenderTarget, ID2D1PathGeometry, ID2D1RenderTarget,
-    ID2D1SolidColorBrush, ID2D1StrokeStyle,
+    D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE, D2D1CreateFactory, ID2D1Bitmap, ID2D1BitmapBrush,
+    ID2D1BitmapRenderTarget, ID2D1Factory, ID2D1GeometryGroup, ID2D1HwndRenderTarget,
+    ID2D1PathGeometry, ID2D1RenderTarget, ID2D1SolidColorBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_ITALIC,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
     DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory,
-    IDWriteTextFormat,
+    IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -52,6 +53,38 @@ pub(crate) fn v2(x: f32, y: f32) -> Vector2 {
     Vector2 { X: x, Y: y }
 }
 
+/// Same reasoning as `shapes::GEOMETRY_CACHE_MAX_ENTRIES`: unbounded growth
+/// during a long text edit (a new entry per keystroke while content is still
+/// changing) would otherwise never give anything back.
+const TEXT_LAYOUT_CACHE_MAX_ENTRIES: usize = 256;
+
+/// Every input the HUD status line's text depends on, discretized to exact
+/// (`Eq`-able) values matching what actually reaches the displayed string -
+/// so equality here really does mean "the text would come out identical".
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HudTextKey {
+    mode: AppMode,
+    tool: DrawTool,
+    stroke_width: u32,
+    zoom_tenths: Option<i32>,
+    spot_diameter: Option<u32>,
+    bg_type: CanvasBackground,
+}
+
+/// Committed shapes rendered once into an offscreen target, plus everything
+/// that image depends on. Validity is decided by comparing the shapes
+/// themselves against `snapshot`, not by tracking where they get mutated, so
+/// a missed invalidation can only cost speed - never show a stale picture.
+struct SceneLayer {
+    target: ID2D1BitmapRenderTarget,
+    rt_id: usize,
+    dpi_bits: u32,
+    size_bits: (u32, u32),
+    matrix_bits: [u32; 6],
+    blur_bg_id: usize,
+    snapshot: Vec<Annotation>,
+}
+
 pub struct D2DRenderer {
     pub factory: ID2D1Factory,
     pub dwrite_factory: IDWriteFactory,
@@ -64,11 +97,25 @@ pub struct D2DRenderer {
     #[allow(dead_code)]
     pub text_format_timer: IDWriteTextFormat,
     pub text_format_hud: IDWriteTextFormat,
+    /// Same font as `text_format_hud`, pre-centered, as its own instance -
+    /// several Timer-mode glyphs used to clone() text_format_hud (a COM
+    /// AddRef, the same underlying object) and call SetTextAlignment on
+    /// that "clone" directly, which permanently centered every other HUD
+    /// text using the shared field too.
+    pub text_format_hud_centered: IDWriteTextFormat,
     pub text_format_cheat_title: IDWriteTextFormat,
     pub text_format_cheat_item: IDWriteTextFormat,
     #[allow(dead_code)]
     pub text_format_toolbar: IDWriteTextFormat,
     pub text_format_toolbar_small: IDWriteTextFormat,
+    /// Same font as `text_format_toolbar_small`, but with word-wrapping
+    /// disabled - kept as its own instance rather than mutated in place on
+    /// demand, since IDWriteTextFormat::clone() is a COM AddRef (the same
+    /// underlying object, not a copy): setting NO_WRAP on a "clone" of
+    /// `text_format_toolbar_small` for the sub-bar's single-line labels used
+    /// to permanently switch every other user of that shared field to
+    /// NO_WRAP too (tooltips, toast, loupe badge, snap badges).
+    pub text_format_toolbar_small_nowrap: IDWriteTextFormat,
     pub text_format_fluent_icons: IDWriteTextFormat,
     pub text_format_toast_title: IDWriteTextFormat,
     pub text_format_toast_sub: IDWriteTextFormat,
@@ -79,7 +126,50 @@ pub struct D2DRenderer {
     /// the target changes (the offscreen target used for export is a different
     /// one) or the device is lost.
     solid_brush_cache: RefCell<(usize, HashMap<u32, ID2D1SolidColorBrush>)>,
-    pub blur_rt_cache: RefCell<Option<(usize, D2D_SIZE_F, ID2D1BitmapRenderTarget)>>,
+    /// One reusable brush for elements whose colour/alpha changes
+    /// continuously frame to frame (the laser trail, its ripples, toast
+    /// fades) - repainted via SetColor before each draw rather than
+    /// inserted into `solid_brush_cache` under a new key for every alpha a
+    /// fade passes through, which used to flood that 256-entry cache
+    /// (shared with every on-canvas shape) and force repeated full
+    /// flushes for as long as the fade lasted. D2D brush state (colour,
+    /// opacity) is captured at the moment each draw call is issued, so
+    /// reusing one brush this way is standard and safe, not a race.
+    scratch_brush: RefCell<(usize, Option<ID2D1SolidColorBrush>)>,
+    /// The HUD status line's last-built UTF-16 text plus the discretized
+    /// state it was built from - not device-dependent, so it survives device
+    /// loss. The HUD redraws every frame regardless (it sits over whatever's
+    /// under it), but this skips re-running `format!`/`encode_utf16` on the
+    /// vast majority of frames where nothing it displays actually changed.
+    hud_text_cache: RefCell<Option<(HudTextKey, Vec<u16>)>>,
+    /// The loupe's magnifying bitmap brush, rebuilt only when the render
+    /// target or the background bitmap it wraps changes - every other frame
+    /// just updates its transform, which is the only part that actually
+    /// varies as the loupe follows the cursor.
+    loupe_brush_cache: RefCell<(usize, usize, Option<ID2D1BitmapBrush>)>,
+    scene_layer: RefCell<Option<SceneLayer>>,
+    /// While the scene layer is being rendered its target is a *compatible*
+    /// child of the window's target, and Direct2D shares brushes and bitmaps
+    /// across such a family. Caches keyed by render target use this instead
+    /// of the child's own pointer so they are not flushed on every layer
+    /// render (and again on the next on-screen frame).
+    cache_rt_override: Cell<usize>,
+    /// The cheat sheet's ~130 static DrawText calls, rendered once into an
+    /// offscreen target (keyed by render target + DPI) and blitted per frame.
+    cheat_sheet_cache: RefCell<Option<(usize, u32, ID2D1BitmapRenderTarget)>>,
+    /// `IDWriteTextLayout`s (plus their measured (width, height)), keyed by
+    /// content - not by render target: unlike a D2D brush/geometry, a
+    /// DirectWrite layout is a CPU-side object with no device dependency, so
+    /// this survives export (a different render target) and device loss
+    /// alike, and needs no clearing in `recover_if_device_lost`. This is
+    /// what makes measuring and drawing a `Shape::Text` share one
+    /// `CreateTextLayout` instead of each frame paying for two (measure,
+    /// then `DrawText`'s own internal layout).
+    text_layout_cache: RefCell<HashMap<u64, (IDWriteTextLayout, f32, f32)>>,
+    /// Finished blur mosaics, keyed by content (background bitmap identity +
+    /// rect + block size) rather than shared by size the way this used to
+    /// be - see the doc comment at its use in shapes.rs.
+    pub blur_mosaic_cache: RefCell<(usize, HashMap<u64, ID2D1BitmapRenderTarget>)>,
     pub geometry_cache: RefCell<(usize, HashMap<u64, ID2D1PathGeometry>)>,
     /// Pasted images, keyed by content, alongside the render target they were
     /// uploaded to. Re-uploading a full-screen paste every frame would be the
@@ -169,6 +259,16 @@ impl D2DRenderer {
                 14.0,
                 w!("en-us"),
             )?;
+            let text_format_hud_centered = dwrite_factory.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                14.0,
+                w!("en-us"),
+            )?;
+            let _ = text_format_hud_centered.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 
             let text_format_cheat_title = dwrite_factory.CreateTextFormat(
                 w!("Segoe UI"),
@@ -214,6 +314,22 @@ impl D2DRenderer {
             let _ = text_format_toolbar_small.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             let _ =
                 text_format_toolbar_small.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+            let text_format_toolbar_small_nowrap = dwrite_factory.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                12.0,
+                w!("en-us"),
+            )?;
+            let _ = text_format_toolbar_small_nowrap.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            let _ = text_format_toolbar_small_nowrap
+                .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let _ = text_format_toolbar_small_nowrap.SetWordWrapping(
+                windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_NO_WRAP,
+            );
 
             let text_format_fluent_icons = dwrite_factory
                 .CreateTextFormat(
@@ -299,17 +415,26 @@ impl D2DRenderer {
                 text_format_badge,
                 text_format_timer,
                 text_format_hud,
+                text_format_hud_centered,
                 text_format_cheat_title,
                 text_format_cheat_item,
                 text_format_toolbar,
                 text_format_toolbar_small,
+                text_format_toolbar_small_nowrap,
                 text_format_fluent_icons,
                 text_format_toast_title,
                 text_format_toast_sub,
                 text_formats_cache: RefCell::new(HashMap::new()),
                 spotlight_geometry_cache: RefCell::new(None),
                 solid_brush_cache: RefCell::new((0, HashMap::new())),
-                blur_rt_cache: RefCell::new(None),
+                scratch_brush: RefCell::new((0, None)),
+                hud_text_cache: RefCell::new(None),
+                loupe_brush_cache: RefCell::new((0, 0, None)),
+                scene_layer: RefCell::new(None),
+                cache_rt_override: Cell::new(0),
+                cheat_sheet_cache: RefCell::new(None),
+                text_layout_cache: RefCell::new(HashMap::new()),
+                blur_mosaic_cache: RefCell::new((0, HashMap::new())),
                 geometry_cache: RefCell::new((0, HashMap::new())),
                 image_cache: RefCell::new((0, HashMap::new())),
                 target_hwnd: HWND::default(),
@@ -325,6 +450,159 @@ impl D2DRenderer {
     ///
     /// Every shape used to allocate its brushes from scratch on every frame,
     /// which is a COM allocation per shape per color at 60 Hz.
+    /// Identity used to key the device-resource caches; see
+    /// `cache_rt_override`.
+    #[inline]
+    pub(crate) fn rt_key(&self, rt: &ID2D1RenderTarget) -> usize {
+        match self.cache_rt_override.get() {
+            0 => rt.as_raw() as usize,
+            id => id,
+        }
+    }
+
+    /// Draw the committed shapes through the cached scene layer, refreshing it
+    /// first if anything it depends on changed. Returns false when there is
+    /// nothing to cache or the layer could not be built, in which case the
+    /// caller draws the shapes directly.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_scene_layer(
+        &self,
+        rt: &ID2D1RenderTarget,
+        width: f32,
+        height: f32,
+        canvas_matrix: &Matrix3x2,
+        identity: &Matrix3x2,
+        shapes: &[Annotation],
+        blur_bg: Option<&ID2D1Bitmap>,
+    ) -> bool {
+        if shapes.is_empty() {
+            return false;
+        }
+        let rt_id = rt.as_raw() as usize;
+        let dpi_bits = self.dpi.to_bits();
+        let size_bits = (width.to_bits(), height.to_bits());
+        let matrix_bits = [
+            canvas_matrix.M11.to_bits(),
+            canvas_matrix.M12.to_bits(),
+            canvas_matrix.M21.to_bits(),
+            canvas_matrix.M22.to_bits(),
+            canvas_matrix.M31.to_bits(),
+            canvas_matrix.M32.to_bits(),
+        ];
+        let blur_bg_id = blur_bg.map_or(0, |b| b.as_raw() as usize);
+
+        unsafe {
+            let mut slot = self.scene_layer.borrow_mut();
+            let same_target = matches!(&*slot, Some(l)
+                if l.rt_id == rt_id && l.dpi_bits == dpi_bits && l.size_bits == size_bits);
+            if !same_target {
+                *slot = None;
+                let scale = self.dpi / 96.0;
+                let px = D2D_SIZE_U {
+                    width: (width * scale).ceil().max(1.0) as u32,
+                    height: (height * scale).ceil().max(1.0) as u32,
+                };
+                let fmt = D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                };
+                let Ok(target) = rt.CreateCompatibleRenderTarget(
+                    None,
+                    Some(&px),
+                    Some(&fmt),
+                    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+                ) else {
+                    return false;
+                };
+                target.SetDpi(self.dpi, self.dpi);
+                target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                *slot = Some(SceneLayer {
+                    target,
+                    rt_id,
+                    dpi_bits,
+                    size_bits,
+                    matrix_bits: [0; 6],
+                    blur_bg_id: usize::MAX,
+                    snapshot: Vec::new(),
+                });
+            }
+            let Some(layer) = slot.as_mut() else {
+                return false;
+            };
+
+            let valid = layer.matrix_bits == matrix_bits
+                && layer.blur_bg_id == blur_bg_id
+                && layer.snapshot.as_slice() == shapes;
+            if !valid {
+                let target = layer.target.clone();
+                self.cache_rt_override.set(rt_id);
+                target.BeginDraw();
+                target.Clear(None);
+                target.SetTransform(canvas_matrix);
+                self.draw_committed_shapes(&target, shapes, blur_bg);
+                let ended = target.EndDraw(None, None);
+                self.cache_rt_override.set(0);
+                let ok = ended.is_ok();
+                self.note_draw_result(ended);
+                if !ok {
+                    *slot = None;
+                    return false;
+                }
+                layer.matrix_bits = matrix_bits;
+                layer.blur_bg_id = blur_bg_id;
+                layer.snapshot = shapes.to_vec();
+            }
+
+            let Ok(bitmap) = layer.target.GetBitmap() else {
+                return false;
+            };
+            rt.SetTransform(identity);
+            rt.DrawBitmap(
+                &bitmap,
+                Some(&D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: width,
+                    bottom: height,
+                }),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                None,
+            );
+            rt.SetTransform(canvas_matrix);
+            true
+        }
+    }
+
+    /// Every committed shape, then the labels that ride on containers, in the
+    /// order they stack on screen.
+    unsafe fn draw_committed_shapes(
+        &self,
+        rt: &ID2D1RenderTarget,
+        shapes: &[Annotation],
+        blur_bg: Option<&ID2D1Bitmap>,
+    ) {
+        unsafe {
+            for a in shapes {
+                // A label is drawn from its container's bounds, so it has
+                // to wait until the container is on screen.
+                if a.container.is_some() {
+                    continue;
+                }
+                self.render_single_shape(rt, &a.shape, blur_bg, a.opacity, true);
+            }
+            for a in shapes {
+                if let Some(cid) = a.container
+                    && let Some(owner) = shapes.iter().find(|o| o.id == cid)
+                {
+                    let bounds = crate::shapes::shape_bounds(&owner.shape);
+                    let rides = crate::shapes::label_rides_on_shape(&owner.shape);
+                    self.render_contained_text(rt, &a.shape, bounds, rides, a.opacity);
+                }
+            }
+        }
+    }
+
     pub(crate) fn solid_brush(
         &self,
         rt: &ID2D1RenderTarget,
@@ -337,7 +615,7 @@ impl D2DRenderer {
         let key =
             (chan(color.r) << 24) | (chan(color.g) << 16) | (chan(color.b) << 8) | chan(color.a);
 
-        let rt_id = rt.as_raw() as usize;
+        let rt_id = self.rt_key(rt);
         let mut cache = self.solid_brush_cache.borrow_mut();
         if cache.0 != rt_id {
             // Different render target: its brushes are not usable here.
@@ -356,6 +634,26 @@ impl D2DRenderer {
         Some(brush)
     }
 
+    /// See the `scratch_brush` field's doc comment. Only for an element
+    /// whose colour is expected to change every draw anyway (a fade, a
+    /// continuously-decaying alpha) - never for a shape whose colour is
+    /// reused across many frames, which belongs in `solid_brush`'s cache.
+    pub(crate) fn scratch_brush(
+        &self,
+        rt: &ID2D1RenderTarget,
+        color: &D2D1_COLOR_F,
+    ) -> Option<ID2D1SolidColorBrush> {
+        let rt_id = self.rt_key(rt);
+        let mut slot = self.scratch_brush.borrow_mut();
+        if slot.0 != rt_id || slot.1.is_none() {
+            slot.0 = rt_id;
+            slot.1 = unsafe { rt.CreateSolidColorBrush(color, None) }.ok();
+        } else if let Some(b) = &slot.1 {
+            unsafe { b.SetColor(color) };
+        }
+        slot.1.clone()
+    }
+
     pub fn get_stroke_style(&self, pattern: StrokePattern) -> &ID2D1StrokeStyle {
         match pattern {
             StrokePattern::Solid => &self.round_stroke_style,
@@ -364,8 +662,28 @@ impl D2DRenderer {
         }
     }
 
+    /// Bold, SegoeUI, pre-centered (both text and paragraph alignment) - for
+    /// the many small on-screen labels (timer digits, step badges) that
+    /// always want centered text. Deliberately a *different* cache key than
+    /// `get_custom_text_format`'s equivalent left-aligned request (see
+    /// `get_custom_text_format_impl`), so callers here can never bleed their
+    /// alignment into a Shape::Text annotation that happens to share the
+    /// same size.
+    /// The largest a single dimension of a bitmap this device can create is
+    /// allowed to be. Used both to clamp an export's supersample factor and
+    /// to downscale an oversized pasted image before it ever becomes a
+    /// Shape::Image - CreateBitmap failing past this (image_bitmap, below)
+    /// otherwise left the image on the canvas, selectable, but rendering as
+    /// nothing at all.
+    pub fn max_bitmap_size(&self) -> u32 {
+        self.render_target
+            .as_ref()
+            .map(|rt| unsafe { rt.GetMaximumBitmapSize() })
+            .unwrap_or(16384)
+    }
+
     pub fn get_text_format(&self, font_size: f32) -> Result<IDWriteTextFormat> {
-        self.get_custom_text_format(font_size, true, false, TextFontFamily::SegoeUI)
+        self.get_custom_text_format_impl(font_size, true, false, TextFontFamily::SegoeUI, true)
     }
 
     /// Upload a pasted image once and hand back the cached bitmap.
@@ -378,8 +696,16 @@ impl D2DRenderer {
         rt: &ID2D1RenderTarget,
         pixels: &crate::types::ImagePixels,
     ) -> Option<ID2D1Bitmap> {
+        // Nothing evicts a single deleted/undone image's entry, so without
+        // some bound a long session of pasting many different images would
+        // keep every one of them - each a full-size GPU bitmap - alive for
+        // the rest of the process. A typical session pastes a handful of
+        // images at most, so clearing the whole cache past this is a rare
+        // one-off re-upload, not a steady-state cost.
+        const IMAGE_CACHE_MAX_ENTRIES: usize = 64;
+
         unsafe {
-            let target_key = rt.as_raw() as usize;
+            let target_key = self.rt_key(rt);
             let mut cache = self.image_cache.borrow_mut();
             if cache.0 != target_key {
                 cache.0 = target_key;
@@ -409,11 +735,17 @@ impl D2DRenderer {
                     &props,
                 )
                 .ok()?;
+            if cache.1.len() > IMAGE_CACHE_MAX_ENTRIES {
+                cache.1.clear();
+            }
             cache.1.insert(key, bitmap.clone());
             Some(bitmap)
         }
     }
 
+    /// Left-aligned (DirectWrite's default) - what every `Shape::Text`
+    /// annotation renders with. See `get_custom_text_format_impl` for why
+    /// this needs its own cache key, distinct from `get_text_format`'s.
     pub fn get_custom_text_format(
         &self,
         font_size: f32,
@@ -421,11 +753,33 @@ impl D2DRenderer {
         is_italic: bool,
         font_family: TextFontFamily,
     ) -> Result<IDWriteTextFormat> {
+        self.get_custom_text_format_impl(font_size, is_bold, is_italic, font_family, false)
+    }
+
+    /// `centered` sets both text and paragraph alignment to CENTER at
+    /// creation time and folds into the cache key, so a caller that wants
+    /// centered text (badges, the timer) can never share a cache entry -
+    /// and therefore never share underlying alignment state - with one that
+    /// wants DirectWrite's default left alignment (any `Shape::Text`
+    /// annotation). Before this existed, a StepBadge or the timer would
+    /// fetch the *same* cached format a same-sized/weight/family
+    /// Shape::Text used and call SetTextAlignment/SetParagraphAlignment on
+    /// it directly - since the format is shared by reference, that flipped
+    /// every other holder of it to centered too, permanently.
+    fn get_custom_text_format_impl(
+        &self,
+        font_size: f32,
+        is_bold: bool,
+        is_italic: bool,
+        font_family: TextFontFamily,
+        centered: bool,
+    ) -> Result<IDWriteTextFormat> {
         let sz = (font_size.round() as u32).clamp(8, 200);
         let b_flag = if is_bold { 1u32 << 16 } else { 0 };
         let i_flag = if is_italic { 1u32 << 17 } else { 0 };
         let f_flag = (font_family as u32) << 18;
-        let key = sz | b_flag | i_flag | f_flag;
+        let c_flag = if centered { 1u32 << 20 } else { 0 };
+        let key = sz | b_flag | i_flag | f_flag | c_flag;
 
         let mut cache = self.text_formats_cache.borrow_mut();
         if let Some(format) = cache.get(&key) {
@@ -458,6 +812,10 @@ impl D2DRenderer {
                 sz as f32,
                 w!("en-us"),
             )?;
+            if centered {
+                let _ = format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                let _ = format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            }
             cache.insert(key, format.clone());
             Ok(format)
         }
@@ -476,36 +834,83 @@ impl D2DRenderer {
         // Wrap at this width; f32::MAX for a single unbroken run per line.
         max_width: f32,
     ) -> (f32, f32) {
-        let fallback = || crate::types::measure_text_block(text, font_size);
-        let Ok(format) = self.get_custom_text_format(font_size, is_bold, is_italic, font_family)
-        else {
-            return fallback();
+        match self.get_or_build_text_layout(
+            text,
+            font_size,
+            is_bold,
+            is_italic,
+            font_family,
+            max_width,
+        ) {
+            Some((_, w, h)) => (w, h),
+            None => crate::types::measure_text_block(text, font_size),
+        }
+    }
+
+    /// The cached `IDWriteTextLayout` behind `measure_text_block`, also
+    /// available to draw from directly (`rt.DrawTextLayout`) so a
+    /// `Shape::Text` never pays for a second, `DrawText`-internal layout on
+    /// top of the one it was just measured with.
+    ///
+    /// Keyed on content, not identity: a moved/re-cloned annotation with the
+    /// same text/font/wrap hits the same entry, same reasoning as the
+    /// stroke/badge geometry caches.
+    pub(crate) fn get_or_build_text_layout(
+        &self,
+        text: &str,
+        font_size: f32,
+        is_bold: bool,
+        is_italic: bool,
+        font_family: TextFontFamily,
+        max_width: f32,
+    ) -> Option<(IDWriteTextLayout, f32, f32)> {
+        let wrap = if max_width.is_finite() {
+            max_width.max(1.0)
+        } else {
+            f32::MAX / 4.0
         };
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            text.hash(&mut hasher);
+            font_size.to_bits().hash(&mut hasher);
+            is_bold.hash(&mut hasher);
+            is_italic.hash(&mut hasher);
+            (font_family as u32).hash(&mut hasher);
+            wrap.to_bits().hash(&mut hasher);
+            hasher.finish()
+        };
+
+        {
+            let cache = self.text_layout_cache.borrow();
+            if let Some((layout, w, h)) = cache.get(&key) {
+                return Some((layout.clone(), *w, *h));
+            }
+        }
+
+        let format = self
+            .get_custom_text_format(font_size, is_bold, is_italic, font_family)
+            .ok()?;
         let utf16: Vec<u16> = text.encode_utf16().collect();
         unsafe {
-            // Unbounded width means a line ends only where the author put a
-            // newline; a real width lets DirectWrite wrap, which is what a
-            // label inside a container needs.
-            let wrap = if max_width.is_finite() {
-                max_width.max(1.0)
-            } else {
-                f32::MAX / 4.0
-            };
-            let Ok(layout) =
-                self.dwrite_factory
-                    .CreateTextLayout(&utf16, &format, wrap, f32::MAX / 4.0)
-            else {
-                return fallback();
-            };
+            let layout = self
+                .dwrite_factory
+                .CreateTextLayout(&utf16, &format, wrap, f32::MAX / 4.0)
+                .ok()?;
             let mut metrics = DWRITE_TEXT_METRICS::default();
-            if layout.GetMetrics(&mut metrics).is_err() {
-                return fallback();
-            }
+            layout.GetMetrics(&mut metrics).ok()?;
             // A trailing empty line has zero measured width but still needs a
             // row, and an all-empty buffer still needs a caret-tall box.
             let lines = metrics.lineCount.max(1) as f32;
             let h = metrics.height.max(lines * font_size * 1.25);
-            (metrics.width.max(font_size * 0.6), h)
+            let w = metrics.width.max(font_size * 0.6);
+
+            let mut cache = self.text_layout_cache.borrow_mut();
+            if cache.len() > TEXT_LAYOUT_CACHE_MAX_ENTRIES {
+                cache.clear();
+            }
+            cache.insert(key, (layout.clone(), w, h));
+            Some((layout, w, h))
         }
     }
 
@@ -580,12 +985,22 @@ impl D2DRenderer {
             cache.0 = 0;
             cache.1.clear();
         }
-        self.blur_rt_cache.borrow_mut().take();
+        self.scratch_brush.borrow_mut().1 = None;
+        self.cheat_sheet_cache.borrow_mut().take();
+        self.scene_layer.borrow_mut().take();
         {
-            let mut cache = self.geometry_cache.borrow_mut();
+            let mut cache = self.loupe_brush_cache.borrow_mut();
+            cache.0 = 0;
+            cache.1 = 0;
+            cache.2 = None;
+        }
+        {
+            let mut cache = self.blur_mosaic_cache.borrow_mut();
             cache.0 = 0;
             cache.1.clear();
         }
+        self.clear_geometry_cache();
+        self.clear_image_cache();
 
         if self.target_hwnd.is_invalid() || self.target_width == 0 || self.target_height == 0 {
             self.device_lost.set(false);
@@ -594,6 +1009,29 @@ impl D2DRenderer {
 
         let (hwnd, w, h) = (self.target_hwnd, self.target_width, self.target_height);
         self.init_hwnd(hwnd, w, h).is_ok()
+    }
+
+    /// Drop every cached stroke/arrow-head path geometry. The cache has no
+    /// per-entry eviction (it is bounded only by clearing itself outright
+    /// once it grows past a cap - see `render_single_shape`), so this is the
+    /// only way to reclaim it between overlay sessions rather than carrying
+    /// every distinct geometry ever drawn for the life of the process.
+    pub fn clear_geometry_cache(&self) {
+        let mut cache = self.geometry_cache.borrow_mut();
+        cache.0 = 0;
+        cache.1.clear();
+    }
+
+    /// Drop every cached pasted-image GPU bitmap. Without this a bitmap
+    /// belonging to a lost device stayed pinned in the cache, and if the
+    /// freshly-created replacement render target happened to land at the
+    /// same address (plausible - the old one is freed right before the new
+    /// one is created), the stale key would keep matching and the dead
+    /// bitmaps would be reused instead of ever being replaced.
+    pub fn clear_image_cache(&self) {
+        let mut cache = self.image_cache.borrow_mut();
+        cache.0 = 0;
+        cache.1.clear();
     }
 
     /// Flag a lost device if this is the HRESULT Direct2D uses to report one.
@@ -657,6 +1095,9 @@ impl D2DRenderer {
         marquee_screen: Option<(f32, f32, f32, f32)>,
         selection_endpoints: Option<((f32, f32), (f32, f32))>,
         selection_bow: Option<(f32, f32)>,
+        // True while a gesture is rewriting committed shapes every frame (a
+        // select-drag): caching them then would rebuild the layer per frame.
+        scene_live: bool,
     ) {
         let rt = match &self.render_target {
             Some(rt) => rt,
@@ -761,26 +1202,37 @@ impl D2DRenderer {
 
             // ── Shapes Layer (Zoomed with canvas; Draw & StaticZoom only) ──
             if mode == AppMode::Draw || mode == AppMode::StaticZoom {
-                for a in shapes {
-                    // A label is drawn from its container's bounds, so it has
-                    // to wait until the container is on screen.
-                    if a.container.is_some() {
-                        continue;
-                    }
-                    self.render_single_shape(rt, &a.shape, bg_bitmap, a.opacity);
-                }
-                for a in shapes {
-                    if let Some(cid) = a.container
-                        && let Some(owner) = shapes.iter().find(|o| o.id == cid)
-                    {
-                        let bounds = crate::shapes::shape_bounds(&owner.shape);
-                        let rides = crate::shapes::label_rides_on_shape(&owner.shape);
-                        self.render_contained_text(rt, &a.shape, bounds, rides, a.opacity);
-                    }
+                // render_single_shape's only use of a background bitmap is
+                // Shape::Blur's source to redact. On a Whiteboard/Blackboard
+                // the frozen screenshot underneath is exactly what the user
+                // covered the desktop to hide - handing it to Blur regardless
+                // used to let it mosaic a pixelated copy of the hidden
+                // desktop instead of the board itself.
+                let blur_bg = if bg_type == CanvasBackground::Transparent {
+                    bg_bitmap
+                } else {
+                    None
+                };
+                let from_layer = !scene_live
+                    && self.draw_scene_layer(
+                        rt,
+                        width,
+                        height,
+                        &canvas_matrix,
+                        &identity,
+                        shapes,
+                        blur_bg,
+                    );
+                if !from_layer {
+                    self.draw_committed_shapes(rt, shapes, blur_bg);
                 }
 
                 if let Some(shape) = active_shape {
-                    self.render_single_shape(rt, shape, bg_bitmap, 1.0);
+                    // Not cacheable: this is the shape still being drawn (a pen
+                    // stroke gaining a point every mouse move, a drag preview),
+                    // so its geometry differs every frame - caching it would
+                    // only ever insert, never hit.
+                    self.render_single_shape(rt, shape, blur_bg, 1.0, false);
                     if snap_guides {
                         self.render_drawing_snap_guides(rt, shape);
                     }
@@ -865,7 +1317,7 @@ impl D2DRenderer {
                     b: 0.05,
                     a: dim_val,
                 };
-                if let Ok(dim_brush) = rt.CreateSolidColorBrush(&dim_col, None) {
+                if let Some(dim_brush) = self.solid_brush(rt, &dim_col) {
                     let full_rect = D2D_RECT_F {
                         left: 0.0,
                         top: 0.0,
@@ -900,7 +1352,8 @@ impl D2DRenderer {
                 && zoom_state.level > 1.05
                 && (mode == AppMode::StaticZoom || mode == AppMode::Draw)
             {
-                self.render_minimap(rt, width, height, bg_bitmap, zoom_state, minimap);
+                let infinite = mode == AppMode::Draw && bg_type != CanvasBackground::Transparent;
+                self.render_minimap(rt, width, height, bg_bitmap, zoom_state, minimap, infinite);
             }
 
             if mode != AppMode::Timer {
@@ -946,7 +1399,63 @@ impl D2DRenderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Export gets its own throwaway set of device caches. Every one of them
+    /// is keyed by the render target, and the export's DC target is a new
+    /// one each call, so sharing them meant the export wiped the on-screen
+    /// brushes, geometries, mosaics and uploaded images - and the next
+    /// on-screen frame then wiped the export's entries in turn, re-uploading
+    /// every pasted image (a visible hitch after each Copy/Save/PDF).
+    /// Swapping the on-screen contents out and back leaves them untouched.
     pub fn render_to_capture(
+        &self,
+        screen_x: i32,
+        screen_y: i32,
+        width: u32,
+        height: u32,
+        bg_pixels: Option<&[u8]>,
+        bg_type: CanvasBackground,
+        zoom_state: &ZoomState,
+        spotlight: &SpotlightState,
+        shapes: &[Annotation],
+        active_shape: Option<&Shape>,
+        text_input: Option<&TextEditorState>,
+        include_spotlight: bool,
+        supersample: f32,
+    ) -> Option<ScreenCapture> {
+        let saved_brushes = self.solid_brush_cache.replace((0, HashMap::new()));
+        let saved_scratch = self.scratch_brush.replace((0, None));
+        let saved_loupe = self.loupe_brush_cache.replace((0, 0, None));
+        let saved_blur = self.blur_mosaic_cache.replace((0, HashMap::new()));
+        let saved_geometry = self.geometry_cache.replace((0, HashMap::new()));
+        let saved_images = self.image_cache.replace((0, HashMap::new()));
+
+        let out = self.render_to_capture_inner(
+            screen_x,
+            screen_y,
+            width,
+            height,
+            bg_pixels,
+            bg_type,
+            zoom_state,
+            spotlight,
+            shapes,
+            active_shape,
+            text_input,
+            include_spotlight,
+            supersample,
+        );
+
+        self.solid_brush_cache.replace(saved_brushes);
+        self.scratch_brush.replace(saved_scratch);
+        self.loupe_brush_cache.replace(saved_loupe);
+        self.blur_mosaic_cache.replace(saved_blur);
+        self.geometry_cache.replace(saved_geometry);
+        self.image_cache.replace(saved_images);
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_to_capture_inner(
         &self,
         screen_x: i32,
         screen_y: i32,
@@ -972,7 +1481,18 @@ impl D2DRenderer {
         // scaled up by `supersample`: Direct2D re-renders every vector shape at
         // that higher DPI, and the native background bitmap is bilinearly
         // upscaled into it by the existing DrawBitmap call below.
+        // Clamp so neither exported dimension exceeds what the GPU can
+        // actually allocate as a bitmap - an export scale (1x/2x/3x) applied
+        // to an already-large or multi-monitor-spanning capture could
+        // otherwise ask for a target past that limit, and (before EndDraw's
+        // result was even checked, see below) silently produce a blank
+        // export rather than a smaller one.
+        let max_size = self.max_bitmap_size() as f32;
         let supersample = supersample.max(1.0);
+        let supersample = supersample
+            .min(max_size / width.max(1) as f32)
+            .min(max_size / height.max(1) as f32)
+            .max(1.0);
         let out_w = ((width as f32) * supersample).round().max(1.0) as u32;
         let out_h = ((height as f32) * supersample).round().max(1.0) as u32;
         let render_dpi = self.dpi * supersample;
@@ -1114,6 +1634,7 @@ impl D2DRenderer {
 
                         let bg_bmp = if bg_type == CanvasBackground::Transparent
                             && let Some(pixels) = bg_pixels
+                            && pixels.len() >= (width as usize) * (height as usize) * 4
                         {
                             let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
                                 width,
@@ -1161,7 +1682,13 @@ impl D2DRenderer {
                             if a.container.is_some() {
                                 continue;
                             }
-                            self.render_single_shape(&dc_rt, &a.shape, bg_bmp.as_ref(), a.opacity);
+                            self.render_single_shape(
+                                &dc_rt,
+                                &a.shape,
+                                bg_bmp.as_ref(),
+                                a.opacity,
+                                true,
+                            );
                         }
                         for a in shapes {
                             if let Some(cid) = a.container
@@ -1176,7 +1703,7 @@ impl D2DRenderer {
                         }
 
                         if let Some(shape) = active_shape {
-                            self.render_single_shape(&dc_rt, shape, bg_bmp.as_ref(), 1.0);
+                            self.render_single_shape(&dc_rt, shape, bg_bmp.as_ref(), 1.0, false);
                         }
 
                         if let Some(editor) = text_input {
@@ -1184,15 +1711,17 @@ impl D2DRenderer {
                         }
 
                         if include_spotlight && spotlight.active {
-                            let screen_pt =
-                                zoom_state.canvas_to_screen(Point2D::new(spotlight.x, spotlight.y));
+                            // spotlight.x/y are already screen-space DIPs (see the
+                            // on-screen render_frame path), not canvas coordinates -
+                            // converting them again here shifted the exported
+                            // spotlight whenever the view was zoomed or panned.
                             dc_rt.SetTransform(&identity);
                             self.render_spotlight_mask(
                                 &dc_rt,
                                 logical_w,
                                 logical_h,
-                                screen_pt.x,
-                                screen_pt.y,
+                                spotlight.x,
+                                spotlight.y,
                                 spotlight.radius,
                                 spotlight.dim_opacity,
                                 spotlight.pinned,
@@ -1200,7 +1729,19 @@ impl D2DRenderer {
                             dc_rt.SetTransform(&canvas_matrix);
                         }
 
-                        let _ = dc_rt.EndDraw(None, None);
+                        // A silent EndDraw failure (an oversized supersampled
+                        // export can ask for a target bigger than the GPU's
+                        // max bitmap size, among other reasons) used to fall
+                        // straight through to copying whatever the DIB
+                        // happened to already hold - typically all zero -
+                        // and returning it as a successful, blank capture.
+                        if dc_rt.EndDraw(None, None).is_err() {
+                            let _ = SelectObject(mem_dc, old_bmp);
+                            let _ = DeleteObject(hbm.into());
+                            let _ = DeleteDC(mem_dc);
+                            let _ = ReleaseDC(None, screen_dc);
+                            return None;
+                        }
 
                         let total_bytes = (out_w * out_h * 4) as usize;
                         let mut pixels = vec![0u8; total_bytes];

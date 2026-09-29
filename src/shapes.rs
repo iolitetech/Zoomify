@@ -943,11 +943,6 @@ pub fn anchor_points(shape: &Shape) -> Vec<Point2D> {
     }
 }
 
-/// Every anchor offered by `shapes`, flattened.
-pub fn collect_anchors(shapes: &[Shape]) -> Vec<Point2D> {
-    shapes.iter().flat_map(anchor_points).collect()
-}
-
 /// Pull a single moving point onto nearby geometry.
 ///
 /// A full point snap wins outright; otherwise each axis is considered on its

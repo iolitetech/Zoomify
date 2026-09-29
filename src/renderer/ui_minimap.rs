@@ -16,11 +16,13 @@ impl D2DRenderer {
         bg_bitmap: Option<&ID2D1Bitmap>,
         zoom: &ZoomState,
         minimap: &MinimapState,
+        infinite: bool,
     ) {
         let (card_l, card_t, card_r, card_b) = minimap.get_card_bounds(screen_w, screen_h);
         let (inner_l, inner_t, inner_r, inner_b) =
             minimap.get_inner_preview_rect(screen_w, screen_h);
-        let (vp_l, vp_t, vp_r, vp_b) = minimap.get_viewport_rect(screen_w, screen_h, zoom);
+        let (vp_l, vp_t, vp_r, vp_b) =
+            minimap.get_viewport_rect(screen_w, screen_h, zoom, infinite);
 
         unsafe {
             // 1. Soft ambient shadow behind minimap card

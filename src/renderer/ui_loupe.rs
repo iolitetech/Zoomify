@@ -3,6 +3,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_BRUSH_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_ELLIPSE,
     D2D1_EXTEND_MODE_CLAMP, D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1RenderTarget,
 };
+use windows::core::Interface;
 use windows_numerics::Matrix3x2;
 
 use super::{D2DRenderer, v2};
@@ -13,7 +14,7 @@ impl D2DRenderer {
     pub(super) unsafe fn render_loupe(
         &self,
         rt: &ID2D1RenderTarget,
-        _screen_w: f32,
+        screen_w: f32,
         _screen_h: f32,
         loupe: &LoupeState,
         bg_bitmap: Option<&ID2D1Bitmap>,
@@ -35,24 +36,52 @@ impl D2DRenderer {
 
             // 1. Setup GPU hardware matrix for magnified bitmap brush:
             // Translate origin to (-cx, -cy), scale by (m, m), then translate back to (cx, cy).
-            let brush_props = D2D1_BITMAP_BRUSH_PROPERTIES {
-                extendModeX: D2D1_EXTEND_MODE_CLAMP,
-                extendModeY: D2D1_EXTEND_MODE_CLAMP,
-                interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+            // Rebuilt only when the render target or the background bitmap
+            // identity changes - every other frame reuses the same brush and
+            // just moves its transform, which is all that actually varies as
+            // the loupe follows the cursor.
+            let rt_id = rt.as_raw() as usize;
+            let bg_id = bg.as_raw() as usize;
+            let bitmap_brush = {
+                let mut cache = self.loupe_brush_cache.borrow_mut();
+                if cache.0 != rt_id || cache.1 != bg_id || cache.2.is_none() {
+                    let brush_props = D2D1_BITMAP_BRUSH_PROPERTIES {
+                        extendModeX: D2D1_EXTEND_MODE_CLAMP,
+                        extendModeY: D2D1_EXTEND_MODE_CLAMP,
+                        interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    };
+                    let Ok(built) = rt.CreateBitmapBrush(bg, Some(&brush_props), None) else {
+                        return;
+                    };
+                    cache.0 = rt_id;
+                    cache.1 = bg_id;
+                    cache.2 = Some(built);
+                }
+                cache.2.clone().unwrap()
             };
 
-            let Ok(bitmap_brush) = rt.CreateBitmapBrush(bg, Some(&brush_props), None) else {
-                return;
-            };
+            // `bg` is captured at 96 DPI (capture.rs), so its own coordinate
+            // space is physical pixels, while cx/cy and the render target
+            // are in DIPs at this window's actual DPI - 1:1 only at 100%
+            // scaling. `s` converts a DIP distance into the matching
+            // physical-pixel distance in the bitmap; without it the loupe
+            // sampled bg at cx/s, drifting from the cursor as scaling rises
+            // above 100%.
+            let s = bg.GetSize().width / screen_w.max(1.0);
 
-            // Direct2D matrix: M31 is X translation, M32 is Y translation, M11 is X scale, M22 is Y scale
-            // Transform matrix T = Translate(-cx, -cy) * Scale(m) * Translate(cx, cy):
-            // (x - cx) * m + cx = x * m + cx * (1 - m)
+            // The transform maps physical bitmap pixel (cx*s, cy*s) - what
+            // is actually under the cursor - to screen point (cx, cy),
+            // scaled by m/s around that pivot:
+            //   target = (brush - cx*s) * (m/s) + cx
+            //          = brush * (m/s) + cx * (1 - m)
+            // so M11/M22 pick up the `s` factor but the translation does
+            // not (`m`, not `m/s` - the `s` scaling and the `-cx*s` pivot
+            // cancel each other out in the translation term).
             let loupe_matrix = Matrix3x2 {
-                M11: m,
+                M11: m / s,
                 M12: 0.0,
                 M21: 0.0,
-                M22: m,
+                M22: m / s,
                 M31: cx * (1.0 - m),
                 M32: cy * (1.0 - m),
             };

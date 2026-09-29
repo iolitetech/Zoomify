@@ -1,6 +1,8 @@
 # Zoomify roadmap
 
 Running list of what is built, what is deliberately not, and what is queued.
+Bugs, memory leaks and performance work live in **[BUGFIX-ROADMAP.md](BUGFIX-ROADMAP.md)**
+(a self-contained work queue from the 2026-09-28 audit) — do that before new features.
 Effort labels are rough: **S** a sitting, **M** a few sittings, **L** a project.
 
 Agreed order of work: **B → D → E → G → C → F → A.**

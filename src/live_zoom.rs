@@ -2,7 +2,7 @@
 
 use windows::Win32::Foundation::{FreeLibrary, HMODULE, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, GetSystemMetrics, HHOOK, MSLLHOOKSTRUCT, SM_CXSCREEN,
     SM_CYSCREEN, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WM_MOUSEWHEEL,
@@ -41,7 +41,7 @@ unsafe extern "system" fn live_zoom_mouse_hook(
     unsafe {
         if code >= 0 && wparam.0 as u32 == WM_MOUSEWHEEL && LIVE_ZOOM_ACTIVE.load(Ordering::Acquire)
         {
-            let is_ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
+            let is_ctrl = (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
             if is_ctrl {
                 let hook_struct = *(lparam.0 as *const MSLLHOOKSTRUCT);
                 let notches = ((hook_struct.mouseData >> 16) as i16 as f32) / 120.0;
@@ -158,6 +158,9 @@ impl LiveZoomEngine {
         self.zoom_level
     }
 
+    /// Current pan offset, relative to the active monitor's top-left corner
+    /// (i.e. in the same coordinate space as `monitor_x`/`monitor_y`, not the
+    /// virtual desktop `MagSetFullscreenTransform` itself takes).
     pub fn offsets(&self) -> (f32, f32) {
         (self.current_x_offset, self.current_y_offset)
     }
@@ -181,14 +184,7 @@ impl LiveZoomEngine {
                 self.update_target_from_cursor();
                 self.current_x_offset = self.target_x_offset;
                 self.current_y_offset = self.target_y_offset;
-
-                if let Some(set_fn) = self.mag_set_transform {
-                    let _ = set_fn(
-                        self.zoom_level,
-                        self.current_x_offset.round() as i32,
-                        self.current_y_offset.round() as i32,
-                    );
-                }
+                self.apply_transform();
 
                 // Install the low-level wheel hook for Ctrl+Wheel zooming. The
                 // hook only posts into PENDING_ZOOM_MILLI; it never touches self.
@@ -240,6 +236,30 @@ impl LiveZoomEngine {
         }
         self.zoom_level = level.clamp(1.25, 10.0);
         self.update_target_from_cursor();
+
+        // update_target_from_cursor() only recomputed target_*_offset;
+        // tick_smooth_pan() eases current_*_offset toward it over several
+        // ticks. Applying the transform right now with the *old* zoom's
+        // current_*_offset - which can be out of range for the *new* zoom,
+        // since the valid range shrinks when zooming out (e.g. 4x -> 2x) -
+        // briefly showed a view past the monitor's edge until smoothing
+        // caught up a few ticks later. Clamp current_*_offset into the new
+        // zoom's valid range first so every frame stays in bounds.
+        let mon_w = if self.monitor_w > 0 {
+            self.monitor_w as f32
+        } else {
+            unsafe { GetSystemMetrics(SM_CXSCREEN) as f32 }
+        };
+        let mon_h = if self.monitor_h > 0 {
+            self.monitor_h as f32
+        } else {
+            unsafe { GetSystemMetrics(SM_CYSCREEN) as f32 }
+        };
+        let max_x = (mon_w - mon_w / self.zoom_level).max(0.0);
+        let max_y = (mon_h - mon_h / self.zoom_level).max(0.0);
+        self.current_x_offset = self.current_x_offset.clamp(0.0, max_x);
+        self.current_y_offset = self.current_y_offset.clamp(0.0, max_y);
+
         self.apply_transform();
     }
 
@@ -277,8 +297,13 @@ impl LiveZoomEngine {
                 let max_x = (mon_w - view_w).max(0.0);
                 let max_y = (mon_h - view_h).max(0.0);
 
-                self.target_x_offset = mon_x + target_x.clamp(0.0, max_x);
-                self.target_y_offset = mon_y + target_y.clamp(0.0, max_y);
+                // Relative to this monitor's own top-left, not the virtual
+                // desktop - apply_transform() does that conversion in one
+                // place. Keeping it monitor-relative here means a monitor
+                // placed left of or above the primary (mon_x/mon_y negative)
+                // cannot silently leak into these bounds.
+                self.target_x_offset = target_x.clamp(0.0, max_x);
+                self.target_y_offset = target_y.clamp(0.0, max_y);
             }
         }
     }
@@ -323,12 +348,23 @@ impl LiveZoomEngine {
         if self.is_active
             && let Some(set_fn) = self.mag_set_transform
         {
+            let z = self.zoom_level;
+            let mx = self.monitor_x as f32;
+            let my = self.monitor_y as f32;
+            // MagSetFullscreenTransform maps a screen point P - relative to
+            // the *primary* monitor's top-left, per the API docs - to source
+            // pixel `offset + P/z`. For this monitor's own top-left (P = mx,
+            // my) to show source (mx + current_x_offset, my +
+            // current_y_offset), the offset must be `mx + current_x_offset -
+            // mx/z` (and the same for y). The missing `- mx/z` term used to
+            // shift the whole magnified view by `|mx|/z` on any monitor
+            // placed left of or above the primary (mx or my negative),
+            // panning it off the left/top edge of the desktop - invisible on
+            // the primary monitor itself, where mx == my == 0.
+            let off_x = mx + self.current_x_offset - mx / z;
+            let off_y = my + self.current_y_offset - my / z;
             unsafe {
-                let _ = set_fn(
-                    self.zoom_level,
-                    self.current_x_offset.round() as i32,
-                    self.current_y_offset.round() as i32,
-                );
+                let _ = set_fn(z, off_x.round() as i32, off_y.round() as i32);
             }
         }
     }

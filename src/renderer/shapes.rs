@@ -15,14 +15,60 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
-    D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1Brush, ID2D1RenderTarget, ID2D1StrokeStyle,
+    D2D1_ROUNDED_RECT, ID2D1Bitmap, ID2D1Brush, ID2D1Factory, ID2D1PathGeometry, ID2D1RenderTarget,
+    ID2D1StrokeStyle,
 };
-use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-};
+use windows::Win32::Graphics::DirectWrite::DWRITE_HIT_TEST_METRICS;
 use windows_core::Interface;
 
+/// Once the geometry cache holds more entries than this, a new insert clears
+/// it outright rather than growing further. There is no per-entry eviction,
+/// so without a cap a long freehand stroke (one new cache entry per point
+/// while it is still being drawn) or a long drag (one entry per unique
+/// position) would otherwise grow the cache for as long as the gesture lasts
+/// and never give any of it back.
+const GEOMETRY_CACHE_MAX_ENTRIES: usize = 512;
+
+/// Each entry is its own small render target (a real GPU resource), so this
+/// stays far smaller than the geometry cache's cap - a session redacting
+/// dozens of distinct regions is already an unusual amount of blur.
+const BLUR_MOSAIC_CACHE_MAX_ENTRIES: usize = 64;
+
 impl D2DRenderer {
+    /// Build a stroke's outline as a hollow path geometry: a straight polyline
+    /// for two points, or the same Bezier smoothing `points_to_bezier_segments`
+    /// produces for three or more. Shared by the cached and uncached draw
+    /// paths in `render_single_shape` so there is exactly one place that
+    /// builds this geometry.
+    unsafe fn build_stroke_geometry(
+        factory: &ID2D1Factory,
+        points: &[Point2D],
+    ) -> Option<ID2D1PathGeometry> {
+        unsafe {
+            let path = factory.CreatePathGeometry().ok()?;
+            let sink = path.Open().ok()?;
+            sink.BeginFigure(v2(points[0].x, points[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
+            if points.len() >= 3 {
+                let segments = points_to_bezier_segments(points);
+                for (c1, c2, p) in segments {
+                    let bz = D2D1_BEZIER_SEGMENT {
+                        point1: v2(c1.x, c1.y),
+                        point2: v2(c2.x, c2.y),
+                        point3: v2(p.x, p.y),
+                    };
+                    sink.AddBezier(&bz);
+                }
+            } else {
+                for pt in &points[1..] {
+                    sink.AddLine(v2(pt.x, pt.y));
+                }
+            }
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            let _ = sink.Close();
+            Some(path)
+        }
+    }
+
     pub(super) unsafe fn render_single_shape(
         &self,
         rt: &ID2D1RenderTarget,
@@ -31,6 +77,14 @@ impl D2DRenderer {
         // Scales every colour's alpha. It lives on the Annotation because it
         // applies to all shapes equally and none of them care what it is.
         opacity: f32,
+        // Whether this shape's geometry is worth caching at all. False for
+        // the shape still being drawn or dragged: its points differ every
+        // frame, so every cache lookup for it would miss and every draw
+        // would insert a brand-new entry that is never reused - pure growth
+        // with none of the caching benefit. True for a committed annotation,
+        // whose geometry is stable from one frame to the next once the
+        // gesture that produced it ends.
+        cacheable: bool,
     ) {
         unsafe {
             match shape {
@@ -90,52 +144,48 @@ impl D2DRenderer {
                                     Some(stroke_style),
                                 );
                             }
-                        } else {
+                        } else if cacheable {
+                            // Keyed on the point *values*, not the Vec's address:
+                            // a moved/dragged/re-cloned Vec of identical points at
+                            // an identical width must hit the same cached
+                            // geometry, and a freed-then-reused allocation must
+                            // never be mistaken for a different stroke that
+                            // happens to share its old address and length.
                             let key = {
                                 use std::hash::{Hash, Hasher};
                                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                (points.as_ptr() as u64).hash(&mut hasher);
-                                points.len().hash(&mut hasher);
+                                for p in points.iter() {
+                                    p.x.to_bits().hash(&mut hasher);
+                                    p.y.to_bits().hash(&mut hasher);
+                                }
                                 actual_width.to_bits().hash(&mut hasher);
                                 hasher.finish()
                             };
                             let mut cache = self.geometry_cache.borrow_mut();
-                            let rt_id = rt.as_raw() as usize;
+                            let rt_id = self.rt_key(rt);
                             if cache.0 != rt_id {
                                 cache.0 = rt_id;
                                 cache.1.clear();
                             }
                             let path = if let Some(p) = cache.1.get(&key) {
-                                p.clone()
-                            } else if let Ok(path) = self.factory.CreatePathGeometry()
-                                && let Ok(sink) = path.Open()
-                            {
-                                sink.BeginFigure(
-                                    v2(points[0].x, points[0].y),
-                                    D2D1_FIGURE_BEGIN_HOLLOW,
-                                );
-                                if points.len() >= 3 {
-                                    let segments = points_to_bezier_segments(points);
-                                    for (c1, c2, p) in segments {
-                                        let bz = D2D1_BEZIER_SEGMENT {
-                                            point1: v2(c1.x, c1.y),
-                                            point2: v2(c2.x, c2.y),
-                                            point3: v2(p.x, p.y),
-                                        };
-                                        sink.AddBezier(&bz);
-                                    }
-                                } else {
-                                    for pt in &points[1..] {
-                                        sink.AddLine(v2(pt.x, pt.y));
-                                    }
-                                }
-                                sink.EndFigure(D2D1_FIGURE_END_OPEN);
-                                let _ = sink.Close();
-                                cache.1.insert(key, path.clone());
-                                path
+                                Some(p.clone())
                             } else {
-                                return;
+                                let built = Self::build_stroke_geometry(&self.factory, points);
+                                if let Some(p) = &built {
+                                    if cache.1.len() > GEOMETRY_CACHE_MAX_ENTRIES {
+                                        cache.1.clear();
+                                    }
+                                    cache.1.insert(key, p.clone());
+                                }
+                                built
                             };
+                            if let Some(path) = path {
+                                let stroke_style = self.get_stroke_style(*pattern);
+                                rt.DrawGeometry(&path, &brush, actual_width, Some(stroke_style));
+                            }
+                        } else if let Some(path) =
+                            Self::build_stroke_geometry(&self.factory, points)
+                        {
                             let stroke_style = self.get_stroke_style(*pattern);
                             rt.DrawGeometry(&path, &brush, actual_width, Some(stroke_style));
                         }
@@ -230,29 +280,16 @@ impl D2DRenderer {
                         let fill_head = |from: Point2D, to: Point2D| {
                             let (tip, left, right) =
                                 arrow_head_points(from, to, head_len, half_width);
-                            let filled = |pts: &[Point2D], head_type: ArrowHead| {
-                                let key = {
-                                    use std::hash::{Hash, Hasher};
-                                    let mut hasher =
-                                        std::collections::hash_map::DefaultHasher::new();
-                                    from.x.to_bits().hash(&mut hasher);
-                                    from.y.to_bits().hash(&mut hasher);
-                                    to.x.to_bits().hash(&mut hasher);
-                                    to.y.to_bits().hash(&mut hasher);
-                                    head_len.to_bits().hash(&mut hasher);
-                                    half_width.to_bits().hash(&mut hasher);
-                                    (head_type as u8).hash(&mut hasher);
-                                    hasher.finish()
-                                };
-                                let mut cache = self.geometry_cache.borrow_mut();
-                                let rt_id = rt.as_raw() as usize;
-                                if cache.0 != rt_id {
-                                    cache.0 = rt_id;
-                                    cache.1.clear();
-                                }
-                                let path = if let Some(p) = cache.1.get(&key) {
-                                    p.clone()
-                                } else if let Ok(path) = self.factory.CreatePathGeometry()
+                            // An arrow head is a 3-4 point path, cheap enough to
+                            // build fresh every frame - simpler and safer than
+                            // caching it by (from, to, head_len, half_width): a
+                            // dragged or bound-and-following arrow changes those
+                            // float coordinates on nearly every frame, so a
+                            // cache here only ever inserted new entries and
+                            // never evicted any, growing for as long as the
+                            // arrow existed.
+                            let filled = |pts: &[Point2D]| {
+                                if let Ok(path) = self.factory.CreatePathGeometry()
                                     && let Ok(sink) = path.Open()
                                 {
                                     sink.BeginFigure(
@@ -264,15 +301,11 @@ impl D2DRenderer {
                                     }
                                     sink.EndFigure(D2D1_FIGURE_END_CLOSED);
                                     let _ = sink.Close();
-                                    cache.1.insert(key, path.clone());
-                                    path
-                                } else {
-                                    return;
-                                };
-                                rt.FillGeometry(&path, &brush, None);
+                                    rt.FillGeometry(&path, &brush, None);
+                                }
                             };
                             match head {
-                                ArrowHead::Triangle => filled(&[tip, left, right], *head),
+                                ArrowHead::Triangle => filled(&[tip, left, right]),
                                 ArrowHead::Open => {
                                     // Two strokes to the tip, leaving it open.
                                     rt.DrawLine(
@@ -313,7 +346,7 @@ impl D2DRenderer {
                                         mid.x - (tip.x - mid.x),
                                         mid.y - (tip.y - mid.y),
                                     );
-                                    filled(&[tip, left, back, right], *head);
+                                    filled(&[tip, left, back, right]);
                                 }
                                 ArrowHead::Bar => {
                                     rt.DrawLine(
@@ -481,18 +514,18 @@ impl D2DRenderer {
                     font_family,
                 } => {
                     let col = color.to_d2d_color((1.0) * opacity);
-                    let text_utf16: Vec<u16> = text.encode_utf16().collect();
-                    if let Ok(custom_format) =
-                        self.get_custom_text_format(*font_size, *is_bold, *is_italic, *font_family)
-                    {
-                        let (block_w, block_h) = self.measure_text_block(
-                            text,
-                            *font_size,
-                            *is_bold,
-                            *is_italic,
-                            *font_family,
-                            f32::MAX,
-                        );
+                    // One cached IDWriteTextLayout serves both the box math
+                    // below and the two DrawTextLayout calls further down -
+                    // previously this measured with one layout and then
+                    // DrawText built a second, internal one on every draw.
+                    if let Some((text_layout, block_w, block_h)) = self.get_or_build_text_layout(
+                        text,
+                        *font_size,
+                        *is_bold,
+                        *is_italic,
+                        *font_family,
+                        f32::MAX,
+                    ) {
                         let layout_w = block_w.max(30.0) + 16.0;
                         let layout_h = block_h + 8.0;
 
@@ -565,32 +598,22 @@ impl D2DRenderer {
                                         a: 0.70,
                                     },
                                 ) {
-                                    let sh_rect = D2D_RECT_F {
-                                        left: text_rect.left + 1.2,
-                                        top: text_rect.top + 1.5,
-                                        right: text_rect.right + 1.2,
-                                        bottom: text_rect.bottom + 1.5,
-                                    };
-                                    rt.DrawText(
-                                        &text_utf16,
-                                        &custom_format,
-                                        &sh_rect,
+                                    rt.DrawTextLayout(
+                                        v2(text_rect.left + 1.2, text_rect.top + 1.5),
+                                        &text_layout,
                                         &sh_brush,
                                         D2D1_DRAW_TEXT_OPTIONS_NONE,
-                                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                                     );
                                 }
                             }
                         }
 
                         if let Some(brush) = self.solid_brush(rt, &col) {
-                            rt.DrawText(
-                                &text_utf16,
-                                &custom_format,
-                                &text_rect,
+                            rt.DrawTextLayout(
+                                v2(text_rect.left, text_rect.top),
+                                &text_layout,
                                 &brush,
                                 D2D1_DRAW_TEXT_OPTIONS_NONE,
-                                windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                             );
                         }
                     }
@@ -676,27 +699,61 @@ impl D2DRenderer {
                             }
                         }
                         BadgeShape::Hexagon => {
-                            let mut points = [Point2D::default(); 6];
-                            for (i, p) in points.iter_mut().enumerate() {
-                                let angle = (i as f32 * std::f32::consts::PI / 3.0)
-                                    - std::f32::consts::FRAC_PI_2;
-                                *p = Point2D::new(
-                                    center.x + radius * angle.cos(),
-                                    center.y + radius * angle.sin(),
-                                );
+                            // Keyed on center+radius (a discriminant tag keeps
+                            // this from ever colliding with the stroke
+                            // geometries sharing the same cache): a hexagon
+                            // badge that isn't being dragged rebuilds nothing.
+                            let key = {
+                                use std::hash::{Hash, Hasher};
+                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                0xBADE_u32.hash(&mut hasher);
+                                center.x.to_bits().hash(&mut hasher);
+                                center.y.to_bits().hash(&mut hasher);
+                                radius.to_bits().hash(&mut hasher);
+                                hasher.finish()
+                            };
+                            let mut cache = self.geometry_cache.borrow_mut();
+                            let rt_id = self.rt_key(rt);
+                            if cache.0 != rt_id {
+                                cache.0 = rt_id;
+                                cache.1.clear();
                             }
-                            if let Ok(path) = self.factory.CreatePathGeometry()
-                                && let Ok(sink) = path.Open()
-                            {
-                                sink.BeginFigure(
-                                    v2(points[0].x, points[0].y),
-                                    D2D1_FIGURE_BEGIN_FILLED,
-                                );
-                                for pt in &points[1..] {
-                                    sink.AddLine(v2(pt.x, pt.y));
+                            let path = if let Some(p) = cache.1.get(&key) {
+                                Some(p.clone())
+                            } else {
+                                let mut points = [Point2D::default(); 6];
+                                for (i, p) in points.iter_mut().enumerate() {
+                                    let angle = (i as f32 * std::f32::consts::PI / 3.0)
+                                        - std::f32::consts::FRAC_PI_2;
+                                    *p = Point2D::new(
+                                        center.x + radius * angle.cos(),
+                                        center.y + radius * angle.sin(),
+                                    );
                                 }
-                                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-                                let _ = sink.Close();
+                                let built =
+                                    self.factory.CreatePathGeometry().ok().and_then(|path| {
+                                        let sink = path.Open().ok()?;
+                                        sink.BeginFigure(
+                                            v2(points[0].x, points[0].y),
+                                            D2D1_FIGURE_BEGIN_FILLED,
+                                        );
+                                        for pt in &points[1..] {
+                                            sink.AddLine(v2(pt.x, pt.y));
+                                        }
+                                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                                        let _ = sink.Close();
+                                        Some(path)
+                                    });
+                                if let Some(p) = &built {
+                                    if cache.1.len() > GEOMETRY_CACHE_MAX_ENTRIES {
+                                        cache.1.clear();
+                                    }
+                                    cache.1.insert(key, p.clone());
+                                }
+                                built
+                            };
+                            drop(cache);
+                            if let Some(path) = path {
                                 if let Some(bp) = &backplate_brush {
                                     rt.FillGeometry(&path, bp, None);
                                 }
@@ -740,8 +797,8 @@ impl D2DRenderer {
                     };
                     let font_size = (*radius * 0.95).max(11.0);
                     if let Ok(custom_fmt) = self.get_text_format(font_size) {
-                        let _ = custom_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                        let _ = custom_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                        // Already centered - get_text_format's cache key
+                        // reserves this format for centered callers only.
                         let text_rect = D2D_RECT_F {
                             left: center.x - *radius,
                             top: center.y - *radius,
@@ -786,13 +843,34 @@ impl D2DRenderer {
 
                     let b_size = block_size.clamp(4.0, 64.0);
 
+                    // bg_bitmap is captured at 96 DPI (capture.rs), so its
+                    // own coordinate space is physical pixels, while l/t/r/b
+                    // are canvas DIPs at rt's actual DPI - 1:1 only at 100%
+                    // scaling. Used below to convert the region read *from*
+                    // the bitmap; the mosaic's block count and its drawn
+                    // extent on screen both stay in DIPs, which is what a
+                    // "block_size" the user sees on screen should mean.
+                    let mut dpi_x = 96.0f32;
+                    let mut dpi_y = 96.0f32;
+                    rt.GetDpi(&mut dpi_x, &mut dpi_y);
+                    let s = (dpi_x / 96.0).max(0.01);
+
                     // Mosaic via downsample-then-upsample: shrink the region to one
                     // texel per block (linear, so each texel averages its block),
                     // then blow it back up with nearest-neighbour.
                     //
-                    // This used to issue one DrawBitmap per block, so an 800x600
-                    // redaction at the minimum block size meant ~30,000 draw calls
-                    // *per frame*. It is now two.
+                    // The downsample pass itself only runs once per distinct
+                    // (background, rect, block size) - cached in
+                    // blur_mosaic_cache keyed by content, the same approach as
+                    // the stroke geometry cache - rather than every single
+                    // frame regardless of whether anything about this blur
+                    // changed. Each key gets its *own* dedicated render
+                    // target instead of sharing one scratch RT across every
+                    // blur on the canvas: ID2D1BitmapRenderTarget::GetBitmap()
+                    // returns a live view of that target's own backing
+                    // surface, so two blurs sharing one scratch RT could
+                    // otherwise show each other's content depending on draw
+                    // order.
                     let mosaic = bg_bitmap.and_then(|bmp| {
                         let cols = (w / b_size).ceil().max(1.0);
                         let rows = (h / b_size).ceil().max(1.0);
@@ -801,14 +879,27 @@ impl D2DRenderer {
                             height: rows,
                         };
 
-                        let rt_id = rt.as_raw() as usize;
-                        let mut cache = self.blur_rt_cache.borrow_mut();
-                        let tiny = if let Some((c_rt_id, c_size, ref c_rt)) = *cache
-                            && c_rt_id == rt_id
-                            && c_size.width == small.width
-                            && c_size.height == small.height
-                        {
-                            c_rt.clone()
+                        let key = {
+                            use std::hash::{Hash, Hasher};
+                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                            (bmp.as_raw() as usize).hash(&mut hasher);
+                            start.x.to_bits().hash(&mut hasher);
+                            start.y.to_bits().hash(&mut hasher);
+                            end.x.to_bits().hash(&mut hasher);
+                            end.y.to_bits().hash(&mut hasher);
+                            b_size.to_bits().hash(&mut hasher);
+                            hasher.finish()
+                        };
+
+                        let rt_id = self.rt_key(rt);
+                        let mut cache = self.blur_mosaic_cache.borrow_mut();
+                        if cache.0 != rt_id {
+                            cache.0 = rt_id;
+                            cache.1.clear();
+                        }
+
+                        let tiny = if let Some(existing) = cache.1.get(&key) {
+                            existing.clone()
                         } else {
                             let new_rt = rt
                                 .CreateCompatibleRenderTarget(
@@ -818,32 +909,39 @@ impl D2DRenderer {
                                     D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
                                 )
                                 .ok()?;
-                            *cache = Some((rt_id, small, new_rt.clone()));
+                            new_rt.BeginDraw();
+                            new_rt.Clear(None);
+                            new_rt.DrawBitmap(
+                                bmp,
+                                Some(&D2D_RECT_F {
+                                    left: 0.0,
+                                    top: 0.0,
+                                    right: cols,
+                                    bottom: rows,
+                                }),
+                                1.0,
+                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                                // Source rect is within bg_bitmap's own
+                                // (physical-pixel) space, so the DIP rect
+                                // has to be scaled up to match - reading it
+                                // unscaled is what made this sample the
+                                // wrong region above 100% DPI.
+                                Some(&D2D_RECT_F {
+                                    left: l * s,
+                                    top: t * s,
+                                    right: r * s,
+                                    bottom: b * s,
+                                }),
+                            );
+                            if new_rt.EndDraw(None, None).is_err() {
+                                return None;
+                            }
+                            if cache.1.len() > BLUR_MOSAIC_CACHE_MAX_ENTRIES {
+                                cache.1.clear();
+                            }
+                            cache.1.insert(key, new_rt.clone());
                             new_rt
                         };
-
-                        tiny.BeginDraw();
-                        tiny.Clear(None);
-                        tiny.DrawBitmap(
-                            bmp,
-                            Some(&D2D_RECT_F {
-                                left: 0.0,
-                                top: 0.0,
-                                right: cols,
-                                bottom: rows,
-                            }),
-                            1.0,
-                            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                            Some(&D2D_RECT_F {
-                                left: l,
-                                top: t,
-                                right: r,
-                                bottom: b,
-                            }),
-                        );
-                        if tiny.EndDraw(None, None).is_err() {
-                            return None;
-                        }
                         tiny.GetBitmap().ok().map(|bm| (bm, cols, rows))
                     });
 
@@ -944,8 +1042,16 @@ impl D2DRenderer {
             } else {
                 ((container.2 - container.0) - pad * 2.0).max(24.0)
             };
-            let (w, h) =
-                self.measure_text_block(text, *font_size, *is_bold, *is_italic, *font_family, wrap);
+            let Some((text_layout, w, h)) = self.get_or_build_text_layout(
+                text,
+                *font_size,
+                *is_bold,
+                *is_italic,
+                *font_family,
+                wrap,
+            ) else {
+                return;
+            };
             let origin = contained_text_origin(container, w, h);
 
             if rides_on
@@ -972,28 +1078,14 @@ impl D2DRenderer {
                 rt.FillRoundedRectangle(&chip_rect, &chip);
             }
 
-            let Ok(format) =
-                self.get_custom_text_format(*font_size, *is_bold, *is_italic, *font_family)
-            else {
-                return;
-            };
             let Some(brush) = self.solid_brush(rt, &color.to_d2d_color((1.0) * opacity)) else {
                 return;
             };
-            let utf16: Vec<u16> = text.encode_utf16().collect();
-            let rect = D2D_RECT_F {
-                left: origin.x,
-                top: origin.y,
-                right: origin.x + w.max(wrap),
-                bottom: origin.y + h,
-            };
-            rt.DrawText(
-                &utf16,
-                &format,
-                &rect,
+            rt.DrawTextLayout(
+                v2(origin.x, origin.y),
+                &text_layout,
                 &brush,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
-                windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
             );
         }
     }
@@ -1023,17 +1115,49 @@ impl D2DRenderer {
             for (ax, ay, bx, by, marker) in guides {
                 if *marker {
                     // A filled diamond reads as "landed on this point" without
-                    // being mistaken for a selection grip.
+                    // being mistaken for a selection grip. Keyed on position
+                    // (the size, 5.0, is fixed) via the same content-hash
+                    // geometry_cache the hexagon badge and strokes use, so a
+                    // drag that keeps re-snapping to the same handful of
+                    // anchor points isn't rebuilding this every frame.
                     let s = 5.0;
-                    if let Ok(path) = self.factory.CreatePathGeometry()
-                        && let Ok(sink) = path.Open()
-                    {
-                        sink.BeginFigure(v2(*ax, ay - s), D2D1_FIGURE_BEGIN_FILLED);
-                        sink.AddLine(v2(ax + s, *ay));
-                        sink.AddLine(v2(*ax, ay + s));
-                        sink.AddLine(v2(ax - s, *ay));
-                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-                        let _ = sink.Close();
+                    let key = {
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        0xD1A5_u32.hash(&mut hasher);
+                        ax.to_bits().hash(&mut hasher);
+                        ay.to_bits().hash(&mut hasher);
+                        hasher.finish()
+                    };
+                    let mut cache = self.geometry_cache.borrow_mut();
+                    let rt_id = self.rt_key(rt);
+                    if cache.0 != rt_id {
+                        cache.0 = rt_id;
+                        cache.1.clear();
+                    }
+                    let path = if let Some(p) = cache.1.get(&key) {
+                        Some(p.clone())
+                    } else {
+                        let built = self.factory.CreatePathGeometry().ok().and_then(|path| {
+                            let sink = path.Open().ok()?;
+                            sink.BeginFigure(v2(*ax, ay - s), D2D1_FIGURE_BEGIN_FILLED);
+                            sink.AddLine(v2(ax + s, *ay));
+                            sink.AddLine(v2(*ax, ay + s));
+                            sink.AddLine(v2(ax - s, *ay));
+                            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                            let _ = sink.Close();
+                            Some(path)
+                        });
+                        if let Some(p) = &built {
+                            if cache.1.len() > GEOMETRY_CACHE_MAX_ENTRIES {
+                                cache.1.clear();
+                            }
+                            cache.1.insert(key, p.clone());
+                        }
+                        built
+                    };
+                    drop(cache);
+                    if let Some(path) = path {
                         rt.FillGeometry(&path, &brush, None);
                     }
                 } else {
@@ -1085,6 +1209,11 @@ impl D2DRenderer {
 
     /// Stroke a polyline as one path, so joins are smooth and a dash pattern
     /// runs continuously instead of restarting at every segment.
+    /// Draws a curved line/arrow's sampled polyline. Keyed on the point
+    /// values + width (a discriminant tag keeps it from colliding with the
+    /// freehand-stroke or badge/marker entries sharing the same cache): the
+    /// curve only actually changes while its handle is being dragged, so
+    /// this is a CreatePathGeometry saved on every other frame it's drawn.
     pub(super) unsafe fn stroke_polyline(
         &self,
         rt: &ID2D1RenderTarget,
@@ -1097,15 +1226,46 @@ impl D2DRenderer {
             if pts.len() < 2 {
                 return;
             }
-            if let Ok(path) = self.factory.CreatePathGeometry()
-                && let Ok(sink) = path.Open()
-            {
-                sink.BeginFigure(v2(pts[0].x, pts[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
-                for p in &pts[1..] {
-                    sink.AddLine(v2(p.x, p.y));
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                0xC0BE_u32.hash(&mut hasher);
+                for p in pts {
+                    p.x.to_bits().hash(&mut hasher);
+                    p.y.to_bits().hash(&mut hasher);
                 }
-                sink.EndFigure(D2D1_FIGURE_END_OPEN);
-                let _ = sink.Close();
+                width.to_bits().hash(&mut hasher);
+                hasher.finish()
+            };
+            let mut cache = self.geometry_cache.borrow_mut();
+            let rt_id = self.rt_key(rt);
+            if cache.0 != rt_id {
+                cache.0 = rt_id;
+                cache.1.clear();
+            }
+            let path = if let Some(p) = cache.1.get(&key) {
+                Some(p.clone())
+            } else {
+                let built = self.factory.CreatePathGeometry().ok().and_then(|path| {
+                    let sink = path.Open().ok()?;
+                    sink.BeginFigure(v2(pts[0].x, pts[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
+                    for p in &pts[1..] {
+                        sink.AddLine(v2(p.x, p.y));
+                    }
+                    sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                    let _ = sink.Close();
+                    Some(path)
+                });
+                if let Some(p) = &built {
+                    if cache.1.len() > GEOMETRY_CACHE_MAX_ENTRIES {
+                        cache.1.clear();
+                    }
+                    cache.1.insert(key, p.clone());
+                }
+                built
+            };
+            drop(cache);
+            if let Some(path) = path {
                 rt.DrawGeometry(&path, brush, width, stroke);
             }
         }
@@ -1407,37 +1567,49 @@ impl D2DRenderer {
                 }
             }
 
-            if let Some(brush) = self.solid_brush(rt, &col) {
-                let display_text = if show_caret {
-                    let mut s = text.to_string();
-                    let safe_idx = cursor.min(s.len());
-                    s.insert(safe_idx, '|');
-                    s
-                } else {
-                    text.to_string()
-                };
-                let utf16: Vec<u16> = display_text.encode_utf16().collect();
-                let layout_rect = D2D_RECT_F {
-                    left: origin.x,
-                    top: origin.y,
-                    right: origin.x + estimated_w,
-                    bottom: origin.y + estimated_h,
-                };
-
-                if let Ok(format) = self.get_custom_text_format(
+            // One cached layout for the real text (no synthetic caret
+            // character spliced in) - drawn as-is, with the blinking caret
+            // itself drawn separately as a line from HitTestTextPosition.
+            // The previous approach rebuilt a whole new layout from a freshly
+            // copied-and-mutated string on every blink tick, for a card that
+            // is open and blinking far more of the time than its text is
+            // actually being edited.
+            if let Some(brush) = self.solid_brush(rt, &col)
+                && let Some((text_layout, _, _)) = self.get_or_build_text_layout(
+                    text,
                     font_size,
                     editor.is_bold,
                     editor.is_italic,
                     editor.font_family,
-                ) {
-                    rt.DrawText(
-                        &utf16,
-                        &format,
-                        &layout_rect,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
+                    editor.wrap_width(),
+                )
+            {
+                rt.DrawTextLayout(
+                    v2(origin.x, origin.y),
+                    &text_layout,
+                    &brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+
+                if show_caret {
+                    let safe_idx = cursor.min(text.len());
+                    let utf16_pos = text[..safe_idx].encode_utf16().count() as u32;
+                    let mut px = 0.0f32;
+                    let mut py = 0.0f32;
+                    let mut metrics = DWRITE_HIT_TEST_METRICS::default();
+                    if text_layout
+                        .HitTestTextPosition(utf16_pos, false, &mut px, &mut py, &mut metrics)
+                        .is_ok()
+                    {
+                        let caret_h = metrics.height.max(font_size);
+                        rt.DrawLine(
+                            v2(origin.x + px, origin.y + py),
+                            v2(origin.x + px, origin.y + py + caret_h),
+                            &brush,
+                            1.6,
+                            None,
+                        );
+                    }
                 }
             }
         }
@@ -1477,7 +1649,7 @@ impl D2DRenderer {
                     b: rip_col.b,
                     a: alpha,
                 };
-                if let Some(brush) = self.solid_brush(rt, &ring_col) {
+                if let Some(brush) = self.scratch_brush(rt, &ring_col) {
                     let el = D2D1_ELLIPSE {
                         point: v2(ripple.center.x, ripple.center.y),
                         radiusX: radius,
@@ -1500,7 +1672,7 @@ impl D2DRenderer {
                         b: rip_col.b,
                         a: alpha2,
                     };
-                    if let Some(brush2) = self.solid_brush(rt, &echo_col) {
+                    if let Some(brush2) = self.scratch_brush(rt, &echo_col) {
                         let el2 = D2D1_ELLIPSE {
                             point: v2(ripple.center.x, ripple.center.y),
                             radiusX: radius2,
@@ -1521,7 +1693,7 @@ impl D2DRenderer {
                         b: 1.0,
                         a: flash_alpha,
                     };
-                    if let Some(fbrush) = self.solid_brush(rt, &flash_col) {
+                    if let Some(fbrush) = self.scratch_brush(rt, &flash_col) {
                         let fel = D2D1_ELLIPSE {
                             point: v2(ripple.center.x, ripple.center.y),
                             radiusX: flash_radius,
@@ -1548,7 +1720,7 @@ impl D2DRenderer {
                         b: base_col.b,
                         a: seg_alpha,
                     };
-                    if let Some(brush) = self.solid_brush(rt, &seg_col) {
+                    if let Some(brush) = self.scratch_brush(rt, &seg_col) {
                         rt.DrawLine(
                             v2(trail[i].pt.x, trail[i].pt.y),
                             v2(trail[i + 1].pt.x, trail[i + 1].pt.y),

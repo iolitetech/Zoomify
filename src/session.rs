@@ -35,10 +35,22 @@ pub struct Session {
     pub saved_at: String,
     pub background: String,
     pub step_counter: u32,
+    /// The *active* board's shapes, kept for a build one version behind this
+    /// one: it does not know about `boards` below, ignores that field
+    /// entirely, and would otherwise see nothing rather than one board.
     /// v1 files stored bare shapes with no identity. They still load: each one
     /// is handed a fresh id on the way in.
     #[serde(deserialize_with = "de_annotations")]
     pub shapes: Vec<Annotation>,
+    /// Every board's shapes, in order. `None` for a file saved before
+    /// multiple boards existed, or - before this fix - one that only ever
+    /// wrote the active board and silently dropped the rest on exit; either
+    /// way, `shapes` above is then this session's one and only board. See
+    /// `boards_or_single`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boards: Option<Vec<Vec<Annotation>>>,
+    #[serde(default)]
+    pub active_board: usize,
 }
 
 fn de_annotations<'de, D>(deserializer: D) -> Result<Vec<Annotation>, D::Error>
@@ -58,13 +70,24 @@ where
 }
 
 impl Session {
-    pub fn new(shapes: Vec<Annotation>, background: CanvasBackground, step_counter: u32) -> Self {
+    /// `boards` is every board's shapes, in order; `active_board` is which
+    /// one was showing. `shapes` (the compat field older builds still read)
+    /// is filled in from `boards[active_board]`.
+    pub fn new(
+        boards: Vec<Vec<Annotation>>,
+        active_board: usize,
+        background: CanvasBackground,
+        step_counter: u32,
+    ) -> Self {
+        let shapes = boards.get(active_board).cloned().unwrap_or_default();
         Self {
             version: SESSION_VERSION,
             saved_at: local_stamp_readable(),
             background: background_name(background).to_string(),
             step_counter,
             shapes,
+            boards: Some(boards),
+            active_board,
         }
     }
 
@@ -73,6 +96,26 @@ impl Session {
             "Whiteboard" => CanvasBackground::Whiteboard,
             "Blackboard" => CanvasBackground::Blackboard,
             _ => CanvasBackground::Transparent,
+        }
+    }
+
+    /// Every board's shapes: `boards` when present, else `shapes` alone as
+    /// this session's one and only board (a file from before boards existed,
+    /// or from before this was fixed to save every board).
+    pub fn boards_or_single(&self) -> Vec<Vec<Annotation>> {
+        self.boards
+            .clone()
+            .unwrap_or_else(|| vec![self.shapes.clone()])
+    }
+
+    /// Every annotation across every board, borrowed rather than cloned -
+    /// used for the id/group/binding reservation scan at load time, which
+    /// has no reason to copy potentially many-megabyte image buffers just to
+    /// read a handful of `ShapeId`s off of each one.
+    fn all_annotations(&self) -> Box<dyn Iterator<Item = &Annotation> + '_> {
+        match &self.boards {
+            Some(boards) => Box::new(boards.iter().flatten()),
+            None => Box::new(self.shapes.iter()),
         }
     }
 }
@@ -179,8 +222,21 @@ pub fn load(path: &Path) -> Result<Session, String> {
             session.version, SESSION_VERSION
         ));
     }
-    // Newly drawn annotations must not collide with ids that came off disk.
-    if let Some(highest) = session.shapes.iter().map(|a| a.id).max() {
+    // Newly drawn annotations - and newly formed groups, which reuse the
+    // same id space - must not collide with anything that came off disk:
+    // an id, but also a group/container/binding id, each of which can be
+    // higher than every actual annotation id (a group is usually formed
+    // after every one of its members already exists). Reserving only above
+    // the highest annotation id let a freshly loaded session's counter sit
+    // low enough that the next `Ctrl+G` could mint a group id that an
+    // existing group on disk already used, silently merging unrelated
+    // shapes into it.
+    let highest = session
+        .all_annotations()
+        .flat_map(|a| [Some(a.id), a.container, a.start_bound, a.end_bound, a.group])
+        .flatten()
+        .max();
+    if let Some(highest) = highest {
         ShapeId::reserve_above(highest);
     }
     Ok(session)
@@ -335,11 +391,7 @@ mod tests {
             Shape::Image {
                 start: Point2D::new(0.0, 0.0),
                 end: Point2D::new(4.0, 4.0),
-                pixels: crate::types::ImagePixels {
-                    width: 2,
-                    height: 2,
-                    bgra: (0..16u8).collect(),
-                },
+                pixels: crate::types::ImagePixels::new(2, 2, (0..16u8).collect::<Vec<u8>>()),
             },
         ]
         .into_iter()
@@ -373,7 +425,7 @@ mod tests {
     #[test]
     fn test_session_round_trips_every_field() {
         let dir = temp_dir("roundtrip");
-        let session = Session::new(sample_shapes(), CanvasBackground::Blackboard, 7);
+        let session = Session::new(vec![sample_shapes()], 0, CanvasBackground::Blackboard, 7);
         let path = next_session_path(&dir);
         save(&path, &session).unwrap();
 
@@ -383,6 +435,50 @@ mod tests {
         assert_eq!(back.background_enum(), CanvasBackground::Blackboard);
         // Custom colours and embedded newlines are the fiddly parts.
         assert_eq!(back.shapes, session.shapes);
+    }
+
+    #[test]
+    fn test_multi_board_session_saves_and_loads_every_board() {
+        // Regression test: save_session() used to serialize only the active
+        // board, so switching to a different board and exiting silently
+        // dropped every other one.
+        let dir = temp_dir("multi_board");
+        let board0 = sample_shapes();
+        let board1 = vec![sample_shapes().remove(0)];
+        let boards = vec![board0.clone(), board1.clone()];
+        let session = Session::new(boards, 1, CanvasBackground::Whiteboard, 0);
+        let path = next_session_path(&dir);
+        save(&path, &session).unwrap();
+
+        let back = load(&path).unwrap();
+        assert_eq!(back.active_board, 1);
+        let back_boards = back.boards_or_single();
+        assert_eq!(back_boards.len(), 2);
+        assert_eq!(back_boards[0], board0);
+        assert_eq!(back_boards[1], board1);
+        // The compat field for a build one version behind, holding just the
+        // active board.
+        assert_eq!(back.shapes, board1);
+    }
+
+    #[test]
+    fn test_group_ids_are_reserved_across_every_board_not_just_the_active_one() {
+        // Regression test: reserving ids only from `session.shapes` (the
+        // active board) let a fresh session's counter sit low enough that
+        // grouping two new shapes could mint a group id an inactive board's
+        // group already used, silently merging unrelated shapes into it.
+        let dir = temp_dir("group_reservation");
+        let grouped = Annotation {
+            group: Some(ShapeId(999_999)),
+            ..sample_shapes().remove(0)
+        };
+        let boards = vec![sample_shapes(), vec![grouped]];
+        let session = Session::new(boards, 0, CanvasBackground::Transparent, 0);
+        let path = next_session_path(&dir);
+        save(&path, &session).unwrap();
+
+        load(&path).unwrap();
+        assert!(ShapeId::fresh() > ShapeId(999_999));
     }
 
     #[test]
