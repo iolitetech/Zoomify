@@ -105,6 +105,7 @@ jobs:
           tag_name: v${{ env.NEW_VERSION }}
           name: v${{ env.NEW_VERSION }}
           body_path: RELEASE_NOTES.md
+          prerelease: ${{ contains(env.NEW_VERSION, '-') }}
 
   crates-io:
     name: Publish to crates.io
