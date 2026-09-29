@@ -708,27 +708,61 @@ impl D2DRenderer {
                             }
                         }
                         BadgeShape::Hexagon => {
-                            let mut points = [Point2D::default(); 6];
-                            for (i, p) in points.iter_mut().enumerate() {
-                                let angle = (i as f32 * std::f32::consts::PI / 3.0)
-                                    - std::f32::consts::FRAC_PI_2;
-                                *p = Point2D::new(
-                                    center.x + radius * angle.cos(),
-                                    center.y + radius * angle.sin(),
-                                );
+                            // Keyed on center+radius (a discriminant tag keeps
+                            // this from ever colliding with the stroke
+                            // geometries sharing the same cache): a hexagon
+                            // badge that isn't being dragged rebuilds nothing.
+                            let key = {
+                                use std::hash::{Hash, Hasher};
+                                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                0xBADE_u32.hash(&mut hasher);
+                                center.x.to_bits().hash(&mut hasher);
+                                center.y.to_bits().hash(&mut hasher);
+                                radius.to_bits().hash(&mut hasher);
+                                hasher.finish()
+                            };
+                            let mut cache = self.geometry_cache.borrow_mut();
+                            let rt_id = rt.as_raw() as usize;
+                            if cache.0 != rt_id {
+                                cache.0 = rt_id;
+                                cache.1.clear();
                             }
-                            if let Ok(path) = self.factory.CreatePathGeometry()
-                                && let Ok(sink) = path.Open()
-                            {
-                                sink.BeginFigure(
-                                    v2(points[0].x, points[0].y),
-                                    D2D1_FIGURE_BEGIN_FILLED,
-                                );
-                                for pt in &points[1..] {
-                                    sink.AddLine(v2(pt.x, pt.y));
+                            let path = if let Some(p) = cache.1.get(&key) {
+                                Some(p.clone())
+                            } else {
+                                let mut points = [Point2D::default(); 6];
+                                for (i, p) in points.iter_mut().enumerate() {
+                                    let angle = (i as f32 * std::f32::consts::PI / 3.0)
+                                        - std::f32::consts::FRAC_PI_2;
+                                    *p = Point2D::new(
+                                        center.x + radius * angle.cos(),
+                                        center.y + radius * angle.sin(),
+                                    );
                                 }
-                                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
-                                let _ = sink.Close();
+                                let built =
+                                    self.factory.CreatePathGeometry().ok().and_then(|path| {
+                                        let sink = path.Open().ok()?;
+                                        sink.BeginFigure(
+                                            v2(points[0].x, points[0].y),
+                                            D2D1_FIGURE_BEGIN_FILLED,
+                                        );
+                                        for pt in &points[1..] {
+                                            sink.AddLine(v2(pt.x, pt.y));
+                                        }
+                                        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                                        let _ = sink.Close();
+                                        Some(path)
+                                    });
+                                if let Some(p) = &built {
+                                    if cache.1.len() > GEOMETRY_CACHE_MAX_ENTRIES {
+                                        cache.1.clear();
+                                    }
+                                    cache.1.insert(key, p.clone());
+                                }
+                                built
+                            };
+                            drop(cache);
+                            if let Some(path) = path {
                                 if let Some(bp) = &backplate_brush {
                                     rt.FillGeometry(&path, bp, None);
                                 }
