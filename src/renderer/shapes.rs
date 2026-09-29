@@ -1224,6 +1224,11 @@ impl D2DRenderer {
 
     /// Stroke a polyline as one path, so joins are smooth and a dash pattern
     /// runs continuously instead of restarting at every segment.
+    /// Draws a curved line/arrow's sampled polyline. Keyed on the point
+    /// values + width (a discriminant tag keeps it from colliding with the
+    /// freehand-stroke or badge/marker entries sharing the same cache): the
+    /// curve only actually changes while its handle is being dragged, so
+    /// this is a CreatePathGeometry saved on every other frame it's drawn.
     pub(super) unsafe fn stroke_polyline(
         &self,
         rt: &ID2D1RenderTarget,
@@ -1236,15 +1241,46 @@ impl D2DRenderer {
             if pts.len() < 2 {
                 return;
             }
-            if let Ok(path) = self.factory.CreatePathGeometry()
-                && let Ok(sink) = path.Open()
-            {
-                sink.BeginFigure(v2(pts[0].x, pts[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
-                for p in &pts[1..] {
-                    sink.AddLine(v2(p.x, p.y));
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                0xC0BE_u32.hash(&mut hasher);
+                for p in pts {
+                    p.x.to_bits().hash(&mut hasher);
+                    p.y.to_bits().hash(&mut hasher);
                 }
-                sink.EndFigure(D2D1_FIGURE_END_OPEN);
-                let _ = sink.Close();
+                width.to_bits().hash(&mut hasher);
+                hasher.finish()
+            };
+            let mut cache = self.geometry_cache.borrow_mut();
+            let rt_id = rt.as_raw() as usize;
+            if cache.0 != rt_id {
+                cache.0 = rt_id;
+                cache.1.clear();
+            }
+            let path = if let Some(p) = cache.1.get(&key) {
+                Some(p.clone())
+            } else {
+                let built = self.factory.CreatePathGeometry().ok().and_then(|path| {
+                    let sink = path.Open().ok()?;
+                    sink.BeginFigure(v2(pts[0].x, pts[0].y), D2D1_FIGURE_BEGIN_HOLLOW);
+                    for p in &pts[1..] {
+                        sink.AddLine(v2(p.x, p.y));
+                    }
+                    sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                    let _ = sink.Close();
+                    Some(path)
+                });
+                if let Some(p) = &built {
+                    if cache.1.len() > GEOMETRY_CACHE_MAX_ENTRIES {
+                        cache.1.clear();
+                    }
+                    cache.1.insert(key, p.clone());
+                }
+                built
+            };
+            drop(cache);
+            if let Some(path) = path {
                 rt.DrawGeometry(&path, brush, width, stroke);
             }
         }
