@@ -1217,7 +1217,63 @@ impl D2DRenderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Export gets its own throwaway set of device caches. Every one of them
+    /// is keyed by the render target, and the export's DC target is a new
+    /// one each call, so sharing them meant the export wiped the on-screen
+    /// brushes, geometries, mosaics and uploaded images - and the next
+    /// on-screen frame then wiped the export's entries in turn, re-uploading
+    /// every pasted image (a visible hitch after each Copy/Save/PDF).
+    /// Swapping the on-screen contents out and back leaves them untouched.
     pub fn render_to_capture(
+        &self,
+        screen_x: i32,
+        screen_y: i32,
+        width: u32,
+        height: u32,
+        bg_pixels: Option<&[u8]>,
+        bg_type: CanvasBackground,
+        zoom_state: &ZoomState,
+        spotlight: &SpotlightState,
+        shapes: &[Annotation],
+        active_shape: Option<&Shape>,
+        text_input: Option<&TextEditorState>,
+        include_spotlight: bool,
+        supersample: f32,
+    ) -> Option<ScreenCapture> {
+        let saved_brushes = self.solid_brush_cache.replace((0, HashMap::new()));
+        let saved_scratch = self.scratch_brush.replace((0, None));
+        let saved_loupe = self.loupe_brush_cache.replace((0, 0, None));
+        let saved_blur = self.blur_mosaic_cache.replace((0, HashMap::new()));
+        let saved_geometry = self.geometry_cache.replace((0, HashMap::new()));
+        let saved_images = self.image_cache.replace((0, HashMap::new()));
+
+        let out = self.render_to_capture_inner(
+            screen_x,
+            screen_y,
+            width,
+            height,
+            bg_pixels,
+            bg_type,
+            zoom_state,
+            spotlight,
+            shapes,
+            active_shape,
+            text_input,
+            include_spotlight,
+            supersample,
+        );
+
+        self.solid_brush_cache.replace(saved_brushes);
+        self.scratch_brush.replace(saved_scratch);
+        self.loupe_brush_cache.replace(saved_loupe);
+        self.blur_mosaic_cache.replace(saved_blur);
+        self.geometry_cache.replace(saved_geometry);
+        self.image_cache.replace(saved_images);
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_to_capture_inner(
         &self,
         screen_x: i32,
         screen_y: i32,
