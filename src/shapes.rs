@@ -1112,6 +1112,90 @@ pub fn push_pressure(pressures: &mut Vec<f32>, sample: Option<f32>, point_count:
     pressures.truncate(point_count);
 }
 
+/// Closed polygons whose union is a pressure stroke, one per segment plus one
+/// round joint per point - the same picture as drawing each segment as a
+/// round-capped line of its own width, but as a single fillable shape.
+///
+/// Segment `i` is a rectangle of half-width `width * f_i / 2`, where `f_i` is
+/// the mean of its endpoints' pressure factors (as the per-segment drawing
+/// averaged them). Each point gets a disc of the larger of the two adjoining
+/// half-widths, which is exactly the union of the two round caps that meet
+/// there. Every polygon is wound the same way, so filling them together with
+/// the non-zero (winding) rule gives their union with no overlap artefacts.
+pub fn pressure_stroke_figures(
+    points: &[Point2D],
+    pressures: &[f32],
+    width: f32,
+) -> Vec<Vec<Point2D>> {
+    const DISC_SIDES: usize = 24;
+    let n = points.len();
+    if n < 2 || pressures.len() != n {
+        return Vec::new();
+    }
+    let half = |a: usize, b: usize| {
+        width
+            * 0.5
+            * (pressure_width_factor(pressures[a]) + pressure_width_factor(pressures[b]))
+            * 0.5
+    };
+    let finite = |p: &Point2D| p.x.is_finite() && p.y.is_finite();
+
+    let mut figures: Vec<Vec<Point2D>> = Vec::with_capacity(n * 2);
+    for i in 0..n - 1 {
+        let (a, b) = (points[i], points[i + 1]);
+        if !finite(&a) || !finite(&b) {
+            continue;
+        }
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-4 {
+            continue;
+        }
+        let r = half(i, i + 1);
+        let (nx, ny) = (-dy / len * r, dx / len * r);
+        figures.push(vec![
+            Point2D::new(a.x + nx, a.y + ny),
+            Point2D::new(b.x + nx, b.y + ny),
+            Point2D::new(b.x - nx, b.y - ny),
+            Point2D::new(a.x - nx, a.y - ny),
+        ]);
+    }
+    for i in 0..n {
+        let c = points[i];
+        if !finite(&c) {
+            continue;
+        }
+        let r = match i {
+            0 => half(0, 1),
+            _ if i == n - 1 => half(n - 2, n - 1),
+            _ => half(i - 1, i).max(half(i, i + 1)),
+        };
+        figures.push(
+            (0..DISC_SIDES)
+                .map(|k| {
+                    let t = k as f32 / DISC_SIDES as f32 * std::f32::consts::TAU;
+                    Point2D::new(c.x + r * t.cos(), c.y + r * t.sin())
+                })
+                .collect(),
+        );
+    }
+    for f in &mut figures {
+        if polygon_signed_area(f) < 0.0 {
+            f.reverse();
+        }
+    }
+    figures
+}
+
+fn polygon_signed_area(poly: &[Point2D]) -> f32 {
+    let mut sum = 0.0;
+    for i in 0..poly.len() {
+        let (p, q) = (poly[i], poly[(i + 1) % poly.len()]);
+        sum += p.x * q.y - q.x * p.y;
+    }
+    sum * 0.5
+}
+
 // ─────────────────────── Selection geometry ───────────────────────
 //
 // The Select tool works entirely off a shape's axis-aligned bounding box:
@@ -1369,6 +1453,60 @@ pub fn resize_shape(shape: &mut Shape, from: (f32, f32, f32, f32), to: (f32, f32
 mod tests {
     use super::*;
     use crate::types::{ArrowHead, ArrowStyle, BadgeShape, TextCardStyle, TextFontFamily};
+
+    #[test]
+    fn test_pressure_stroke_figures_share_one_winding_so_they_union() {
+        let pts = [
+            Point2D::new(0.0, 0.0),
+            Point2D::new(40.0, 0.0),
+            Point2D::new(40.0, 40.0),
+            Point2D::new(0.0, 40.0),
+        ];
+        let prs = [0.2, 0.9, 0.5, 1.0];
+        let figs = pressure_stroke_figures(&pts, &prs, 6.0);
+        // 3 segment rectangles + 4 joint discs.
+        assert_eq!(figs.len(), 7);
+        for f in &figs {
+            assert!(
+                polygon_signed_area(f) > 0.0,
+                "every figure must wind the same way"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pressure_stroke_figures_size_follows_pressure() {
+        let pts = [Point2D::new(0.0, 0.0), Point2D::new(100.0, 0.0)];
+        let light = pressure_stroke_figures(&pts, &[0.0, 0.0], 10.0);
+        let heavy = pressure_stroke_figures(&pts, &[1.0, 1.0], 10.0);
+        // The rectangle is first: its height is the stroke's full width.
+        let h = |f: &Vec<Point2D>| {
+            let (lo, hi) = f.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+                (lo.min(p.y), hi.max(p.y))
+            });
+            hi - lo
+        };
+        assert!((h(&light[0]) - 10.0 * pressure_width_factor(0.0)).abs() < 1e-3);
+        assert!((h(&heavy[0]) - 10.0 * pressure_width_factor(1.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn test_pressure_stroke_figures_ignore_bad_input() {
+        let one = [Point2D::new(1.0, 1.0)];
+        assert!(pressure_stroke_figures(&one, &[0.5], 5.0).is_empty());
+        let two = [Point2D::new(0.0, 0.0), Point2D::new(5.0, 0.0)];
+        assert!(pressure_stroke_figures(&two, &[0.5], 5.0).is_empty());
+        // A repeated point has no direction: only its disc is emitted.
+        let dup = [Point2D::new(3.0, 3.0), Point2D::new(3.0, 3.0)];
+        assert_eq!(pressure_stroke_figures(&dup, &[0.5, 0.5], 5.0).len(), 2);
+        let nan = [Point2D::new(f32::NAN, 0.0), Point2D::new(5.0, 0.0)];
+        let figs = pressure_stroke_figures(&nan, &[0.5, 0.5], 5.0);
+        assert!(
+            figs.iter()
+                .flatten()
+                .all(|p| p.x.is_finite() && p.y.is_finite())
+        );
+    }
 
     #[test]
     fn test_normalize_rect() {
