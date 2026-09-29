@@ -1,8 +1,8 @@
 use super::{D2DRenderer, v2};
 use crate::shapes::{
     SELECTION_HANDLE_SIZE, arrow_head_points, arrow_head_size, arrow_shaft, contained_text_origin,
-    normalize_rect, points_to_bezier_segments, pressure_width_factor, sample_curve,
-    selection_handle_points, trim_polyline_end,
+    normalize_rect, points_to_bezier_segments, pressure_stroke_figures, pressure_width_factor,
+    sample_curve, selection_handle_points, trim_polyline_end,
 };
 use crate::types::{
     ArrowHead, ArrowStyle, BadgeShape, ColorPreset, FillMode, LaserRipple, LaserTrailPoint,
@@ -10,7 +10,7 @@ use crate::types::{
 };
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
-    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN,
+    D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_FILL_MODE_WINDING,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
@@ -128,21 +128,36 @@ impl D2DRenderer {
                             };
                             rt.FillEllipse(&dot, &brush);
                         } else if has_pressure {
-                            let stroke_style = self.get_stroke_style(*pattern);
-                            for i in 0..points.len() - 1 {
-                                // Average the endpoints so neighbouring segments
-                                // meet at the same width and the line reads as
-                                // one tapering stroke rather than a staircase.
-                                let f = (pressure_width_factor(pressures[i])
-                                    + pressure_width_factor(pressures[i + 1]))
-                                    * 0.5;
-                                rt.DrawLine(
-                                    v2(points[i].x, points[i].y),
-                                    v2(points[i + 1].x, points[i + 1].y),
-                                    &brush,
-                                    actual_width * f,
-                                    Some(stroke_style),
-                                );
+                            // A committed solid stroke is one cached filled
+                            // shape instead of a DrawLine per segment (25k a
+                            // frame across 50 long strokes). The stroke still
+                            // being drawn changes every frame, and a dashed
+                            // pattern is applied per segment, so both keep the
+                            // segment-by-segment path below.
+                            let cached = if cacheable && *pattern == StrokePattern::Solid {
+                                self.pressure_stroke_geometry(rt, points, pressures, actual_width)
+                            } else {
+                                None
+                            };
+                            if let Some(path) = cached {
+                                rt.FillGeometry(&path, &brush, None);
+                            } else {
+                                let stroke_style = self.get_stroke_style(*pattern);
+                                for i in 0..points.len() - 1 {
+                                    // Average the endpoints so neighbouring segments
+                                    // meet at the same width and the line reads as
+                                    // one tapering stroke rather than a staircase.
+                                    let f = (pressure_width_factor(pressures[i])
+                                        + pressure_width_factor(pressures[i + 1]))
+                                        * 0.5;
+                                    rt.DrawLine(
+                                        v2(points[i].x, points[i].y),
+                                        v2(points[i + 1].x, points[i + 1].y),
+                                        &brush,
+                                        actual_width * f,
+                                        Some(stroke_style),
+                                    );
+                                }
                             }
                         } else if cacheable {
                             // Keyed on the point *values*, not the Vec's address:
@@ -1214,6 +1229,61 @@ impl D2DRenderer {
     /// freehand-stroke or badge/marker entries sharing the same cache): the
     /// curve only actually changes while its handle is being dragged, so
     /// this is a CreatePathGeometry saved on every other frame it's drawn.
+    /// The cached filled outline of a committed pressure stroke; see
+    /// `crate::shapes::pressure_stroke_figures`. Keyed on the point and
+    /// pressure values plus width, with its own discriminant tag.
+    unsafe fn pressure_stroke_geometry(
+        &self,
+        rt: &ID2D1RenderTarget,
+        points: &[Point2D],
+        pressures: &[f32],
+        width: f32,
+    ) -> Option<ID2D1PathGeometry> {
+        unsafe {
+            let key = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                0x9E55_u32.hash(&mut hasher);
+                for (p, pr) in points.iter().zip(pressures) {
+                    p.x.to_bits().hash(&mut hasher);
+                    p.y.to_bits().hash(&mut hasher);
+                    pr.to_bits().hash(&mut hasher);
+                }
+                width.to_bits().hash(&mut hasher);
+                hasher.finish()
+            };
+            let mut cache = self.geometry_cache.borrow_mut();
+            let rt_id = self.rt_key(rt);
+            if cache.0 != rt_id {
+                cache.0 = rt_id;
+                cache.1.clear();
+            }
+            if let Some(p) = cache.1.get(&key) {
+                return Some(p.clone());
+            }
+            let figures = pressure_stroke_figures(points, pressures, width);
+            if figures.is_empty() {
+                return None;
+            }
+            let path = self.factory.CreatePathGeometry().ok()?;
+            let sink = path.Open().ok()?;
+            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+            for fig in &figures {
+                sink.BeginFigure(v2(fig[0].x, fig[0].y), D2D1_FIGURE_BEGIN_FILLED);
+                for pt in &fig[1..] {
+                    sink.AddLine(v2(pt.x, pt.y));
+                }
+                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            }
+            sink.Close().ok()?;
+            if cache.1.len() > GEOMETRY_CACHE_MAX_ENTRIES {
+                cache.1.clear();
+            }
+            cache.1.insert(key, path.clone());
+            Some(path)
+        }
+    }
+
     pub(super) unsafe fn stroke_polyline(
         &self,
         rt: &ID2D1RenderTarget,
