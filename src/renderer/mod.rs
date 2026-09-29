@@ -52,6 +52,19 @@ pub(crate) fn v2(x: f32, y: f32) -> Vector2 {
     Vector2 { X: x, Y: y }
 }
 
+/// Every input the HUD status line's text depends on, discretized to exact
+/// (`Eq`-able) values matching what actually reaches the displayed string -
+/// so equality here really does mean "the text would come out identical".
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HudTextKey {
+    mode: AppMode,
+    tool: DrawTool,
+    stroke_width: u32,
+    zoom_tenths: Option<i32>,
+    spot_diameter: Option<u32>,
+    bg_type: CanvasBackground,
+}
+
 pub struct D2DRenderer {
     pub factory: ID2D1Factory,
     pub dwrite_factory: IDWriteFactory,
@@ -103,6 +116,12 @@ pub struct D2DRenderer {
     /// opacity) is captured at the moment each draw call is issued, so
     /// reusing one brush this way is standard and safe, not a race.
     scratch_brush: RefCell<(usize, Option<ID2D1SolidColorBrush>)>,
+    /// The HUD status line's last-built UTF-16 text plus the discretized
+    /// state it was built from - not device-dependent, so it survives device
+    /// loss. The HUD redraws every frame regardless (it sits over whatever's
+    /// under it), but this skips re-running `format!`/`encode_utf16` on the
+    /// vast majority of frames where nothing it displays actually changed.
+    hud_text_cache: RefCell<Option<(HudTextKey, Vec<u16>)>>,
     /// Finished blur mosaics, keyed by content (background bitmap identity +
     /// rect + block size) rather than shared by size the way this used to
     /// be - see the doc comment at its use in shapes.rs.
@@ -365,6 +384,7 @@ impl D2DRenderer {
                 spotlight_geometry_cache: RefCell::new(None),
                 solid_brush_cache: RefCell::new((0, HashMap::new())),
                 scratch_brush: RefCell::new((0, None)),
+                hud_text_cache: RefCell::new(None),
                 blur_mosaic_cache: RefCell::new((0, HashMap::new())),
                 geometry_cache: RefCell::new((0, HashMap::new())),
                 image_cache: RefCell::new((0, HashMap::new())),

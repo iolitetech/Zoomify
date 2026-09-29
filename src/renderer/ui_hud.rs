@@ -1,4 +1,4 @@
-use super::{D2DRenderer, v2};
+use super::{D2DRenderer, HudTextKey, v2};
 use crate::types::{
     AppMode, CanvasBackground, ColorPreset, DrawTool, FluentToolbarState, SpotlightState,
     ToastNotification,
@@ -197,35 +197,47 @@ impl D2DRenderer {
                 AppMode::Loupe => "🔍 Loupe Magnifier",
             };
 
-            let spot_info = if spotlight.active {
-                format!(" | 🔦 ⌀{}px", (spotlight.radius * 2.0).round() as u32)
-            } else {
-                "".to_string()
+            let spot_diameter = spotlight
+                .active
+                .then(|| (spotlight.radius * 2.0).round() as u32);
+            let zoom_tenths = (mode == AppMode::StaticZoom || mode == AppMode::LiveZoom)
+                .then(|| (zoom_level * 10.0).round() as i32);
+            let key = HudTextKey {
+                mode,
+                tool,
+                stroke_width: stroke_width.round() as u32,
+                zoom_tenths,
+                spot_diameter,
+                bg_type,
             };
 
-            let zoom_info = if mode == AppMode::StaticZoom || mode == AppMode::LiveZoom {
-                format!(" | {:.1}x", zoom_level)
-            } else {
-                "".to_string()
-            };
-
-            let bg_info = match bg_type {
-                CanvasBackground::Transparent => "",
-                CanvasBackground::Whiteboard => " | ⚪ Whiteboard",
-                CanvasBackground::Blackboard => " | ⚫ Blackboard",
-            };
-
-            let text = format!(
-                "{} • {} ({}px){}{}{} • F1: Help",
-                mode_name,
-                tool.name(),
-                stroke_width.round() as u32,
-                zoom_info,
-                spot_info,
-                bg_info
-            );
-
-            let utf16: Vec<u16> = text.encode_utf16().collect();
+            let mut cache = self.hud_text_cache.borrow_mut();
+            if cache.as_ref().map(|(k, _)| *k) != Some(key) {
+                let spot_info = match spot_diameter {
+                    Some(d) => format!(" | 🔦 ⌀{}px", d),
+                    None => String::new(),
+                };
+                let zoom_info = match zoom_tenths {
+                    Some(t) => format!(" | {:.1}x", t as f32 / 10.0),
+                    None => String::new(),
+                };
+                let bg_info = match bg_type {
+                    CanvasBackground::Transparent => "",
+                    CanvasBackground::Whiteboard => " | ⚪ Whiteboard",
+                    CanvasBackground::Blackboard => " | ⚫ Blackboard",
+                };
+                let text = format!(
+                    "{} • {} ({}px){}{}{} • F1: Help",
+                    mode_name,
+                    tool.name(),
+                    key.stroke_width,
+                    zoom_info,
+                    spot_info,
+                    bg_info
+                );
+                *cache = Some((key, text.encode_utf16().collect()));
+            }
+            let utf16 = &cache.as_ref().unwrap().1;
             let text_col = D2D1_COLOR_F {
                 r: 0.9,
                 g: 0.92,
@@ -240,7 +252,7 @@ impl D2DRenderer {
                     bottom: hud_y + hud_h - 4.0,
                 };
                 rt.DrawText(
-                    &utf16,
+                    utf16,
                     &self.text_format_hud,
                     &text_rect,
                     &tbrush,
