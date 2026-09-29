@@ -132,6 +132,9 @@ pub struct D2DRenderer {
     /// just updates its transform, which is the only part that actually
     /// varies as the loupe follows the cursor.
     loupe_brush_cache: RefCell<(usize, usize, Option<ID2D1BitmapBrush>)>,
+    /// The cheat sheet's ~130 static DrawText calls, rendered once into an
+    /// offscreen target (keyed by render target + DPI) and blitted per frame.
+    cheat_sheet_cache: RefCell<Option<(usize, u32, ID2D1BitmapRenderTarget)>>,
     /// `IDWriteTextLayout`s (plus their measured (width, height)), keyed by
     /// content - not by render target: unlike a D2D brush/geometry, a
     /// DirectWrite layout is a CPU-side object with no device dependency, so
@@ -405,6 +408,7 @@ impl D2DRenderer {
                 scratch_brush: RefCell::new((0, None)),
                 hud_text_cache: RefCell::new(None),
                 loupe_brush_cache: RefCell::new((0, 0, None)),
+                cheat_sheet_cache: RefCell::new(None),
                 text_layout_cache: RefCell::new(HashMap::new()),
                 blur_mosaic_cache: RefCell::new((0, HashMap::new())),
                 geometry_cache: RefCell::new((0, HashMap::new())),
@@ -805,6 +809,7 @@ impl D2DRenderer {
             cache.1.clear();
         }
         self.scratch_brush.borrow_mut().1 = None;
+        self.cheat_sheet_cache.borrow_mut().take();
         {
             let mut cache = self.loupe_brush_cache.borrow_mut();
             cache.0 = 0;

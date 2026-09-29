@@ -464,7 +464,84 @@ impl D2DRenderer {
         }
     }
 
+    /// Blit the cached cheat sheet, rendering it into its offscreen target
+    /// first if this render target / DPI has not seen it yet. The content is
+    /// fully static, so this turns ~130 text draws per frame into one bitmap.
     pub(super) unsafe fn render_cheat_sheet_modal(
+        &self,
+        rt: &ID2D1RenderTarget,
+        screen_w: f32,
+        screen_h: f32,
+    ) {
+        use windows::Win32::Graphics::Direct2D::Common::{
+            D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
+        };
+        use windows::Win32::Graphics::Direct2D::{
+            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+        };
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+        use windows::core::Interface;
+
+        const MODAL_W: f32 = 720.0;
+        const MODAL_H: f32 = 660.0;
+        unsafe {
+            let rt_id = rt.as_raw() as usize;
+            let dpi_bits = self.dpi.to_bits();
+            let mut cache = self.cheat_sheet_cache.borrow_mut();
+            let stale = !matches!(&*cache, Some((r, d, _)) if *r == rt_id && *d == dpi_bits);
+            if stale {
+                *cache = None;
+                let scale = self.dpi / 96.0;
+                let px = D2D_SIZE_U {
+                    width: (MODAL_W * scale).ceil() as u32,
+                    height: (MODAL_H * scale).ceil() as u32,
+                };
+                let fmt = D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                };
+                if let Ok(target) = rt.CreateCompatibleRenderTarget(
+                    None,
+                    Some(&px),
+                    Some(&fmt),
+                    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+                ) {
+                    target.SetDpi(self.dpi, self.dpi);
+                    target.BeginDraw();
+                    target.Clear(None);
+                    self.render_cheat_sheet_contents(&target, MODAL_W, MODAL_H);
+                    if target.EndDraw(None, None).is_ok() {
+                        *cache = Some((rt_id, dpi_bits, target));
+                    }
+                }
+            }
+            let Some((_, _, target)) = &*cache else {
+                // Offscreen target unavailable: draw it directly.
+                drop(cache);
+                self.render_cheat_sheet_contents(rt, screen_w, screen_h);
+                return;
+            };
+            let Ok(bitmap) = target.GetBitmap() else {
+                return;
+            };
+            let mx = (screen_w - MODAL_W) / 2.0;
+            let my = (screen_h - MODAL_H) / 2.0;
+            rt.DrawBitmap(
+                &bitmap,
+                Some(&D2D_RECT_F {
+                    left: mx,
+                    top: my,
+                    right: mx + MODAL_W,
+                    bottom: my + MODAL_H,
+                }),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+        }
+    }
+
+    unsafe fn render_cheat_sheet_contents(
         &self,
         rt: &ID2D1RenderTarget,
         screen_w: f32,
