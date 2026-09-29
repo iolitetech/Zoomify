@@ -1954,7 +1954,7 @@ impl OverlayWindow {
 
     /// Drop anything in the selection that is no longer on the canvas.
     fn validate_selection(&mut self) {
-        let live: Vec<ShapeId> = self.shapes.iter().map(|a| a.id).collect();
+        let live: std::collections::HashSet<ShapeId> = self.shapes.iter().map(|a| a.id).collect();
         if let Some(sel) = &mut self.selection {
             sel.ids.retain(|id| live.contains(id));
             if sel.ids.is_empty() {
@@ -2244,9 +2244,10 @@ impl OverlayWindow {
                     .map(|s| s.id)
                     .collect();
                 let mut hits = hits;
+                let mut seen: std::collections::HashSet<ShapeId> = hits.iter().copied().collect();
                 for id in hits.clone() {
                     for f in self.travelling_with(id) {
-                        if !hits.contains(&f) {
+                        if seen.insert(f) {
                             hits.push(f);
                         }
                     }
