@@ -16,7 +16,8 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-    D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DOT,
+    D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_BITMAP_PROPERTIES, D2D1_CAP_STYLE_ROUND,
+    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE, D2D1_DASH_STYLE_DASH, D2D1_DASH_STYLE_DOT,
     D2D1_DASH_STYLE_SOLID, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
     D2D1_LINE_JOIN_ROUND, D2D1_PRESENT_OPTIONS_IMMEDIATELY, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_STROKE_STYLE_PROPERTIES,
@@ -68,6 +69,20 @@ pub(crate) struct HudTextKey {
     zoom_tenths: Option<i32>,
     spot_diameter: Option<u32>,
     bg_type: CanvasBackground,
+}
+
+/// Committed shapes rendered once into an offscreen target, plus everything
+/// that image depends on. Validity is decided by comparing the shapes
+/// themselves against `snapshot`, not by tracking where they get mutated, so
+/// a missed invalidation can only cost speed - never show a stale picture.
+struct SceneLayer {
+    target: ID2D1BitmapRenderTarget,
+    rt_id: usize,
+    dpi_bits: u32,
+    size_bits: (u32, u32),
+    matrix_bits: [u32; 6],
+    blur_bg_id: usize,
+    snapshot: Vec<Annotation>,
 }
 
 pub struct D2DRenderer {
@@ -132,6 +147,13 @@ pub struct D2DRenderer {
     /// just updates its transform, which is the only part that actually
     /// varies as the loupe follows the cursor.
     loupe_brush_cache: RefCell<(usize, usize, Option<ID2D1BitmapBrush>)>,
+    scene_layer: RefCell<Option<SceneLayer>>,
+    /// While the scene layer is being rendered its target is a *compatible*
+    /// child of the window's target, and Direct2D shares brushes and bitmaps
+    /// across such a family. Caches keyed by render target use this instead
+    /// of the child's own pointer so they are not flushed on every layer
+    /// render (and again on the next on-screen frame).
+    cache_rt_override: Cell<usize>,
     /// The cheat sheet's ~130 static DrawText calls, rendered once into an
     /// offscreen target (keyed by render target + DPI) and blitted per frame.
     cheat_sheet_cache: RefCell<Option<(usize, u32, ID2D1BitmapRenderTarget)>>,
@@ -408,6 +430,8 @@ impl D2DRenderer {
                 scratch_brush: RefCell::new((0, None)),
                 hud_text_cache: RefCell::new(None),
                 loupe_brush_cache: RefCell::new((0, 0, None)),
+                scene_layer: RefCell::new(None),
+                cache_rt_override: Cell::new(0),
                 cheat_sheet_cache: RefCell::new(None),
                 text_layout_cache: RefCell::new(HashMap::new()),
                 blur_mosaic_cache: RefCell::new((0, HashMap::new())),
@@ -426,6 +450,159 @@ impl D2DRenderer {
     ///
     /// Every shape used to allocate its brushes from scratch on every frame,
     /// which is a COM allocation per shape per color at 60 Hz.
+    /// Identity used to key the device-resource caches; see
+    /// `cache_rt_override`.
+    #[inline]
+    pub(crate) fn rt_key(&self, rt: &ID2D1RenderTarget) -> usize {
+        match self.cache_rt_override.get() {
+            0 => rt.as_raw() as usize,
+            id => id,
+        }
+    }
+
+    /// Draw the committed shapes through the cached scene layer, refreshing it
+    /// first if anything it depends on changed. Returns false when there is
+    /// nothing to cache or the layer could not be built, in which case the
+    /// caller draws the shapes directly.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_scene_layer(
+        &self,
+        rt: &ID2D1RenderTarget,
+        width: f32,
+        height: f32,
+        canvas_matrix: &Matrix3x2,
+        identity: &Matrix3x2,
+        shapes: &[Annotation],
+        blur_bg: Option<&ID2D1Bitmap>,
+    ) -> bool {
+        if shapes.is_empty() {
+            return false;
+        }
+        let rt_id = rt.as_raw() as usize;
+        let dpi_bits = self.dpi.to_bits();
+        let size_bits = (width.to_bits(), height.to_bits());
+        let matrix_bits = [
+            canvas_matrix.M11.to_bits(),
+            canvas_matrix.M12.to_bits(),
+            canvas_matrix.M21.to_bits(),
+            canvas_matrix.M22.to_bits(),
+            canvas_matrix.M31.to_bits(),
+            canvas_matrix.M32.to_bits(),
+        ];
+        let blur_bg_id = blur_bg.map_or(0, |b| b.as_raw() as usize);
+
+        unsafe {
+            let mut slot = self.scene_layer.borrow_mut();
+            let same_target = matches!(&*slot, Some(l)
+                if l.rt_id == rt_id && l.dpi_bits == dpi_bits && l.size_bits == size_bits);
+            if !same_target {
+                *slot = None;
+                let scale = self.dpi / 96.0;
+                let px = D2D_SIZE_U {
+                    width: (width * scale).ceil().max(1.0) as u32,
+                    height: (height * scale).ceil().max(1.0) as u32,
+                };
+                let fmt = D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                };
+                let Ok(target) = rt.CreateCompatibleRenderTarget(
+                    None,
+                    Some(&px),
+                    Some(&fmt),
+                    D2D1_COMPATIBLE_RENDER_TARGET_OPTIONS_NONE,
+                ) else {
+                    return false;
+                };
+                target.SetDpi(self.dpi, self.dpi);
+                target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                *slot = Some(SceneLayer {
+                    target,
+                    rt_id,
+                    dpi_bits,
+                    size_bits,
+                    matrix_bits: [0; 6],
+                    blur_bg_id: usize::MAX,
+                    snapshot: Vec::new(),
+                });
+            }
+            let Some(layer) = slot.as_mut() else {
+                return false;
+            };
+
+            let valid = layer.matrix_bits == matrix_bits
+                && layer.blur_bg_id == blur_bg_id
+                && layer.snapshot.as_slice() == shapes;
+            if !valid {
+                let target = layer.target.clone();
+                self.cache_rt_override.set(rt_id);
+                target.BeginDraw();
+                target.Clear(None);
+                target.SetTransform(canvas_matrix);
+                self.draw_committed_shapes(&target, shapes, blur_bg);
+                let ended = target.EndDraw(None, None);
+                self.cache_rt_override.set(0);
+                let ok = ended.is_ok();
+                self.note_draw_result(ended);
+                if !ok {
+                    *slot = None;
+                    return false;
+                }
+                layer.matrix_bits = matrix_bits;
+                layer.blur_bg_id = blur_bg_id;
+                layer.snapshot = shapes.to_vec();
+            }
+
+            let Ok(bitmap) = layer.target.GetBitmap() else {
+                return false;
+            };
+            rt.SetTransform(identity);
+            rt.DrawBitmap(
+                &bitmap,
+                Some(&D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: width,
+                    bottom: height,
+                }),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                None,
+            );
+            rt.SetTransform(canvas_matrix);
+            true
+        }
+    }
+
+    /// Every committed shape, then the labels that ride on containers, in the
+    /// order they stack on screen.
+    unsafe fn draw_committed_shapes(
+        &self,
+        rt: &ID2D1RenderTarget,
+        shapes: &[Annotation],
+        blur_bg: Option<&ID2D1Bitmap>,
+    ) {
+        unsafe {
+            for a in shapes {
+                // A label is drawn from its container's bounds, so it has
+                // to wait until the container is on screen.
+                if a.container.is_some() {
+                    continue;
+                }
+                self.render_single_shape(rt, &a.shape, blur_bg, a.opacity, true);
+            }
+            for a in shapes {
+                if let Some(cid) = a.container
+                    && let Some(owner) = shapes.iter().find(|o| o.id == cid)
+                {
+                    let bounds = crate::shapes::shape_bounds(&owner.shape);
+                    let rides = crate::shapes::label_rides_on_shape(&owner.shape);
+                    self.render_contained_text(rt, &a.shape, bounds, rides, a.opacity);
+                }
+            }
+        }
+    }
+
     pub(crate) fn solid_brush(
         &self,
         rt: &ID2D1RenderTarget,
@@ -438,7 +615,7 @@ impl D2DRenderer {
         let key =
             (chan(color.r) << 24) | (chan(color.g) << 16) | (chan(color.b) << 8) | chan(color.a);
 
-        let rt_id = rt.as_raw() as usize;
+        let rt_id = self.rt_key(rt);
         let mut cache = self.solid_brush_cache.borrow_mut();
         if cache.0 != rt_id {
             // Different render target: its brushes are not usable here.
@@ -466,7 +643,7 @@ impl D2DRenderer {
         rt: &ID2D1RenderTarget,
         color: &D2D1_COLOR_F,
     ) -> Option<ID2D1SolidColorBrush> {
-        let rt_id = rt.as_raw() as usize;
+        let rt_id = self.rt_key(rt);
         let mut slot = self.scratch_brush.borrow_mut();
         if slot.0 != rt_id || slot.1.is_none() {
             slot.0 = rt_id;
@@ -528,7 +705,7 @@ impl D2DRenderer {
         const IMAGE_CACHE_MAX_ENTRIES: usize = 64;
 
         unsafe {
-            let target_key = rt.as_raw() as usize;
+            let target_key = self.rt_key(rt);
             let mut cache = self.image_cache.borrow_mut();
             if cache.0 != target_key {
                 cache.0 = target_key;
@@ -810,6 +987,7 @@ impl D2DRenderer {
         }
         self.scratch_brush.borrow_mut().1 = None;
         self.cheat_sheet_cache.borrow_mut().take();
+        self.scene_layer.borrow_mut().take();
         {
             let mut cache = self.loupe_brush_cache.borrow_mut();
             cache.0 = 0;
@@ -917,6 +1095,9 @@ impl D2DRenderer {
         marquee_screen: Option<(f32, f32, f32, f32)>,
         selection_endpoints: Option<((f32, f32), (f32, f32))>,
         selection_bow: Option<(f32, f32)>,
+        // True while a gesture is rewriting committed shapes every frame (a
+        // select-drag): caching them then would rebuild the layer per frame.
+        scene_live: bool,
     ) {
         let rt = match &self.render_target {
             Some(rt) => rt,
@@ -1032,22 +1213,18 @@ impl D2DRenderer {
                 } else {
                     None
                 };
-                for a in shapes {
-                    // A label is drawn from its container's bounds, so it has
-                    // to wait until the container is on screen.
-                    if a.container.is_some() {
-                        continue;
-                    }
-                    self.render_single_shape(rt, &a.shape, blur_bg, a.opacity, true);
-                }
-                for a in shapes {
-                    if let Some(cid) = a.container
-                        && let Some(owner) = shapes.iter().find(|o| o.id == cid)
-                    {
-                        let bounds = crate::shapes::shape_bounds(&owner.shape);
-                        let rides = crate::shapes::label_rides_on_shape(&owner.shape);
-                        self.render_contained_text(rt, &a.shape, bounds, rides, a.opacity);
-                    }
+                let from_layer = !scene_live
+                    && self.draw_scene_layer(
+                        rt,
+                        width,
+                        height,
+                        &canvas_matrix,
+                        &identity,
+                        shapes,
+                        blur_bg,
+                    );
+                if !from_layer {
+                    self.draw_committed_shapes(rt, shapes, blur_bg);
                 }
 
                 if let Some(shape) = active_shape {

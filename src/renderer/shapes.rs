@@ -162,7 +162,7 @@ impl D2DRenderer {
                                 hasher.finish()
                             };
                             let mut cache = self.geometry_cache.borrow_mut();
-                            let rt_id = rt.as_raw() as usize;
+                            let rt_id = self.rt_key(rt);
                             if cache.0 != rt_id {
                                 cache.0 = rt_id;
                                 cache.1.clear();
@@ -713,7 +713,7 @@ impl D2DRenderer {
                                 hasher.finish()
                             };
                             let mut cache = self.geometry_cache.borrow_mut();
-                            let rt_id = rt.as_raw() as usize;
+                            let rt_id = self.rt_key(rt);
                             if cache.0 != rt_id {
                                 cache.0 = rt_id;
                                 cache.1.clear();
@@ -891,7 +891,7 @@ impl D2DRenderer {
                             hasher.finish()
                         };
 
-                        let rt_id = rt.as_raw() as usize;
+                        let rt_id = self.rt_key(rt);
                         let mut cache = self.blur_mosaic_cache.borrow_mut();
                         if cache.0 != rt_id {
                             cache.0 = rt_id;
@@ -1130,7 +1130,7 @@ impl D2DRenderer {
                         hasher.finish()
                     };
                     let mut cache = self.geometry_cache.borrow_mut();
-                    let rt_id = rt.as_raw() as usize;
+                    let rt_id = self.rt_key(rt);
                     if cache.0 != rt_id {
                         cache.0 = rt_id;
                         cache.1.clear();
@@ -1238,7 +1238,7 @@ impl D2DRenderer {
                 hasher.finish()
             };
             let mut cache = self.geometry_cache.borrow_mut();
-            let rt_id = rt.as_raw() as usize;
+            let rt_id = self.rt_key(rt);
             if cache.0 != rt_id {
                 cache.0 = rt_id;
                 cache.1.clear();

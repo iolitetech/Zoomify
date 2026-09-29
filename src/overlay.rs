@@ -4573,6 +4573,7 @@ impl OverlayWindow {
                         } else {
                             None
                         },
+                        this.selection.as_ref().is_some_and(|s| s.drag.is_some()),
                     );
 
                     let _ = windows::Win32::Graphics::Gdi::EndPaint(hwnd, &ps);

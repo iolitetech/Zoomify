@@ -7,7 +7,6 @@ use windows::Win32::Graphics::Direct2D::Common::{
 use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_ROUNDED_RECT, ID2D1RenderTarget,
 };
-use windows_core::Interface;
 
 /// Same cap as `shapes::GEOMETRY_CACHE_MAX_ENTRIES` (kept as its own constant
 /// rather than importing a private sibling item): both clear the same shared
@@ -637,7 +636,7 @@ impl D2DRenderer {
                         hasher.finish()
                     };
                     let mut cache = self.geometry_cache.borrow_mut();
-                    let rt_id = rt.as_raw() as usize;
+                    let rt_id = self.rt_key(rt);
                     if cache.0 != rt_id {
                         cache.0 = rt_id;
                         cache.1.clear();
@@ -861,7 +860,7 @@ impl D2DRenderer {
                         hasher.finish()
                     };
                     let mut cache = self.geometry_cache.borrow_mut();
-                    let rt_id = rt.as_raw() as usize;
+                    let rt_id = self.rt_key(rt);
                     if cache.0 != rt_id {
                         cache.0 = rt_id;
                         cache.1.clear();
