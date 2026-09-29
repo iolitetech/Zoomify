@@ -1379,15 +1379,17 @@ impl D2DRenderer {
                         }
 
                         if include_spotlight && spotlight.active {
-                            let screen_pt =
-                                zoom_state.canvas_to_screen(Point2D::new(spotlight.x, spotlight.y));
+                            // spotlight.x/y are already screen-space DIPs (see the
+                            // on-screen render_frame path), not canvas coordinates -
+                            // converting them again here shifted the exported
+                            // spotlight whenever the view was zoomed or panned.
                             dc_rt.SetTransform(&identity);
                             self.render_spotlight_mask(
                                 &dc_rt,
                                 logical_w,
                                 logical_h,
-                                screen_pt.x,
-                                screen_pt.y,
+                                spotlight.x,
+                                spotlight.y,
                                 spotlight.radius,
                                 spotlight.dim_opacity,
                                 spotlight.pinned,
