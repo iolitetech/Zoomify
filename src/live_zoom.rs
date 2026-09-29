@@ -2,7 +2,7 @@
 
 use windows::Win32::Foundation::{FreeLibrary, HMODULE, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_CONTROL};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetCursorPos, GetSystemMetrics, HHOOK, MSLLHOOKSTRUCT, SM_CXSCREEN,
     SM_CYSCREEN, SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WM_MOUSEWHEEL,
@@ -41,7 +41,7 @@ unsafe extern "system" fn live_zoom_mouse_hook(
     unsafe {
         if code >= 0 && wparam.0 as u32 == WM_MOUSEWHEEL && LIVE_ZOOM_ACTIVE.load(Ordering::Acquire)
         {
-            let is_ctrl = (GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
+            let is_ctrl = (GetAsyncKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000) != 0;
             if is_ctrl {
                 let hook_struct = *(lparam.0 as *const MSLLHOOKSTRUCT);
                 let notches = ((hook_struct.mouseData >> 16) as i16 as f32) / 120.0;

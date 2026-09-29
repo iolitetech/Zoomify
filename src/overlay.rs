@@ -21,8 +21,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterClassExW, SW_HIDE, SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CHAR, WM_KEYDOWN, WM_LBUTTONDBLCLK,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
-    WM_PAINT, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_PAINT, WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERUP, WM_POINTERUPDATE,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, Result, w};
 
@@ -1064,6 +1065,7 @@ impl OverlayWindow {
         self.loupe.active = false;
         self.loupe.pinned = false;
         self.is_drawing = false;
+        self.pen_active = false;
         self.active_shape = None;
         self.selection = None;
         self.show_cheat_sheet = false;
@@ -1094,10 +1096,37 @@ impl OverlayWindow {
     pub fn refresh_monitors(&mut self) {
         self.available_monitors = crate::monitor::MonitorManager::enumerate_monitors();
         self.toolbar.monitor_count = self.available_monitors.len();
-        if self.current_monitor_index >= self.available_monitors.len() {
-            self.current_monitor_index = 0;
+        // The list is re-sorted on every enumeration, so the old index can now
+        // name a different screen (or none). Find the monitor we were on by
+        // identity; if it is gone, fall back to the primary rather than
+        // leaving the overlay bound to a screen that no longer exists.
+        let old = self.current_monitor.clone();
+        let idx = self
+            .available_monitors
+            .iter()
+            .position(|m| m.hmonitor == old.hmonitor)
+            .or_else(|| {
+                self.available_monitors
+                    .iter()
+                    .position(|m| m.x == old.x && m.y == old.y)
+            })
+            .or_else(|| self.available_monitors.iter().position(|m| m.is_primary))
+            .unwrap_or(0);
+        if idx >= self.available_monitors.len() {
+            return;
         }
-        if let Some(mon) = self.available_monitors.get(self.current_monitor_index) {
+        self.current_monitor_index = idx;
+        self.toolbar.current_monitor_index = idx;
+        let mon = &self.available_monitors[idx];
+        let moved = mon.x != self.screen_x
+            || mon.y != self.screen_y
+            || mon.width != self.screen_width
+            || mon.height != self.screen_height;
+        if moved && self.mode != AppMode::Idle {
+            // set_active_monitor re-binds the window, drops the stale capture
+            // and resizes the renderer.
+            self.set_active_monitor(idx);
+        } else {
             self.current_monitor = mon.clone();
         }
     }
@@ -4375,6 +4404,22 @@ impl OverlayWindow {
             // recorded on the side. Handling them here (rather than letting
             // DefWindowProc promote them) also stops each contact arriving
             // twice, once as a pointer and once as a synthetic mouse click.
+            // The pen was cancelled or its capture stolen (palm rejection, another
+            // window grabbing input) without a matching WM_POINTERUP: with
+            // `pen_active` left set, the bystander rule below would swallow every
+            // mouse event from then on. Abandon any stroke it was drawing too.
+            if msg == WM_POINTERCAPTURECHANGED {
+                if this.pen_active {
+                    this.pen_active = false;
+                    if this.is_drawing {
+                        this.is_drawing = false;
+                        this.active_shape = None;
+                        this.request_repaint();
+                    }
+                }
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+
             let (msg, lparam, from_pointer) = match msg {
                 WM_POINTERDOWN | WM_POINTERUPDATE | WM_POINTERUP => {
                     let Some(sample) = pointer_sample(hwnd, wparam) else {
