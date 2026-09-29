@@ -1,0 +1,71 @@
+[package]
+name = "zoomify"
+version = "0.1.0-beta.1"
+edition = "2024"
+rust-version = "1.88"
+description = "Windows screen zoom, annotation, spotlight and presentation-timer overlay"
+license = "MIT"
+repository = "https://github.com/iolitetech/Zoomify"
+homepage = "https://github.com/iolitetech/Zoomify"
+readme = "README.md"
+keywords = ["screen", "zoom", "annotation", "presentation", "windows"]
+categories = ["graphics", "os::windows-apis"]
+exclude = [".github/", "assets/", "cliff.toml", "BUGFIX-ROADMAP.md", "ROADMAP.md"]
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc"]
+
+[dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_Controls",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_System_WinRT_Direct3D11",
+    "Graphics_Capture",
+    "Graphics_DirectX_Direct3D11",
+    "Foundation",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_HiDpi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_System_Registry",
+    "Win32_Security",
+] }
+windows-core = "0.62"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+windows-numerics = "0.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+# The geometry/pixel-copy loops throughout the renderer and capture paths
+# are painfully slow at the default opt-level 0 - a debug build otherwise
+# stutters doing the same per-frame work release handles instantly.
+opt-level = 1

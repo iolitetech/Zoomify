@@ -1,0 +1,139 @@
+name: Publish Release
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.2.0), or major / minor / patch to bump"
+        required: true
+        type: string
+
+jobs:
+  release:
+    name: Prepare and Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      # Pushes made with the default GITHUB_TOKEN do not trigger other workflows,
+      # so the version commit and tag need a personal access token for
+      # build-binaries.yml to fire on the tag.
+      - name: Require release PAT
+        env:
+          RELEASE_GITHUB_TOKEN: ${{ secrets.RELEASE_GITHUB_TOKEN }}
+        run: |
+          if [ -z "$RELEASE_GITHUB_TOKEN" ]; then
+            echo "::error::RELEASE_GITHUB_TOKEN is required so version commits and tags trigger build-binaries."
+            exit 1
+          fi
+
+      - name: Verify release branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/master" ]; then
+            echo "::error::Run publish release from master (current branch: ${{ github.ref_name }})."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_GITHUB_TOKEN }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-edit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-edit
+
+      - name: Bump Version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          case "$INPUT_VERSION" in
+            major|minor|patch) cargo set-version --bump "$INPUT_VERSION" ;;
+            *)
+              if ! echo "$INPUT_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$'; then
+                echo "::error::'$INPUT_VERSION' is not major, minor, patch or a semver version."
+                exit 1
+              fi
+              cargo set-version "$INPUT_VERSION"
+              ;;
+          esac
+          # Refresh Cargo.lock for the new version without compiling: this crate
+          # is Windows-only, and this job runs on Linux.
+          cargo update --workspace
+          NEW_VERSION=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          echo "NEW_VERSION=${NEW_VERSION}" >> "$GITHUB_ENV"
+          echo "version=${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --tag v${{ env.NEW_VERSION }}
+        env:
+          OUTPUT: CHANGELOG.md
+
+      - name: Commit, Tag, and Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          git commit -m "chore(release): prepare for v${{ env.NEW_VERSION }}" || echo "No changes to commit"
+          git tag v${{ env.NEW_VERSION }} || echo "Tag may already exist"
+          git push origin "HEAD:${{ github.ref_name }}"
+          git push origin "v${{ env.NEW_VERSION }}"
+
+      - name: Generate Release Notes
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.NEW_VERSION }}
+          name: v${{ env.NEW_VERSION }}
+          body_path: RELEASE_NOTES.md
+
+  crates-io:
+    name: Publish to crates.io
+    needs: release
+    # Zoomify only builds on Windows, and `cargo publish` compiles the crate to
+    # verify it, so this runs on a Windows runner.
+    runs-on: windows-latest
+    steps:
+      - name: Require crates.io token
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is required to publish to crates.io."
+            exit 1
+          fi
+
+      - name: Checkout the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Publish to Crates.io
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
