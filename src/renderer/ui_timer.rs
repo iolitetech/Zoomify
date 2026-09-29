@@ -420,8 +420,8 @@ impl D2DRenderer {
                 bottom: cy - 180.0,
             };
             // get_text_format() is already centered.
-            if let Ok(t_fmt) = self.get_text_format(13.0) {
-                if let Some(t_brush) = self.solid_brush(
+            if let Ok(t_fmt) = self.get_text_format(13.0)
+                && let Some(t_brush) = self.solid_brush(
                     rt,
                     &D2D1_COLOR_F {
                         r: 0.65,
@@ -429,16 +429,16 @@ impl D2DRenderer {
                         b: 0.85,
                         a: 0.85,
                     },
-                ) {
-                    rt.DrawText(
-                        &title_utf16,
-                        &t_fmt,
-                        &title_rect,
-                        &t_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                }
+                )
+            {
+                rt.DrawText(
+                    &title_utf16,
+                    &t_fmt,
+                    &title_rect,
+                    &t_brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                );
             }
 
             // Top-Right Close Button (✕)
@@ -747,17 +747,17 @@ impl D2DRenderer {
                 }
             };
             // get_text_format() is already centered.
-            if let Ok(t_fmt) = self.get_text_format(52.0) {
-                if let Some(tbrush) = self.solid_brush(rt, &text_col) {
-                    rt.DrawText(
-                        &time_utf16,
-                        &t_fmt,
-                        &time_rect,
-                        &tbrush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                }
+            if let Ok(t_fmt) = self.get_text_format(52.0)
+                && let Some(tbrush) = self.solid_brush(rt, &text_col)
+            {
+                rt.DrawText(
+                    &time_utf16,
+                    &t_fmt,
+                    &time_rect,
+                    &tbrush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                );
             }
 
             // Subtitle label below digits
@@ -776,8 +776,8 @@ impl D2DRenderer {
                 bottom: cy + 42.0,
             };
             // get_text_format() is already centered.
-            if let Ok(s_fmt) = self.get_text_format(11.0) {
-                if let Some(st_brush) = self.solid_brush(
+            if let Ok(s_fmt) = self.get_text_format(11.0)
+                && let Some(st_brush) = self.solid_brush(
                     rt,
                     &D2D1_COLOR_F {
                         r: 0.65,
@@ -785,16 +785,16 @@ impl D2DRenderer {
                         b: 0.85,
                         a: 0.75,
                     },
-                ) {
-                    rt.DrawText(
-                        &sub_label_utf16,
-                        &s_fmt,
-                        &sub_rect,
-                        &st_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                }
+                )
+            {
+                rt.DrawText(
+                    &sub_label_utf16,
+                    &s_fmt,
+                    &sub_rect,
+                    &st_brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                );
             }
 
             // 4. Modern Action Controls: [-1m] [⟲] [ Hero Play/Pause ] [+1m] [🗗]
@@ -1094,17 +1094,17 @@ impl D2DRenderer {
                 }
             };
             // get_text_format() is already centered.
-            if let Ok(s_fmt) = self.get_text_format(12.0) {
-                if let Some(sbrush) = self.solid_brush(rt, &sub_col) {
-                    rt.DrawText(
-                        &sub_utf16,
-                        &s_fmt,
-                        &sub_rect,
-                        &sbrush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                }
+            if let Ok(s_fmt) = self.get_text_format(12.0)
+                && let Some(sbrush) = self.solid_brush(rt, &sub_col)
+            {
+                rt.DrawText(
+                    &sub_utf16,
+                    &s_fmt,
+                    &sub_rect,
+                    &sbrush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                );
             }
         }
     }

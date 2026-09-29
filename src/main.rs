@@ -493,10 +493,10 @@ unsafe extern "system" fn tray_wnd_proc(
             }
 
             windows::Win32::UI::WindowsAndMessaging::WM_ENDSESSION => {
-                if wparam.0 != 0 {
-                    if let Ok(mut overlay) = ctx.overlay.try_borrow_mut() {
-                        overlay.exit_overlay();
-                    }
+                if wparam.0 != 0
+                    && let Ok(mut overlay) = ctx.overlay.try_borrow_mut()
+                {
+                    overlay.exit_overlay();
                 }
                 LRESULT(0)
             }

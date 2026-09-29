@@ -2619,6 +2619,186 @@ pub fn compute_toolbar_layout(
     (bar_rect, items, grip_rect, separators)
 }
 
+/// The property controls for one kind of shape.
+///
+/// Shared, so the Select tool can borrow whichever set matches what is
+/// actually selected instead of showing the last tool used.
+fn property_groups(tool: DrawTool) -> Vec<Vec<(FluentAction, f32)>> {
+    let mut groups: Vec<Vec<(FluentAction, f32)>> = Vec::with_capacity(4);
+    match tool {
+        // Everything the Select tool can do to what is already on the canvas.
+        // These act on the selection rather than setting a default for the
+        // next shape, which is what the other sub-bars do.
+        DrawTool::Rectangle | DrawTool::RoundedRectangle | DrawTool::Ellipse => {
+            groups.push(vec![
+                (FluentAction::SetStrokeWidth(2.0), 30.0),
+                (FluentAction::SetStrokeWidth(4.0), 30.0),
+                (FluentAction::SetStrokeWidth(8.0), 30.0),
+                (FluentAction::SetStrokeWidth(14.0), 34.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetFillMode(FillMode::None), 58.0),
+                (FluentAction::SetFillMode(FillMode::Tinted), 42.0),
+                (FluentAction::SetFillMode(FillMode::Solid), 46.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetStrokePattern(StrokePattern::Solid), 32.0),
+                (FluentAction::SetStrokePattern(StrokePattern::Dashed), 34.0),
+                (FluentAction::SetStrokePattern(StrokePattern::Dotted), 34.0),
+            ]);
+        }
+        DrawTool::Line => {
+            groups.push(vec![
+                (FluentAction::SetStrokeWidth(2.0), 30.0),
+                (FluentAction::SetStrokeWidth(4.0), 30.0),
+                (FluentAction::SetStrokeWidth(8.0), 30.0),
+                (FluentAction::SetStrokeWidth(14.0), 34.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetStrokePattern(StrokePattern::Solid), 32.0),
+                (FluentAction::SetStrokePattern(StrokePattern::Dashed), 34.0),
+                (FluentAction::SetStrokePattern(StrokePattern::Dotted), 34.0),
+            ]);
+        }
+        DrawTool::Arrow => {
+            groups.push(vec![
+                (FluentAction::SetStrokeWidth(2.0), 30.0),
+                (FluentAction::SetStrokeWidth(4.0), 30.0),
+                (FluentAction::SetStrokeWidth(8.0), 30.0),
+                (FluentAction::SetStrokeWidth(14.0), 34.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetArrowStyle(ArrowStyle::Single), 36.0),
+                (FluentAction::SetArrowStyle(ArrowStyle::Double), 42.0),
+                (FluentAction::SetArrowStyle(ArrowStyle::Dimension), 44.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetArrowHead(ArrowHead::Triangle), 30.0),
+                (FluentAction::SetArrowHead(ArrowHead::Open), 30.0),
+                (FluentAction::SetArrowHead(ArrowHead::Circle), 30.0),
+                (FluentAction::SetArrowHead(ArrowHead::Diamond), 30.0),
+                (FluentAction::SetArrowHead(ArrowHead::Bar), 30.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetStrokePattern(StrokePattern::Solid), 32.0),
+                (FluentAction::SetStrokePattern(StrokePattern::Dashed), 34.0),
+                (FluentAction::SetStrokePattern(StrokePattern::Dotted), 34.0),
+            ]);
+        }
+        DrawTool::StepBadge => {
+            groups.push(vec![
+                (FluentAction::SetBadgeSize(BadgeSize::Small), 30.0),
+                (FluentAction::SetBadgeSize(BadgeSize::Medium), 30.0),
+                (FluentAction::SetBadgeSize(BadgeSize::Large), 30.0),
+                (FluentAction::SetBadgeSize(BadgeSize::ExtraLarge), 34.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetBadgeShape(BadgeShape::Circle), 32.0),
+                (FluentAction::SetBadgeShape(BadgeShape::Square), 32.0),
+                (FluentAction::SetBadgeShape(BadgeShape::Hexagon), 32.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetFillMode(FillMode::None), 40.0),
+                (FluentAction::SetFillMode(FillMode::Tinted), 40.0),
+                (FluentAction::SetFillMode(FillMode::Solid), 40.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetStrokeWidth(2.0), 28.0),
+                (FluentAction::SetStrokeWidth(4.0), 28.0),
+                (FluentAction::SetStrokeWidth(6.0), 28.0),
+            ]);
+            groups.push(vec![(FluentAction::ResetBadgeCounter, 54.0)]);
+        }
+        DrawTool::Pen | DrawTool::Highlighter => {
+            groups.push(vec![
+                (FluentAction::SetStrokeWidth(2.0), 28.0),
+                (FluentAction::SetStrokeWidth(4.0), 28.0),
+                (FluentAction::SetStrokeWidth(8.0), 28.0),
+                (FluentAction::SetStrokeWidth(14.0), 28.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetStrokePattern(StrokePattern::Solid), 32.0),
+                (FluentAction::SetStrokePattern(StrokePattern::Dashed), 32.0),
+            ]);
+        }
+        DrawTool::Text => {
+            groups.push(vec![
+                (FluentAction::SetFontSize(14.0), 34.0),
+                (FluentAction::SetFontSize(20.0), 34.0),
+                (FluentAction::SetFontSize(28.0), 34.0),
+                (FluentAction::SetFontSize(38.0), 36.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::ToggleBold, 30.0),
+                (FluentAction::ToggleItalic, 30.0),
+            ]);
+            groups.push(vec![
+                (
+                    FluentAction::SetTextCardStyle(TextCardStyle::Transparent),
+                    44.0,
+                ),
+                (FluentAction::SetTextCardStyle(TextCardStyle::Badge), 48.0),
+                (FluentAction::SetTextCardStyle(TextCardStyle::Solid), 46.0),
+            ]);
+            groups.push(vec![
+                (FluentAction::SetFontFamily(TextFontFamily::SegoeUI), 42.0),
+                (
+                    FluentAction::SetFontFamily(TextFontFamily::CascadiaCode),
+                    46.0,
+                ),
+            ]);
+        }
+        DrawTool::Blur => {
+            groups.push(vec![
+                (FluentAction::SetStrokeWidth(8.0), 38.0),
+                (FluentAction::SetStrokeWidth(14.0), 44.0),
+                (FluentAction::SetStrokeWidth(22.0), 44.0),
+                (FluentAction::SetStrokeWidth(32.0), 44.0),
+            ]);
+        }
+        _ => {}
+    }
+    groups
+}
+
+/// The commands that only make sense on something already drawn.
+///
+/// Unlike a property control, none of these has a "default for the next
+/// shape" meaning: you cannot pre-set *align*.
+fn select_command_groups() -> Vec<Vec<(FluentAction, f32)>> {
+    let groups: Vec<Vec<(FluentAction, f32)>> = vec![
+        vec![
+            (FluentAction::Align(AlignTo::Left), 30.0),
+            (FluentAction::Align(AlignTo::HCentre), 30.0),
+            (FluentAction::Align(AlignTo::Right), 30.0),
+            (FluentAction::Align(AlignTo::Top), 30.0),
+            (FluentAction::Align(AlignTo::VCentre), 30.0),
+            (FluentAction::Align(AlignTo::Bottom), 30.0),
+        ],
+        vec![
+            (FluentAction::Distribute(true), 30.0),
+            (FluentAction::Distribute(false), 30.0),
+        ],
+        vec![
+            (FluentAction::Restack(false), 30.0),
+            (FluentAction::Restack(true), 30.0),
+        ],
+        vec![
+            (FluentAction::SetGroup(true), 30.0),
+            (FluentAction::SetGroup(false), 30.0),
+        ],
+        vec![
+            (FluentAction::AdjustOpacity(-0.1), 30.0),
+            (FluentAction::AdjustOpacity(0.1), 30.0),
+        ],
+        vec![
+            (FluentAction::Duplicate, 30.0),
+            (FluentAction::DeleteSelection, 30.0),
+        ],
+    ];
+    groups
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3858,184 +4038,4 @@ mod tests {
         assert_eq!(w, 0.0);
         assert!(h > 0.0);
     }
-}
-
-/// The property controls for one kind of shape.
-///
-/// Shared, so the Select tool can borrow whichever set matches what is
-/// actually selected instead of showing the last tool used.
-fn property_groups(tool: DrawTool) -> Vec<Vec<(FluentAction, f32)>> {
-    let mut groups: Vec<Vec<(FluentAction, f32)>> = Vec::with_capacity(4);
-    match tool {
-        // Everything the Select tool can do to what is already on the canvas.
-        // These act on the selection rather than setting a default for the
-        // next shape, which is what the other sub-bars do.
-        DrawTool::Rectangle | DrawTool::RoundedRectangle | DrawTool::Ellipse => {
-            groups.push(vec![
-                (FluentAction::SetStrokeWidth(2.0), 30.0),
-                (FluentAction::SetStrokeWidth(4.0), 30.0),
-                (FluentAction::SetStrokeWidth(8.0), 30.0),
-                (FluentAction::SetStrokeWidth(14.0), 34.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetFillMode(FillMode::None), 58.0),
-                (FluentAction::SetFillMode(FillMode::Tinted), 42.0),
-                (FluentAction::SetFillMode(FillMode::Solid), 46.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetStrokePattern(StrokePattern::Solid), 32.0),
-                (FluentAction::SetStrokePattern(StrokePattern::Dashed), 34.0),
-                (FluentAction::SetStrokePattern(StrokePattern::Dotted), 34.0),
-            ]);
-        }
-        DrawTool::Line => {
-            groups.push(vec![
-                (FluentAction::SetStrokeWidth(2.0), 30.0),
-                (FluentAction::SetStrokeWidth(4.0), 30.0),
-                (FluentAction::SetStrokeWidth(8.0), 30.0),
-                (FluentAction::SetStrokeWidth(14.0), 34.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetStrokePattern(StrokePattern::Solid), 32.0),
-                (FluentAction::SetStrokePattern(StrokePattern::Dashed), 34.0),
-                (FluentAction::SetStrokePattern(StrokePattern::Dotted), 34.0),
-            ]);
-        }
-        DrawTool::Arrow => {
-            groups.push(vec![
-                (FluentAction::SetStrokeWidth(2.0), 30.0),
-                (FluentAction::SetStrokeWidth(4.0), 30.0),
-                (FluentAction::SetStrokeWidth(8.0), 30.0),
-                (FluentAction::SetStrokeWidth(14.0), 34.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetArrowStyle(ArrowStyle::Single), 36.0),
-                (FluentAction::SetArrowStyle(ArrowStyle::Double), 42.0),
-                (FluentAction::SetArrowStyle(ArrowStyle::Dimension), 44.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetArrowHead(ArrowHead::Triangle), 30.0),
-                (FluentAction::SetArrowHead(ArrowHead::Open), 30.0),
-                (FluentAction::SetArrowHead(ArrowHead::Circle), 30.0),
-                (FluentAction::SetArrowHead(ArrowHead::Diamond), 30.0),
-                (FluentAction::SetArrowHead(ArrowHead::Bar), 30.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetStrokePattern(StrokePattern::Solid), 32.0),
-                (FluentAction::SetStrokePattern(StrokePattern::Dashed), 34.0),
-                (FluentAction::SetStrokePattern(StrokePattern::Dotted), 34.0),
-            ]);
-        }
-        DrawTool::StepBadge => {
-            groups.push(vec![
-                (FluentAction::SetBadgeSize(BadgeSize::Small), 30.0),
-                (FluentAction::SetBadgeSize(BadgeSize::Medium), 30.0),
-                (FluentAction::SetBadgeSize(BadgeSize::Large), 30.0),
-                (FluentAction::SetBadgeSize(BadgeSize::ExtraLarge), 34.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetBadgeShape(BadgeShape::Circle), 32.0),
-                (FluentAction::SetBadgeShape(BadgeShape::Square), 32.0),
-                (FluentAction::SetBadgeShape(BadgeShape::Hexagon), 32.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetFillMode(FillMode::None), 40.0),
-                (FluentAction::SetFillMode(FillMode::Tinted), 40.0),
-                (FluentAction::SetFillMode(FillMode::Solid), 40.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetStrokeWidth(2.0), 28.0),
-                (FluentAction::SetStrokeWidth(4.0), 28.0),
-                (FluentAction::SetStrokeWidth(6.0), 28.0),
-            ]);
-            groups.push(vec![(FluentAction::ResetBadgeCounter, 54.0)]);
-        }
-        DrawTool::Pen | DrawTool::Highlighter => {
-            groups.push(vec![
-                (FluentAction::SetStrokeWidth(2.0), 28.0),
-                (FluentAction::SetStrokeWidth(4.0), 28.0),
-                (FluentAction::SetStrokeWidth(8.0), 28.0),
-                (FluentAction::SetStrokeWidth(14.0), 28.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetStrokePattern(StrokePattern::Solid), 32.0),
-                (FluentAction::SetStrokePattern(StrokePattern::Dashed), 32.0),
-            ]);
-        }
-        DrawTool::Text => {
-            groups.push(vec![
-                (FluentAction::SetFontSize(14.0), 34.0),
-                (FluentAction::SetFontSize(20.0), 34.0),
-                (FluentAction::SetFontSize(28.0), 34.0),
-                (FluentAction::SetFontSize(38.0), 36.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::ToggleBold, 30.0),
-                (FluentAction::ToggleItalic, 30.0),
-            ]);
-            groups.push(vec![
-                (
-                    FluentAction::SetTextCardStyle(TextCardStyle::Transparent),
-                    44.0,
-                ),
-                (FluentAction::SetTextCardStyle(TextCardStyle::Badge), 48.0),
-                (FluentAction::SetTextCardStyle(TextCardStyle::Solid), 46.0),
-            ]);
-            groups.push(vec![
-                (FluentAction::SetFontFamily(TextFontFamily::SegoeUI), 42.0),
-                (
-                    FluentAction::SetFontFamily(TextFontFamily::CascadiaCode),
-                    46.0,
-                ),
-            ]);
-        }
-        DrawTool::Blur => {
-            groups.push(vec![
-                (FluentAction::SetStrokeWidth(8.0), 38.0),
-                (FluentAction::SetStrokeWidth(14.0), 44.0),
-                (FluentAction::SetStrokeWidth(22.0), 44.0),
-                (FluentAction::SetStrokeWidth(32.0), 44.0),
-            ]);
-        }
-        _ => {}
-    }
-    groups
-}
-
-/// The commands that only make sense on something already drawn.
-///
-/// Unlike a property control, none of these has a "default for the next
-/// shape" meaning: you cannot pre-set *align*.
-fn select_command_groups() -> Vec<Vec<(FluentAction, f32)>> {
-    let groups: Vec<Vec<(FluentAction, f32)>> = vec![
-        vec![
-            (FluentAction::Align(AlignTo::Left), 30.0),
-            (FluentAction::Align(AlignTo::HCentre), 30.0),
-            (FluentAction::Align(AlignTo::Right), 30.0),
-            (FluentAction::Align(AlignTo::Top), 30.0),
-            (FluentAction::Align(AlignTo::VCentre), 30.0),
-            (FluentAction::Align(AlignTo::Bottom), 30.0),
-        ],
-        vec![
-            (FluentAction::Distribute(true), 30.0),
-            (FluentAction::Distribute(false), 30.0),
-        ],
-        vec![
-            (FluentAction::Restack(false), 30.0),
-            (FluentAction::Restack(true), 30.0),
-        ],
-        vec![
-            (FluentAction::SetGroup(true), 30.0),
-            (FluentAction::SetGroup(false), 30.0),
-        ],
-        vec![
-            (FluentAction::AdjustOpacity(-0.1), 30.0),
-            (FluentAction::AdjustOpacity(0.1), 30.0),
-        ],
-        vec![
-            (FluentAction::Duplicate, 30.0),
-            (FluentAction::DeleteSelection, 30.0),
-        ],
-    ];
-    groups
 }

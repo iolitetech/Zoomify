@@ -1160,8 +1160,7 @@ pub fn pressure_stroke_figures(
             Point2D::new(a.x - nx, a.y - ny),
         ]);
     }
-    for i in 0..n {
-        let c = points[i];
+    for (i, &c) in points.iter().enumerate() {
         if !finite(&c) {
             continue;
         }

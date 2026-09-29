@@ -1067,7 +1067,6 @@ struct FNum(f32);
 impl std::fmt::Display for FNum {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if !self.0.is_finite() {
-            eprintln!("svg_export: refusing to write non-finite value {}", self.0);
             return write!(f, "0");
         }
         let r = (self.0 * 1000.0).round() / 1000.0;
@@ -1281,11 +1280,11 @@ mod tests {
     fn test_mosaic_tiles_averages_a_solid_colour_region_to_itself() {
         // A 4x4 solid-red native bitmap, DIP-space rect covering it exactly.
         let mut bg = vec![0u8; 4 * 4 * 4];
-        for px in bg.chunks_exact_mut(4) {
+        for px in bg.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[10, 20, 30, 255]);
         }
         let tiles = mosaic_tiles(&bg, 4, 4, 0.0, 0.0, 4.0, 4.0, 1.0, 2, 2).unwrap();
-        for px in tiles.chunks_exact(4) {
+        for px in tiles.as_chunks::<4>().0 {
             assert_eq!(px, &[10, 20, 30, 255]);
         }
     }
